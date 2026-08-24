@@ -161,7 +161,7 @@ private extension PDFKitView {
         coordinator.selectedAnnotation = $selectedAnnotation
         coordinator.annotationEditingEnabled = annotationEditingEnabled
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
-        coordinator.refreshOverlay()
+        coordinator.updateGestureAvailability()
     }
 
     func applyViewerMode(to pdfView: PDFView) {
@@ -415,8 +415,21 @@ extension PDFKitView {
             handleLayers.forEach { $0.isHidden = hidden }
         }
 
-        private func updateGestureAvailability() {
+        func updateGestureAvailability() {
+#if os(macOS)
+            for gesture in gestures {
+                if gesture is NSClickGestureRecognizer {
+                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
+                } else if gesture is NSRotationGestureRecognizer {
+                    gesture.isEnabled = objectEditingEnabled
+                } else {
+                    gesture.isEnabled = objectEditingEnabled ||
+                        (annotationEditingEnabled && selectedAnnotation.wrappedValue != nil)
+                }
+            }
+#else
             gestures.forEach { $0.isEnabled = objectEditingEnabled || annotationEditingEnabled }
+#endif
             refreshOverlay()
         }
 
@@ -439,7 +452,7 @@ extension PDFKitView {
                 if selectedAnnotation.wrappedValue != nil {
                     selectedPageIndex.wrappedValue = pageIndex
                 }
-                refreshOverlay()
+                updateGestureAvailability()
                 return
             }
             guard objectEditingEnabled else { return }

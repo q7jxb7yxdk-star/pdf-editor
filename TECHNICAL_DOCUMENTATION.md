@@ -2,7 +2,7 @@
 
 ## 1. System overview
 
-PDF Editor is a SwiftUI `DocumentGroup` application for iOS, iPadOS, and macOS. `PDFEditorDocument` is the document-lifecycle and mutation owner. The normal path uses:
+PDF Editor is a SwiftUI `DocumentGroup` application for iOS, iPadOS, and macOS. `PDFEditorDocument` is the document-lifecycle and mutation owner, while explicit cross-platform saving is coordinated separately from edit-time UI observation. The normal path uses:
 
 - PDFKit for document presentation, selection, thumbnails, annotations, and a secondary in-memory view of the current bytes.
 - A local `PDFiumBridge` Swift package for the primary editing session and page-object mutations.
@@ -19,6 +19,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | `PDF_EditorApp` → `DocumentGroup` → `PDFEditorDocument` → `ContentView` | Implemented | Normal application composition. |
 | `PDFEditorDocument` → `PDFiumEditingEngine` | Implemented | Primary editing path for new and unlocked documents. |
 | PDFKit display and annotation mutation | Implemented | The visible document is refreshed from serialized editing-session bytes. Annotation changes begin in PDFKit and are then reopened and verified. |
+| Explicit save | Implemented | macOS and iOS expose a Save toolbar action; macOS also replaces File → Save and Command-S with the same action. Edit-time refreshes do not publish a new `ReferenceFileDocument` snapshot. |
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
 | Full page-order and metadata UI | Inactive | Commands exist in the engine surface, but `ContentView` does not expose them directly. |
@@ -26,7 +27,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 
 ## 2. Architecture
 
-The app separates platform-neutral editing commands from concrete PDF engines, while the document object coordinates PDFium, PDFKit, SwiftUI document saving, and undo.
+The app separates platform-neutral editing commands from concrete PDF engines. The document object coordinates PDFium, PDFKit, persisted/working bytes, and undo; `ContentView` and `ManualPDFSaveCoordinator` own explicit save initiation and file replacement.
 
 ```mermaid
 flowchart TD
@@ -47,21 +48,23 @@ flowchart TD
     Annotation --> PDFKitDoc
     UI --> Image[PlatformImageConverter]
     Image --> Session
+    UI --> Save[ManualPDFSaveCoordinator]
+    Save --> File[User-selected PDF file]
 ```
 
 ### Layers and dependency direction
 
 1. **Application composition**: `PDF_EditorApp.swift` creates a `DocumentGroup` and injects each `PDFEditorDocument` into `ContentView`.
-2. **Presentation**: `ContentView.swift` and `FeatureViews.swift` own transient UI state and invoke document methods. `PDFKitView.swift` bridges SwiftUI to `PDFView` on AppKit and UIKit.
-3. **Document coordination**: `PDFEditorDocument.swift` owns source bytes, the PDFium session, the PDFKit display document, password authorization, save policy, signature consent, and Undo registration.
+2. **Presentation**: `ContentView.swift` and `FeatureViews.swift` own transient UI state, the hidden-by-default Tools panel, Comment List, explicit Save action, and document operations. `PDFKitView.swift` bridges SwiftUI to `PDFView` on AppKit and UIKit.
+3. **Document coordination**: `PDFEditorDocument.swift` owns source bytes, the last explicitly persisted bytes, the PDFium session, the PDFKit display document, password authorization, save policy, signature consent, and Undo registration.
 4. **Core abstraction**: `PDFEditingEngine.swift` defines platform-neutral metadata, page commands, results, errors, and the engine/session protocols.
 5. **Concrete engines**: `PDFiumEditingEngine.swift` is primary. `PDFKitEditingEngine.swift` is a limited alternate implementation and a metadata helper.
-6. **Services**: OCR, CoreText shaping, image conversion, and annotation logic are isolated services but are constructed directly rather than injected.
+6. **Services**: Coordinated manual file replacement, OCR, CoreText shaping, image conversion, and annotation logic are isolated services but are constructed directly rather than injected.
 7. **Native bridge**: the `CPDFiumBridge` C target adapts Swift-compatible functions to the bundled PDFium C API and locally patched object-editing functions.
 
 ### Composition and lifecycle ownership
 
-- SwiftUI owns the `ReferenceFileDocument` lifecycle.
+- SwiftUI owns the `ReferenceFileDocument` lifecycle, but normal edits notify a nested `EditorState` rather than the document object's publisher. Its snapshot remains the last explicitly persisted bytes until Save succeeds.
 - `PDFEditorDocument` owns an `any PDFEditingSession` and the corresponding PDFKit `PDFDocument` used by the UI.
 - `PDFiumEditingSession` owns one opaque C document handle. It closes the handle on deinitialization.
 - `PDFiumRuntime.shared` initializes the PDFium library once and destroys it when the process-level singleton is deinitialized.
@@ -77,17 +80,18 @@ There is protocol-based engine separation, but no application-level dependency-i
 | Path | Responsibility |
 | --- | --- |
 | `PDF Editor/PDF_EditorApp.swift` | Application entry point and document scene. |
-| `PDF Editor/ContentView.swift` | Main editor UI, toolbar commands, imports/exports, OCR workflow, protected merge flow, and transient view state. |
-| `PDF Editor/FeatureViews.swift` | Protected-PDF password sheet, OCR result views, object inspector, signature pad, and annotation inspector. |
+| `PDF Editor/ContentView.swift` | Main editor UI, hidden/toggleable Tools panel, Comment List integration, explicit Save toolbar action, imports/exports, OCR workflow, protected merge flow, and transient view state. |
+| `PDF Editor/FeatureViews.swift` | English tool panels, Comment List, protected-PDF password sheet, OCR result views, object inspector, signature pad, and annotation inspector. |
 | `PDF Editor/Core/PDFEditingEngine.swift` | Engine/session protocols, page command model, metadata model, export policy, and shared errors. |
 | `PDF Editor/Core/PDFiumEditingEngine.swift` | Primary page and page-object engine, native handle management, verification, rollback, permissions, text fallback, images, and annotation-color bridge. |
 | `PDF Editor/Core/PDFKitEditingEngine.swift` | Page-level PDFKit implementation and metadata mutation helper. |
 | `PDF Editor/Core/PDFAnnotationModel.swift` | Annotation references, kinds, colors, snapshots, and partial updates. |
-| `PDF Editor/Document/PDFEditorDocument.swift` | Document persistence, active engine, PDFKit refresh, mutation transaction boundary, Undo/Redo, security options, OCR insertion, and annotation round-trip verification. |
+| `PDF Editor/Document/PDFEditorDocument.swift` | Persisted/working byte separation, active engine, PDFKit refresh, unsaved-state tracking, mutation transaction boundary, Undo/Redo, security options, OCR insertion, and annotation round-trip verification. |
 | `PDF Editor/Document/PDFExportDocument.swift` | `FileDocument` wrapper for split/export bytes and preferred filenames. |
 | `PDF Editor/Platform/PDFKitView.swift` | AppKit/UIKit `PDFView` bridge, selection synchronization, and direct object/annotation manipulation overlays. |
 | `PDF Editor/Platform/PageThumbnailView.swift` | PDFKit thumbnail rendering for the page sidebar. |
 | `PDF Editor/Services/CoreTextShapingService.swift` | Font coverage analysis, complex-script detection, and CoreText PDF overlay creation. |
+| `PDF Editor/Services/ManualPDFSaveCoordinator.swift` | Security-scoped, `NSFileCoordinator`-protected replacement writes plus the focused macOS File → Save command. |
 | `PDF Editor/Services/PDFAnnotationService.swift` | Annotation creation, resolution, mutation, geometry transformation, snapshotting, and verification. |
 | `PDF Editor/Services/PlatformImageConverter.swift` | ImageIO decode, size limiting, orientation handling, BGRA conversion, and alpha unpremultiplication. |
 | `PDF Editor/Services/VisionOCRService.swift` | Selectable-text policy, rendering, Vision recognition, batch processing, and rotation-aware coordinate conversion. |
@@ -120,9 +124,12 @@ There is protocol-based engine separation, but no application-level dependency-i
    - serialize the result, reopen it, and refresh the PDFKit display document;
    - restore the prior bytes if the operation or refresh fails;
    - register Undo using the prior serialized bytes.
-6. SwiftUI requests a snapshot for saving. The editing session serializes with either preserve-security or remove-security policy.
+6. `EditorState` publishes the refreshed display revision and marks the working document unsaved. `PDFEditorDocument.objectWillChange` is not emitted for ordinary edits, and `snapshot(contentType:)` continues returning `persistedData`, the last explicitly saved bytes.
+7. The Save toolbar action on macOS or iOS, or File → Save/Command-S on macOS, asks the editing session for bytes using the preserve-security or remove-security policy.
+8. An existing file is replaced through `ManualPDFSaveCoordinator`, which uses security-scoped access, `NSFileCoordinator`, and an atomic `Data.write`. A new document uses SwiftUI's PDF file exporter to obtain its first URL.
+9. Only after the write or export succeeds does `markManuallySaved(data:)` advance `persistedData`, update `sourceData`, and clear the unsaved flag.
 
-The in-memory `sourceData` is the bytes used for initial unlock and rollback bookkeeping. The file on disk is changed only through the SwiftUI document save lifecycle.
+The in-memory `sourceData` supports unlock and rollback bookkeeping. Working edits remain in the PDFium/PDFKit session until an explicit Save succeeds; normal editing does not write them to disk.
 
 ### 4.2 Page operations
 
@@ -167,6 +174,8 @@ The fallback is a new searchable vector layer, not preservation of the original 
 ### 4.6 Annotation flow
 
 - PDFKit creates notes, free text, highlights, and ink signatures.
+- Annotation selection is enabled whenever object editing is not active, so clicking a supported annotation selects it without a separate Edit annotations toolbar mode.
+- Edit comment in the left Tools panel opens a page-scoped Comment List. Wide layouts place it beside the Tools panel; compact layouts present it as a sheet. It reuses the same annotation editor for content, color, opacity, font size, line width, selection, and deletion.
 - Annotation identity is a page index plus annotation-array index, not a persistent PDF object identifier.
 - Update validation enforces minimum 4-point bounds, 6–144 point font sizes, and 0.5–24 point ink widths.
 - Moving or scaling ink and highlight annotations transforms their path or quadrilateral geometry with their bounds.
@@ -192,11 +201,11 @@ Cancellation is checked before rendering, inside the detached recognition task, 
 ### `PDFEditorDocument`
 
 - **Inputs**: file bytes, passwords, editing commands, page-object/annotation operations, OCR observations, save policy.
-- **Outputs**: published PDFKit document, metadata properties, exported bytes, split documents, typed errors.
+- **Outputs**: PDFKit display document, nested editor revision/unsaved state, explicit-save bytes, metadata properties, split documents, typed errors.
 - **Dependencies**: PDFKit, `PDFiumEditingEngine`, `PDFAnnotationService`, bundled font, SwiftUI document APIs, UndoManager.
-- **Ownership**: active session, display document, source bytes, authorized password, signature-consent flag, save security flag.
+- **Ownership**: active session, display document, source bytes, last explicitly persisted bytes, authorized password, signature-consent flag, save security flag.
 
-It is the transaction boundary. Presentation code does not own native PDFium handles or write files directly.
+It is the mutation transaction boundary. Presentation code does not own native PDFium handles; `ContentView` requests explicit-save bytes and delegates existing-file replacement to `ManualPDFSaveCoordinator`.
 
 ### `PDFiumEditingSession`
 
@@ -263,11 +272,12 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, editing modes, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. This state is neither persisted nor versioned by application code.
+`ContentView` holds transient state for selected page/text/object/annotation, editing modes, Tools/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. This state is neither persisted nor versioned by application code.
 
 ### Persistence and storage boundaries
 
-- PDF bytes are persisted through `ReferenceFileDocument` and SwiftUI file wrappers.
+- `ReferenceFileDocument.snapshot(contentType:)` exposes only `persistedData`; ordinary edits update the nested observable `EditorState` and do not advance that snapshot.
+- Existing PDFs are written only by an explicit Save through coordinated atomic replacement. A new document's first Save uses a SwiftUI file exporter, after which later Saves target the selected URL.
 - Undo/Redo snapshots are complete serialized PDF `Data` values held in memory.
 - Passwords and pending protected-merge bytes are held in memory for the active view/document.
 - No database, cache directory, UserDefaults schema, Keychain item, cloud state, migration, or application data-version field exists.
@@ -317,13 +327,13 @@ No external requests exist in reviewed source. Accordingly, there is no network 
 
 ### Time and locale
 
-Annotation modification dates use `Date()` and PDF document metadata can carry creation/modification dates. There is no timezone normalization, business-session logic, or locale-specific parsing. UI strings are mostly Traditional Chinese literals.
+Annotation modification dates use `Date()` and PDF document metadata can carry creation/modification dates. There is no timezone normalization, business-session logic, or locale-specific parsing. UI strings are hard-coded English literals.
 
 ## 8. External dependencies
 
 | Dependency | Version/source | Required | Purpose | Verification boundary |
 | --- | --- | --- | --- | --- |
-| SwiftUI and Apple document APIs | Xcode SDK; no independent version pin | Required | App lifecycle, UI, document import/export, sheets, alerts, Undo integration | Compile-time availability is build-verifiable; UI behavior needs runtime/manual testing. |
+| SwiftUI and Apple document APIs | Xcode SDK; no independent version pin | Required | App lifecycle, UI, document open/new flow, first-save export, focused commands, sheets, alerts, Undo integration | Compile-time availability is build-verifiable; UI behavior needs runtime/manual testing. |
 | PDFKit | Apple SDK | Required | Display, selection, annotations, metadata helper, search verification | Source-integrated; complex PDF compatibility requires corpus/runtime testing. |
 | Vision | Apple SDK | Optional feature | Local OCR | Source-integrated; recognition quality and language behavior require real documents/devices. |
 | CoreText/CoreGraphics | Apple SDK | Required for fallback/OCR layers | Font analysis and vector PDF overlay generation | Testable with included corpus, but not all scripts/fonts/layouts are covered. |
@@ -379,6 +389,8 @@ No environment variables, feature-flag files, runtime modes, API keys, secret fi
 
 `ContentView` presents most failures in a generic operation alert using localized error descriptions. Protected merge keeps its error in the sheet and clears the password field after an attempt. Signature consent uses a dedicated warning and requires the user to retry the original mutation.
 
+Explicit replacement saves propagate file-coordination or atomic-write errors to the same operation alert and retain the unsaved working state. Cancelling the first-save exporter is treated as cancellation rather than an error and also leaves the document unsaved.
+
 ### Recovery
 
 - PDFium mutations commonly serialize prior bytes and restore the handle on failure.
@@ -400,7 +412,7 @@ The absence of first-party logging does not establish behavior inside Apple fram
 
 - Build settings enable the App Sandbox and read/write access to user-selected files.
 - Imports use `startAccessingSecurityScopedResource()` and stop access after reading.
-- Document persistence is delegated to SwiftUI's file-document infrastructure.
+- SwiftUI retains the document open/new lifecycle and first-save exporter. Existing-file persistence is an explicit security-scoped, file-coordinated replacement initiated from Save.
 
 These are source/build-setting facts. Sandbox enforcement, final entitlements, signing, notarization, and distribution behavior require inspection of the built signed application.
 
@@ -411,7 +423,7 @@ These are source/build-setting facts. Sandbox enforcement, final entitlements, s
 - A protected merge password is held in transient view state and cleared after success or failure.
 - No deliberate file, UserDefaults, database, or Keychain persistence of passwords was found.
 - There is no secure-memory allocation, memory locking, or explicit zeroization guarantee.
-- Normal saves request security preservation.
+- Explicit Saves request security preservation by default.
 - Password removal requires separate confirmation for an unlocked encrypted document. PDFium uses `FPDF_REMOVE_SECURITY`, and the output is rejected if PDFKit still reports it encrypted.
 - The removal flag persists for the open document until the user disables it; it is not automatically reset after one save.
 - Split documents are newly assembled outputs opened without a password, so they are not governed by the save-time password-removal confirmation.
@@ -545,7 +557,7 @@ The builds establish compilation and bundle construction for those destinations.
 - The app has no app-level unit or UI test target; most automated coverage is below the document/UI layer.
 - Standalone validations require manual compile commands and are not orchestrated by CI.
 - The repository has no CI, formatter, linter, dedicated static-analysis command, or tool-version file.
-- The UI is primarily hard-coded Traditional Chinese and lacks checked-in localization resources.
+- The UI is hard-coded English and lacks checked-in localization resources.
 - `PDFEditorDocument` directly constructs engines and services, limiting dependency substitution in app-level tests.
 - Whole-document byte snapshots make rollback simple but can consume significant memory for large PDFs and Undo histories.
 - Batch OCR is sequential and has no capacity-aware queue, partial checkpointing, or recognition cache.

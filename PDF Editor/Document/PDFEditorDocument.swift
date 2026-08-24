@@ -7,14 +7,33 @@ import UniformTypeIdentifiers
 final class PDFEditorDocument: ReferenceFileDocument {
     typealias Snapshot = Data
 
+    final class EditorState: ObservableObject {
+        @Published private(set) var revision = 0
+        @Published private(set) var hasUnsavedChanges = false
+
+        fileprivate func documentDidChange(markingUnsaved: Bool) {
+            revision &+= 1
+            if markingUnsaved {
+                hasUnsavedChanges = true
+            }
+        }
+
+        fileprivate func markSaved() {
+            hasUnsavedChanges = false
+        }
+    }
+
     static let readableContentTypes: [UTType] = [.pdf]
     static let writableContentTypes: [UTType] = [.pdf]
 
-    @Published private(set) var pdfDocument: PDFDocument
-    @Published private(set) var removesPasswordProtectionOnSave = false
+    let editorState = EditorState()
+
+    private(set) var pdfDocument: PDFDocument
+    private(set) var removesPasswordProtectionOnSave = false
 
     private var editingSession: (any PDFEditingSession)?
     private var sourceData: Data
+    private var persistedData: Data
     private var authorizedPassword: String?
     private var allowsInvalidatingDigitalSignatures = false
 
@@ -41,6 +60,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     init() {
         let data = Self.makeBlankPDF()
         sourceData = data
+        persistedData = data
         authorizedPassword = nil
         pdfDocument = PDFDocument(data: data) ?? PDFDocument()
         editingSession = try? PDFiumEditingEngine().makeSession(data: data, password: nil)
@@ -53,6 +73,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
 
         sourceData = data
+        persistedData = data
         authorizedPassword = nil
         pdfDocument = document
         if !document.isLocked {
@@ -61,20 +82,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     func snapshot(contentType: UTType) throws -> Data {
-        if let editingSession {
-            return try editingSession.dataRepresentation(
-                options: PDFExportOptions(
-                    securityPolicy: removesPasswordProtectionOnSave
-                        ? .removeAfterAuthorizedUnlock
-                        : .preserve
-                )
-            )
-        }
-
-        guard let data = pdfDocument.dataRepresentation() else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        return data
+        persistedData
     }
 
     func fileWrapper(
@@ -91,11 +99,36 @@ final class PDFEditorDocument: ReferenceFileDocument {
         )
         editingSession = session
         authorizedPassword = password
-        try refreshPDFKitDocument()
+        try refreshPDFKitDocument(markingUnsaved: false)
     }
 
     func setRemovesPasswordProtectionOnSave(_ removesProtection: Bool) {
+        guard removesPasswordProtectionOnSave != removesProtection else { return }
         removesPasswordProtectionOnSave = removesProtection
+        editorState.documentDidChange(markingUnsaved: true)
+    }
+
+    func dataForManualSave() throws -> Data {
+        if let editingSession {
+            return try editingSession.dataRepresentation(
+                options: PDFExportOptions(
+                    securityPolicy: removesPasswordProtectionOnSave
+                        ? .removeAfterAuthorizedUnlock
+                        : .preserve
+                )
+            )
+        }
+
+        guard let data = pdfDocument.dataRepresentation() else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return data
+    }
+
+    func markManuallySaved(data: Data) {
+        persistedData = data
+        sourceData = data
+        editorState.markSaved()
     }
 
     @discardableResult
@@ -507,7 +540,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let result: Result
         do {
             result = try mutation()
-            try refreshPDFKitDocument()
+            try refreshPDFKitDocument(markingUnsaved: true)
         } catch {
             if let session = try? PDFiumEditingEngine().makeSession(
                 data: previousData,
@@ -515,7 +548,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             ) {
                 editingSession = session
                 sourceData = previousData
-                try? refreshPDFKitDocument()
+                try? refreshPDFKitDocument(markingUnsaved: false)
             }
             throw error
         }
@@ -547,7 +580,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
         editingSession = session
         sourceData = data
-        try? refreshPDFKitDocument()
+        try? refreshPDFKitDocument(markingUnsaved: true)
         undoManager.registerUndo(withTarget: self) { document in
             document.restore(
                 data: redoData,
@@ -568,7 +601,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         return data
     }
 
-    private func refreshPDFKitDocument() throws {
+    private func refreshPDFKitDocument(markingUnsaved: Bool) throws {
         let data = try currentData()
         guard let document = PDFDocument(data: data) else {
             throw PDFEditingError.invalidDocument
@@ -580,6 +613,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             }
         }
         pdfDocument = document
+        editorState.documentDidChange(markingUnsaved: markingUnsaved)
     }
 
     private static func makeBlankPDF() -> Data {

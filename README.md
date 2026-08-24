@@ -19,7 +19,8 @@ This repository uses the following terms:
 
 ### Implemented
 
-- Open, display, edit, save, and create PDF documents through SwiftUI's document architecture.
+- Open, display, edit, and create PDF documents through SwiftUI's document architecture. Edits remain in memory until the user selects the cross-platform Save toolbar action; macOS also provides File → Save and Command-S.
+- Start each document with the left Tools panel hidden and toggle it from the toolbar. The English tool workspace groups text/annotation, page, organization, export, e-signature, and security actions alongside the right-side viewing controls.
 - Navigate pages with PDF thumbnails.
 - Insert an A4 page, delete a page, rotate a page, and move a page one position at a time.
 - Merge another PDF at the end of the open document, including a password-protected source after password entry.
@@ -28,11 +29,11 @@ This repository uses the following terms:
 - Add text and images; replace existing text and images; move, scale, rotate, reorder, and delete supported page objects.
 - Preserve an existing text object's font when it covers the replacement text and does not require advanced shaping. Otherwise, create a CoreText-rendered searchable replacement layer using the bundled Unicode font.
 - Add notes, free-text annotations, highlights, and ink-based handwritten signatures.
-- Select, move, resize, edit supported properties of, and delete annotations. Style changes are intentionally disabled for annotations with fixed appearance streams.
+- Select annotations directly on the page without a separate annotation-editing mode; move, resize, edit supported properties of, and delete them. The left-panel Edit comment action opens a page-scoped Comment List for the same editing operations. Style changes are intentionally disabled for annotations with fixed appearance streams.
 - Run on-device Vision text recognition on one page or all scanned pages. Pages that already contain selectable text are skipped, and recognized text is reviewed before an invisible searchable text layer is added.
 - Unlock encrypted PDFs and preserve encryption during ordinary saves. Password removal is an explicit save option for an already unlocked document.
 - Detect the presence of PDF signature objects and require confirmation before the first in-place mutation that may invalidate them.
-- Register document mutations with the platform Undo manager.
+- Register document mutations with a dedicated in-memory Undo manager.
 
 ### Experimental or inactive paths
 
@@ -113,7 +114,7 @@ PDF Editor/                       SwiftUI application source and resources
   Core/                           Editing protocols, models, and PDFKit/PDFium engines
   Document/                       ReferenceFileDocument and split/export wrappers
   Platform/                       PDFKit platform bridge and page thumbnails
-  Services/                       Annotation, OCR, shaping, and image conversion services
+  Services/                       Explicit saving, annotation, OCR, shaping, and image conversion services
   Assets.xcassets/                App icons and accent color
 Packages/PDFiumBridge/            Local C bridge, binary PDFium dependency, and XCTest suite
 Validation/                       Standalone local validation and fixture-generation programs
@@ -139,7 +140,7 @@ No repository configuration was found for UI tests, CI, linting, formatting, typ
 
 ## Known limitations
 
-- The user interface is currently written primarily in Traditional Chinese and no string catalog or other localization source is checked in.
+- The user interface is currently hard-coded in English and no string catalog or other localization source is checked in.
 - App builds target only iOS/iPadOS and macOS. The bundled PDFium XCFramework also contains a Mac Catalyst slice, but Mac Catalyst is not an app target platform.
 - OCR is a local Vision workflow, not a full document-layout reconstruction system. It skips any page with nonempty selectable text and processes remaining pages sequentially.
 - Imported images are decoded with ImageIO and capped at 8,192 pixels on their longest dimension. The normal UI imports a flattened BGRA representation.
@@ -170,6 +171,7 @@ Verified in this documentation task on 2026-08-24:
 - Protected-PDF fixture self-validation passed.
 - Phase-six corpus acceptance passed for the 120-page, mixed selectable/scanned content, rotated, protected, and truncated cases.
 - Unsigned Debug builds succeeded for macOS, generic iOS Simulator, and generic iOS device destinations.
+- The latest explicit-save and panel changes were revalidated with unsigned Debug builds for macOS and the generic iOS Simulator destination.
 - The four checked-in PDFium binary SHA-256 values matched `Packages/PDFiumBridge/Vendor/NOTICE.md`.
 
 The exact commands and boundaries are recorded in `TECHNICAL_DOCUMENTATION.md`. No app UI test, manual visual inspection, physical-device run, signed build, archive, installation, or external-service validation was performed. Source and compile evidence do not establish App Store compliance, PDFium reproducibility, third-party vulnerability status, or complete license compliance.

@@ -3,6 +3,7 @@ import SwiftUI
 
 enum PDFToolAction {
     case addComment
+    case editComments
     case highlight
     case drawFreehand
     case eraseDrawing
@@ -59,6 +60,12 @@ struct PDFToolSidebar: View {
                 VStack(spacing: 0) {
                     section("Edit text") {
                         tool("Add a comment", icon: "note.text.badge.plus", action: .addComment)
+                        tool(
+                            "Edit comment",
+                            icon: "text.bubble",
+                            action: .editComments,
+                            enabled: hasSelectedPage
+                        )
                         tool("Highlight", icon: "highlighter", action: .highlight, enabled: hasTextSelection)
                         tool("Draw freehand", icon: "pencil.and.outline", action: .drawFreehand)
                         tool("Erase a drawing", icon: "eraser", action: .eraseDrawing)
@@ -161,6 +168,63 @@ struct PDFToolSidebar: View {
         }
         .menuStyle(.borderlessButton)
         .disabled(!hasSelectedPage)
+    }
+}
+
+struct PDFCommentList: View {
+    let annotations: [PDFAnnotationSnapshot]
+    let pageNumber: Int?
+    @Binding var selectedAnnotation: PDFAnnotationSnapshot?
+    let onApply: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
+    let onDelete: (PDFAnnotationSnapshot) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "text.bubble")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Comment List")
+                        .font(.headline)
+                    if let pageNumber {
+                        Text("Page \(pageNumber)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .help("Close Comment List")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+
+            Divider()
+
+            List(annotations) { annotation in
+                AnnotationEditorRow(
+                    annotation: annotation,
+                    isSelected: selectedAnnotation?.reference == annotation.reference,
+                    onSelect: { selectedAnnotation = annotation },
+                    onApply: { onApply(annotation, $0) },
+                    onDelete: { onDelete(annotation) }
+                )
+            }
+            .listStyle(.inset)
+            .overlay {
+                if annotations.isEmpty {
+                    ContentUnavailableView(
+                        "No comments on this page",
+                        systemImage: "text.bubble"
+                    )
+                }
+            }
+        }
+        .background(.background)
     }
 }
 

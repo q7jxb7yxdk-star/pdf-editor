@@ -22,9 +22,11 @@ private enum FileImportPurpose: Equatable {
 }
 
 struct ContentView: View {
-    @ObservedObject var document: PDFEditorDocument
+    let document: PDFEditorDocument
 
-    @Environment(\.undoManager) private var undoManager
+    @ObservedObject private var editorState: PDFEditorDocument.EditorState
+
+    @State private var editorUndoManager = UndoManager()
     @State private var selectedPageIndex: Int? = 0
     @State private var pdfSelection: PDFSelection?
     @State private var password = ""
@@ -42,9 +44,13 @@ struct ContentView: View {
     @State private var showsOCRProgress = false
     @State private var splitExportDocument: PDFExportDocument?
     @State private var splitExportDocuments: [PDFExportDocument] = []
+    @State private var manualSaveExportDocument: PDFExportDocument?
+    @State private var pendingManualSaveData: Data?
+    @State private var saveURL: URL?
+    @State private var isSaving = false
     @State private var pageAnnotations: [PDFAnnotationSnapshot] = []
     @State private var selectedAnnotation: PDFAnnotationSnapshot?
-    @State private var annotationEditingEnabled = false
+    @State private var annotationEditingEnabled = true
     @State private var newText = ""
     @State private var selectedTextDraft = ""
     @State private var showsFileImporter = false
@@ -65,32 +71,59 @@ struct ContentView: View {
     @State private var viewerCommand: PDFViewerCommand?
     @State private var unavailableTool: String?
     @State private var showsCommentPrompt = false
+    @State private var showsCommentList = false
     @State private var showsToolPanel = false
     @State private var showsViewPanel = false
+    @State private var usesInlinePanels = false
 
     private let annotationService = PDFAnnotationService()
     private let ocrService = VisionOCRService()
 
+    init(document: PDFEditorDocument, fileURL: URL?) {
+        self.document = document
+        _editorState = ObservedObject(wrappedValue: document.editorState)
+        _saveURL = State(initialValue: fileURL)
+    }
+
+    private var undoManager: UndoManager? {
+        editorUndoManager
+    }
+
+    private var canSave: Bool {
+        !isSaving && (editorState.hasUnsavedChanges || saveURL == nil)
+    }
+
     var body: some View {
         fileTransferView
+            .focusedValue(\.manualPDFSaveAction, saveDocument)
             .onDisappear { ocrBatchTask?.cancel() }
     }
 
     private var editorRoot: some View {
         GeometryReader { proxy in
-            if proxy.size.width >= 900 {
+            if proxy.size.width >= (showsCommentList ? 1180 : 900) {
                 HStack(spacing: 0) {
-                    toolSidebar
-                        .frame(width: 270)
-                    Divider()
+                    if showsToolPanel {
+                        toolSidebar
+                            .frame(width: 270)
+                        Divider()
+                    }
+                    if showsCommentList {
+                        commentList
+                            .frame(width: 320)
+                        Divider()
+                    }
                     documentView
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     Divider()
                     rightPanel
                         .frame(width: 220)
                 }
+                .onAppear { usesInlinePanels = true }
+                .onDisappear { usesInlinePanels = false }
             } else {
                 documentView
+                    .onAppear { usesInlinePanels = false }
                     .sheet(isPresented: $showsToolPanel) {
                         NavigationStack {
                             toolSidebar
@@ -114,6 +147,10 @@ struct ContentView: View {
                                 }
                         }
                         .frame(minWidth: 280, minHeight: 520)
+                    }
+                    .sheet(isPresented: $showsCommentList) {
+                        commentList
+                            .frame(minWidth: 360, minHeight: 520)
                     }
             }
         }
@@ -248,6 +285,21 @@ struct ContentView: View {
         }
         .fileExporter(
             isPresented: Binding(
+                get: { manualSaveExportDocument != nil },
+                set: {
+                    if !$0 {
+                        manualSaveExportDocument = nil
+                    }
+                }
+            ),
+            document: manualSaveExportDocument,
+            contentType: .pdf,
+            defaultFilename: "Untitled"
+        ) { result in
+            finishManualSaveExport(result)
+        }
+        .fileExporter(
+            isPresented: Binding(
                 get: { splitExportDocument != nil },
                 set: { if !$0 { splitExportDocument = nil } }
             ),
@@ -348,39 +400,50 @@ struct ContentView: View {
         )
     }
 
+    private var commentList: some View {
+        PDFCommentList(
+            annotations: pageAnnotations,
+            pageNumber: selectedPageIndex.map { $0 + 1 },
+            selectedAnnotation: $selectedAnnotation,
+            onApply: updateAnnotation,
+            onDelete: deleteAnnotation,
+            onClose: { showsCommentList = false }
+        )
+    }
+
     @ToolbarContentBuilder
     private var adaptiveToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            Button { showsToolPanel = true } label: {
+            Button(action: saveDocument) {
+                Label("Save", systemImage: "square.and.arrow.down")
+            }
+            .disabled(!canSave)
+            .help("Save")
+            Button { toggleToolPanel() } label: {
                 Label("Tools", systemImage: "wrench.and.screwdriver")
             }
+            .help("Tools")
             Button { showsViewPanel = true } label: {
                 Label("View", systemImage: "sidebar.right")
             }
+            .help("View")
             Button {
                 objectEditingEnabled.toggle()
-                annotationEditingEnabled = false
+                annotationEditingEnabled = !objectEditingEnabled
                 selectedAnnotation = nil
                 selectedObject = nil
-                if objectEditingEnabled { loadCanvasObjects() }
+                if objectEditingEnabled {
+                    loadCanvasObjects()
+                } else {
+                    loadCanvasAnnotations()
+                }
             } label: {
                 Label(
                     objectEditingEnabled ? "Finish object editing" : "Edit PDF objects",
                     systemImage: objectEditingEnabled ? "cursorarrow.rays" : "cursorarrow.click"
                 )
             }
-            Button {
-                annotationEditingEnabled.toggle()
-                objectEditingEnabled = false
-                selectedObject = nil
-                selectedAnnotation = nil
-                if annotationEditingEnabled { loadCanvasAnnotations() }
-            } label: {
-                Label(
-                    annotationEditingEnabled ? "Finish annotation editing" : "Edit annotations",
-                    systemImage: annotationEditingEnabled ? "pencil.line" : "pencil.tip.crop.circle"
-                )
-            }
+            .help(objectEditingEnabled ? "Finish object editing" : "Edit PDF objects")
             Menu {
                 Button("Recognize current page", action: runOCR)
                     .disabled(selectedPage == nil)
@@ -390,6 +453,61 @@ struct ContentView: View {
                 Label("OCR", systemImage: "viewfinder")
             }
             .disabled(isRunningOCR)
+            .help("OCR")
+        }
+    }
+
+    private func toggleToolPanel() {
+        withAnimation {
+            showsToolPanel.toggle()
+            if !showsToolPanel {
+                showsCommentList = false
+            }
+        }
+    }
+
+    private func saveDocument() {
+        guard !isSaving else { return }
+
+        do {
+            let data = try document.dataForManualSave()
+            if let saveURL {
+                isSaving = true
+                defer { isSaving = false }
+                try ManualPDFSaveCoordinator.write(data, to: saveURL)
+                document.markManuallySaved(data: data)
+            } else {
+                pendingManualSaveData = data
+                manualSaveExportDocument = PDFExportDocument(
+                    data: data,
+                    filename: "Untitled.pdf"
+                )
+                isSaving = true
+            }
+        } catch {
+            present(error)
+        }
+    }
+
+    private func finishManualSaveExport(_ result: Result<URL, Error>) {
+        defer {
+            manualSaveExportDocument = nil
+            pendingManualSaveData = nil
+            isSaving = false
+        }
+
+        switch result {
+        case let .success(url):
+            guard let pendingManualSaveData else { return }
+            saveURL = url
+            document.markManuallySaved(data: pendingManualSaveData)
+        case let .failure(error):
+            let cocoaError = error as NSError
+            guard !(cocoaError.domain == NSCocoaErrorDomain
+                    && cocoaError.code == CocoaError.userCancelled.rawValue) else {
+                return
+            }
+            present(error)
         }
     }
 
@@ -397,6 +515,15 @@ struct ContentView: View {
         switch action {
         case .addComment:
             showsCommentPrompt = true
+        case .editComments:
+            objectEditingEnabled = false
+            annotationEditingEnabled = true
+            selectedObject = nil
+            loadCanvasAnnotations()
+            if !usesInlinePanels {
+                showsToolPanel = false
+            }
+            showsCommentList = true
         case .highlight:
             addHighlight()
         case .deletePage:
@@ -512,26 +639,18 @@ struct ContentView: View {
             }
             Button {
                 objectEditingEnabled.toggle()
-                annotationEditingEnabled = false
+                annotationEditingEnabled = !objectEditingEnabled
                 selectedAnnotation = nil
                 selectedObject = nil
-                if objectEditingEnabled { loadCanvasObjects() }
+                if objectEditingEnabled {
+                    loadCanvasObjects()
+                } else {
+                    loadCanvasAnnotations()
+                }
             } label: {
                 Label(
                     objectEditingEnabled ? "Finish Object Editing" : "Edit Objects Directly",
                     systemImage: objectEditingEnabled ? "cursorarrow.rays" : "cursorarrow.click"
-                )
-            }
-            Button {
-                annotationEditingEnabled.toggle()
-                objectEditingEnabled = false
-                selectedObject = nil
-                selectedAnnotation = nil
-                if annotationEditingEnabled { loadCanvasAnnotations() }
-            } label: {
-                Label(
-                    annotationEditingEnabled ? "Finish Annotation Editing" : "Edit Annotations Directly",
-                    systemImage: annotationEditingEnabled ? "pencil.line" : "pencil.tip.crop.circle"
                 )
             }
             if annotationEditingEnabled, let selectedAnnotation {

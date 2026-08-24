@@ -123,7 +123,7 @@ final class PDFAnnotationService {
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let text = try validated(text)
-        let bounds = CGRect(origin: point, size: CGSize(width: 28, height: 28))
+        let bounds = CGRect(origin: point, size: CGSize(width: 24, height: 24))
         let annotation = PDFAnnotation(
             bounds: bounds,
             forType: .text,

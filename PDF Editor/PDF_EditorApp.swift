@@ -15,7 +15,10 @@ import AppKit
 struct PDF_EditorApp: App {
     var body: some Scene {
         DocumentGroup(newDocument: { PDFEditorDocument() }) { configuration in
-            ContentView(document: configuration.document)
+            ContentView(
+                document: configuration.document,
+                fileURL: configuration.fileURL
+            )
 #if os(macOS)
                 .background {
                     if configuration.fileURL != nil {
@@ -24,6 +27,11 @@ struct PDF_EditorApp: App {
                 }
 #endif
         }
+#if os(macOS)
+        .commands {
+            ManualPDFSaveCommands()
+        }
+#endif
     }
 }
 
