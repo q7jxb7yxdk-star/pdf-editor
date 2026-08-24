@@ -18,7 +18,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | --- | --- | --- |
 | `PDF_EditorApp` → `DocumentGroup` → `PDFEditorDocument` → `ContentView` | Implemented | Normal application composition. |
 | `PDFEditorDocument` → `PDFiumEditingEngine` | Implemented | Primary editing path for new and unlocked documents. |
-| PDFKit display and annotation mutation | Implemented | The visible document is refreshed from serialized editing-session bytes. Annotation changes begin in PDFKit and are then reopened and verified. |
+| PDFKit display and annotation mutation | Implemented | Page/object operations refresh the visible document from serialized editing-session bytes. Successful annotation mutations preserve the current PDFKit document identity while synchronizing and verifying the PDFium session; rollback and Undo/Redo rebuild from serialized bytes. |
 | Explicit save | Implemented | macOS and iOS expose a Save toolbar action; macOS also replaces File → Save and Command-S with the same action. Edit-time refreshes do not publish a new `ReferenceFileDocument` snapshot. |
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
@@ -121,7 +121,7 @@ There is protocol-based engine separation, but no application-level dependency-i
    - serialize and retain the current bytes;
    - reject the mutation when signature objects exist and consent has not been granted;
    - invoke the PDFium/PDFKit mutation;
-   - serialize the result, reopen it, and refresh the PDFKit display document;
+   - serialize the result and synchronize the editing session; page/object mutations refresh the PDFKit display document, while successful annotation mutations retain its existing identity;
    - restore the prior bytes if the operation or refresh fails;
    - register Undo using the prior serialized bytes.
 6. `EditorState` publishes the refreshed display revision and marks the working document unsaved. `PDFEditorDocument.objectWillChange` is not emitted for ordinary edits, and `snapshot(contentType:)` continues returning `persistedData`, the last explicitly saved bytes.
@@ -180,7 +180,7 @@ The fallback is a new searchable vector layer, not preservation of the original 
 - Update validation enforces minimum 4-point bounds, 6–144 point font sizes, and 0.5–24 point ink widths.
 - Moving or scaling ink and highlight annotations transforms their path or quadrilateral geometry with their bounds.
 - Fixed appearance streams allow geometry/content handling but reject style changes.
-- After a PDFKit annotation mutation, the document serializes and opens a new PDFium session, applies annotation color through the native bridge when safe, serializes again, reopens in PDFKit, and verifies kind, contents, bounds, color, font size, line width, and geometry point count.
+- After a PDFKit annotation mutation, the document serializes and opens a new PDFium session, applies annotation color through the native bridge when safe, serializes again, and verifies kind, contents, bounds, color, font size, line width, and geometry point count. The successful path retains the visible `PDFDocument` instance to avoid an Apply-time flash; failed mutations restore prior bytes and Undo/Redo continue to rebuild the display document.
 
 Because references use annotation-array indices, mutations are applied and verified synchronously against the current document. There is no migration or stable-ID layer for external annotation references.
 
@@ -547,7 +547,7 @@ The builds establish compilation and bundle construction for those destinations.
 
 - Physical iPhone/iPad execution and file-provider behavior.
 - Signed macOS application behavior, sandbox enforcement, Hardened Runtime, entitlements, signing, notarization, and App Store behavior.
-- Manual UI workflows, accessibility text sizes, Undo/Redo behavior, save/close/reopen, real password-restricted permission combinations, and visual inspection of generated pages.
+- Broad manual UI workflows, accessibility text sizes, semantic Undo/Redo verification, save/close/reopen, real password-restricted permission combinations, and visual inspection of generated pages. A scoped macOS comment Apply workflow was manually exercised on 2026-08-25.
 - OCR quality on representative scanned documents and all languages/scripts.
 - PDFium reproducibility from the recorded source revision and local patches.
 - Complete transitive notices, font-license exposure in the final bundle, export-compliance classification, and vulnerability status.

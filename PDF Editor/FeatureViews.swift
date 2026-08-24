@@ -648,6 +648,39 @@ struct AnnotationInspectorView: View {
     }
 }
 
+struct PDFCommentEditor: View {
+    let annotation: PDFAnnotationSnapshot
+    let onApply: (PDFAnnotationUpdate) -> Void
+    let onDelete: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                AnnotationEditorRow(
+                    annotation: annotation,
+                    isSelected: true,
+                    onSelect: {},
+                    onApply: onApply,
+                    onDelete: {
+                        onDelete()
+                        dismiss()
+                    }
+                )
+                .padding()
+            }
+            .navigationTitle("Comment Editor")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .frame(minWidth: 360, minHeight: 320)
+    }
+}
+
 private struct AnnotationEditorRow: View {
     let annotation: PDFAnnotationSnapshot
     let isSelected: Bool
@@ -678,6 +711,10 @@ private struct AnnotationEditorRow: View {
         _opacity = State(initialValue: Double(annotation.color.alpha))
         _fontSize = State(initialValue: Double(annotation.fontSize ?? 16))
         _lineWidth = State(initialValue: Double(annotation.lineWidth))
+    }
+
+    private var supportsStyleChanges: Bool {
+        !annotation.hasAppearanceStream || annotation.kind == .note
     }
 
     var body: some View {
@@ -715,6 +752,7 @@ private struct AnnotationEditorRow: View {
                     .buttonStyle(.plain)
                 }
             }
+            .disabled(!supportsStyleChanges)
 
             HStack {
                 Text("Opacity")
@@ -722,6 +760,7 @@ private struct AnnotationEditorRow: View {
                 Text(opacity.formatted(.percent.precision(.fractionLength(0))))
                     .frame(width: 44, alignment: .trailing)
             }
+            .disabled(!supportsStyleChanges)
 
             if annotation.kind == .freeText {
                 Stepper("Font size \(Int(fontSize)) pt", value: $fontSize, in: 6...144)
@@ -730,7 +769,7 @@ private struct AnnotationEditorRow: View {
                 Stepper("Line width \(lineWidth.formatted(.number.precision(.fractionLength(1)))) pt", value: $lineWidth, in: 0.5...24, step: 0.5)
             }
 
-            if annotation.hasAppearanceStream {
+            if !supportsStyleChanges {
                 Label("This annotation has a fixed appearance. Only moving, resizing, and content changes are allowed.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -740,14 +779,14 @@ private struct AnnotationEditorRow: View {
                 Button("Apply") {
                     onApply(PDFAnnotationUpdate(
                         contents: contents,
-                        color: annotation.hasAppearanceStream ? nil : color.withAlpha(CGFloat(opacity)),
-                        fontColor: annotation.kind == .freeText && !annotation.hasAppearanceStream
+                        color: supportsStyleChanges ? color.withAlpha(CGFloat(opacity)) : nil,
+                        fontColor: annotation.kind == .freeText && supportsStyleChanges
                             ? color.withAlpha(CGFloat(opacity))
                             : nil,
-                        fontSize: annotation.kind == .freeText && !annotation.hasAppearanceStream
+                        fontSize: annotation.kind == .freeText && supportsStyleChanges
                             ? CGFloat(fontSize)
                             : nil,
-                        lineWidth: annotation.kind == .ink && !annotation.hasAppearanceStream
+                        lineWidth: annotation.kind == .ink && supportsStyleChanges
                             ? CGFloat(lineWidth)
                             : nil
                     ))

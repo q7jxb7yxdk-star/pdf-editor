@@ -21,6 +21,11 @@ private enum FileImportPurpose: Equatable {
     }
 }
 
+private struct PDFCommentPlacement: Equatable {
+    let pageIndex: Int
+    let point: CGPoint
+}
+
 struct ContentView: View {
     let document: PDFEditorDocument
 
@@ -72,6 +77,9 @@ struct ContentView: View {
     @State private var unavailableTool: String?
     @State private var showsCommentPrompt = false
     @State private var showsCommentList = false
+    @State private var commentEditorAnnotation: PDFAnnotationSnapshot?
+    @State private var commentPlacementEnabled = false
+    @State private var pendingCommentPlacement: PDFCommentPlacement?
     @State private var showsToolPanel = false
     @State private var showsViewPanel = false
     @State private var usesInlinePanels = false
@@ -222,11 +230,11 @@ struct ContentView: View {
         }
         .alert("Add a comment", isPresented: $showsCommentPrompt) {
             TextField("Comment", text: $annotationText)
-            Button("Cancel", role: .cancel) { annotationText = "" }
-            Button("Add") { addNote() }
+            Button("Cancel", role: .cancel) { cancelCommentPlacement() }
+            Button("Add") { addNote(at: pendingCommentPlacement) }
                 .disabled(annotationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
-            Text("The comment will be placed near the center of the current page.")
+            Text("Enter the message for the selected document location.")
         }
         .alert("Feature unavailable", isPresented: Binding(
             get: { unavailableTool != nil },
@@ -257,6 +265,13 @@ struct ContentView: View {
                 selectedAnnotation: $selectedAnnotation,
                 onApply: updateAnnotation,
                 onDelete: deleteAnnotation
+            )
+        }
+        .sheet(item: $commentEditorAnnotation) { annotation in
+            PDFCommentEditor(
+                annotation: annotation,
+                onApply: { updateAnnotation(annotation, update: $0) },
+                onDelete: { deleteAnnotation(annotation) }
             )
         }
         .sheet(isPresented: $showsOCRResult) { ocrResultView }
@@ -359,23 +374,45 @@ struct ContentView: View {
                 description: Text("This document has no pages.")
             )
         } else {
-            PDFKitView(
-                document: document.pdfDocument,
-                selectedPageIndex: $selectedPageIndex,
-                selection: $pdfSelection,
-                objects: pageObjects,
-                selectedObject: $selectedObject,
-                objectEditingEnabled: objectEditingEnabled,
-                onTranslateObject: moveObject,
-                onSetObjectTransform: setObjectTransform,
-                annotations: pageAnnotations,
-                selectedAnnotation: $selectedAnnotation,
-                annotationEditingEnabled: annotationEditingEnabled,
-                onSetAnnotationBounds: setAnnotationBounds,
-                viewerMode: viewerMode,
-                viewerCommand: viewerCommand
-            )
-            .ignoresSafeArea(.container, edges: .bottom)
+            ZStack(alignment: .top) {
+                PDFKitView(
+                    document: document.pdfDocument,
+                    selectedPageIndex: $selectedPageIndex,
+                    selection: $pdfSelection,
+                    objects: pageObjects,
+                    selectedObject: $selectedObject,
+                    objectEditingEnabled: objectEditingEnabled,
+                    onTranslateObject: moveObject,
+                    onSetObjectTransform: setObjectTransform,
+                    annotations: pageAnnotations,
+                    selectedAnnotation: $selectedAnnotation,
+                    annotationEditingEnabled: annotationEditingEnabled,
+                    onSetAnnotationBounds: setAnnotationBounds,
+                    commentPlacementEnabled: commentPlacementEnabled,
+                    onPlaceComment: selectCommentPlacement,
+                    onOpenAnnotation: openAnnotation,
+                    viewerMode: viewerMode,
+                    viewerCommand: viewerCommand
+                )
+                .ignoresSafeArea(.container, edges: .bottom)
+
+                if commentPlacementEnabled {
+                    HStack(spacing: 12) {
+                        Label(
+                            "Click a location in the PDF to add a comment",
+                            systemImage: "note.text.badge.plus"
+                        )
+                        Button("Cancel", action: cancelCommentPlacement)
+                            .buttonStyle(.bordered)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 12)
+                    .shadow(radius: 4, y: 2)
+                }
+            }
         }
     }
 
@@ -395,7 +432,7 @@ struct ContentView: View {
             selectedPageIndex: $selectedPageIndex,
             viewerMode: $viewerMode,
             onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
-            onAddComment: { showsCommentPrompt = true },
+            onAddComment: beginCommentPlacement,
             onFullScreen: toggleFullScreen
         )
     }
@@ -514,7 +551,7 @@ struct ContentView: View {
     private func handleToolAction(_ action: PDFToolAction) {
         switch action {
         case .addComment:
-            showsCommentPrompt = true
+            beginCommentPlacement()
         case .editComments:
             objectEditingEnabled = false
             annotationEditingEnabled = true
@@ -699,7 +736,7 @@ struct ContentView: View {
             Menu {
                 TextField("Annotation text", text: $annotationText)
                 Button("Add Text Annotation") { addFreeText() }
-                Button("Add Comment") { addNote() }
+                Button("Add Comment", action: beginCommentPlacement)
                 Button("Highlight Selected Text") { addHighlight() }
                     .disabled(pdfSelection == nil)
                 Button("Handwritten Signature…") { showsSignaturePad = true }
@@ -1123,20 +1160,63 @@ struct ContentView: View {
         } catch { present(error) }
     }
 
-    private func addNote() {
-        guard let page = selectedPage else { return }
+    private func beginCommentPlacement() {
+        guard document.pageCount > 0 else { return }
+        objectEditingEnabled = false
+        annotationEditingEnabled = true
+        selectedObject = nil
+        selectedAnnotation = nil
+        annotationText = ""
+        pendingCommentPlacement = nil
+        commentPlacementEnabled = true
+        if !usesInlinePanels {
+            showsToolPanel = false
+            showsViewPanel = false
+        }
+    }
+
+    private func selectCommentPlacement(pageIndex: Int, point: CGPoint) {
+        pendingCommentPlacement = PDFCommentPlacement(pageIndex: pageIndex, point: point)
+        selectedPageIndex = pageIndex
+        commentPlacementEnabled = false
+        showsCommentPrompt = true
+    }
+
+    private func cancelCommentPlacement() {
+        commentPlacementEnabled = false
+        pendingCommentPlacement = nil
+        annotationText = ""
+    }
+
+    private func openAnnotation(_ annotation: PDFAnnotationSnapshot) {
+        guard annotation.kind == .note else { return }
+        commentPlacementEnabled = false
+        pendingCommentPlacement = nil
+        selectedAnnotation = annotation
+        commentEditorAnnotation = annotation
+    }
+
+    private func addNote(at placement: PDFCommentPlacement?) {
+        guard let placement,
+              let page = document.pdfDocument.page(at: placement.pageIndex) else { return }
         do {
             try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Comment") {
-                let bounds = page.bounds(for: .cropBox)
                 _ = try annotationService.addNote(
                     text: annotationText,
-                    at: CGPoint(x: bounds.midX, y: bounds.midY),
+                    at: placement.point,
                     to: page
                 )
             }
+            selectedPageIndex = placement.pageIndex
             annotationText = ""
+            pendingCommentPlacement = nil
+            commentPlacementEnabled = false
             refreshAnnotationsIfNeeded()
-        } catch { present(error) }
+        } catch {
+            pendingCommentPlacement = nil
+            commentPlacementEnabled = false
+            present(error)
+        }
     }
 
     private func addHighlight() {
@@ -1202,7 +1282,24 @@ struct ContentView: View {
     }
 
     private func setAnnotationBounds(_ annotation: PDFAnnotationSnapshot, bounds: CGRect) {
-        updateAnnotation(annotation, update: .bounds(bounds))
+        updateAnnotation(
+            annotation,
+            update: .bounds(clampedAnnotationBounds(bounds, pageIndex: annotation.reference.pageIndex))
+        )
+    }
+
+    private func clampedAnnotationBounds(_ bounds: CGRect, pageIndex: Int) -> CGRect {
+        guard let page = document.pdfDocument.page(at: pageIndex) else { return bounds }
+        let pageBounds = page.bounds(for: .cropBox).standardized
+        let standardized = bounds.standardized
+        let maximumX = max(pageBounds.minX, pageBounds.maxX - standardized.width)
+        let maximumY = max(pageBounds.minY, pageBounds.maxY - standardized.height)
+        return CGRect(
+            x: min(max(standardized.minX, pageBounds.minX), maximumX),
+            y: min(max(standardized.minY, pageBounds.minY), maximumY),
+            width: standardized.width,
+            height: standardized.height
+        )
     }
 
     private func nudgeAnnotation(

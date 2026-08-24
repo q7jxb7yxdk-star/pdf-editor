@@ -59,6 +59,22 @@ bool PEPDFAnnotationSetColor(
         blue,
         alpha
     );
+    if (!success && annotation != NULL &&
+        FPDFAnnot_GetSubtype(annotation) == FPDF_ANNOT_TEXT &&
+        FPDFAnnot_SetAP(
+            annotation,
+            FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+            NULL
+        )) {
+        success = FPDFAnnot_SetColor(
+            annotation,
+            FPDFANNOT_COLORTYPE_Color,
+            red,
+            green,
+            blue,
+            alpha
+        );
+    }
     if (annotation != NULL) {
         FPDFPage_CloseAnnot(annotation);
     }

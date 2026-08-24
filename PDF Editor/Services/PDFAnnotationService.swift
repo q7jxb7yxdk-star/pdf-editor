@@ -81,10 +81,17 @@ final class PDFAnnotationService {
         let resolved = try resolve(reference, in: document)
         let annotation = resolved.annotation
 
-        if annotation.hasAppearanceStream,
-           update.color != nil || update.fontColor != nil ||
-           update.fontSize != nil || update.lineWidth != nil {
-            throw PDFAnnotationServiceError.appearanceStreamStyleUnsupported
+        let requestsStyleChange = update.color != nil || update.fontColor != nil ||
+            update.fontSize != nil || update.lineWidth != nil
+        if annotation.hasAppearanceStream, requestsStyleChange {
+            let canRegenerateNoteAppearance = annotation.type == "Text" &&
+                update.color != nil && update.fontColor == nil &&
+                update.fontSize == nil && update.lineWidth == nil
+            guard canRegenerateNoteAppearance else {
+                throw PDFAnnotationServiceError.appearanceStreamStyleUnsupported
+            }
+            annotation.removeValue(forAnnotationKey: appearanceDictionaryKey)
+            annotation.removeValue(forAnnotationKey: appearanceStateKey)
         }
 
         if let bounds = update.bounds {
@@ -123,12 +130,26 @@ final class PDFAnnotationService {
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let text = try validated(text)
-        let bounds = CGRect(origin: point, size: CGSize(width: 24, height: 24))
+        let iconSize: CGFloat = 24
+        let pageBounds = page.bounds(for: .cropBox).standardized
+        let proposedOrigin = CGPoint(
+            x: point.x - iconSize / 2,
+            y: point.y - iconSize / 2
+        )
+        let maximumX = max(pageBounds.minX, pageBounds.maxX - iconSize)
+        let maximumY = max(pageBounds.minY, pageBounds.maxY - iconSize)
+        let bounds = CGRect(
+            x: min(max(proposedOrigin.x, pageBounds.minX), maximumX),
+            y: min(max(proposedOrigin.y, pageBounds.minY), maximumY),
+            width: iconSize,
+            height: iconSize
+        )
         let annotation = PDFAnnotation(
             bounds: bounds,
             forType: .text,
             withProperties: nil
         )
+        annotation.iconType = .comment
         annotation.contents = text
         setPrimaryColor(components(of: .systemYellow), on: annotation)
         page.addAnnotation(annotation)
@@ -413,6 +434,8 @@ final class PDFAnnotationService {
     }
 
     private var opacityKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/CA") }
+    private var appearanceDictionaryKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/AP") }
+    private var appearanceStateKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/AS") }
 
     private func opacity(of annotation: PDFAnnotation) -> CGFloat {
         if let number = annotation.value(forAnnotationKey: opacityKey) as? NSNumber {

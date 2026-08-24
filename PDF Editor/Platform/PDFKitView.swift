@@ -36,6 +36,9 @@ struct PDFKitView: NSViewRepresentable {
     @Binding var selectedAnnotation: PDFAnnotationSnapshot?
     let annotationEditingEnabled: Bool
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+    let commentPlacementEnabled: Bool
+    let onPlaceComment: (Int, CGPoint) -> Void
+    let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
 
@@ -90,6 +93,9 @@ struct PDFKitView: UIViewRepresentable {
     @Binding var selectedAnnotation: PDFAnnotationSnapshot?
     let annotationEditingEnabled: Bool
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+    let commentPlacementEnabled: Bool
+    let onPlaceComment: (Int, CGPoint) -> Void
+    let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
 
@@ -125,7 +131,10 @@ private extension PDFKitView {
             annotations: annotations,
             selectedAnnotation: $selectedAnnotation,
             annotationEditingEnabled: annotationEditingEnabled,
-            onSetAnnotationBounds: onSetAnnotationBounds
+            onSetAnnotationBounds: onSetAnnotationBounds,
+            commentPlacementEnabled: commentPlacementEnabled,
+            onPlaceComment: onPlaceComment,
+            onOpenAnnotation: onOpenAnnotation
         )
     }
 
@@ -161,6 +170,9 @@ private extension PDFKitView {
         coordinator.selectedAnnotation = $selectedAnnotation
         coordinator.annotationEditingEnabled = annotationEditingEnabled
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
+        coordinator.commentPlacementEnabled = commentPlacementEnabled
+        coordinator.onPlaceComment = onPlaceComment
+        coordinator.onOpenAnnotation = onOpenAnnotation
         coordinator.updateGestureAvailability()
     }
 
@@ -233,6 +245,14 @@ extension PDFKitView {
             }
         }
         var onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+        var commentPlacementEnabled: Bool {
+            didSet {
+                guard oldValue != commentPlacementEnabled else { return }
+                updateGestureAvailability()
+            }
+        }
+        var onPlaceComment: (Int, CGPoint) -> Void
+        var onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
         var lastViewerCommandID: UUID?
 
         private weak var pdfView: PDFView?
@@ -264,7 +284,10 @@ extension PDFKitView {
             annotations: [PDFAnnotationSnapshot],
             selectedAnnotation: Binding<PDFAnnotationSnapshot?>,
             annotationEditingEnabled: Bool,
-            onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void
+            onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
+            commentPlacementEnabled: Bool,
+            onPlaceComment: @escaping (Int, CGPoint) -> Void,
+            onOpenAnnotation: @escaping (PDFAnnotationSnapshot) -> Void
         ) {
             self.selectedPageIndex = selectedPageIndex
             self.selection = selection
@@ -277,6 +300,9 @@ extension PDFKitView {
             self.selectedAnnotation = selectedAnnotation
             self.annotationEditingEnabled = annotationEditingEnabled
             self.onSetAnnotationBounds = onSetAnnotationBounds
+            self.commentPlacementEnabled = commentPlacementEnabled
+            self.onPlaceComment = onPlaceComment
+            self.onOpenAnnotation = onOpenAnnotation
             super.init()
             configureOverlay()
         }
@@ -419,16 +445,23 @@ extension PDFKitView {
 #if os(macOS)
             for gesture in gestures {
                 if gesture is NSClickGestureRecognizer {
-                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
+                    gesture.isEnabled = commentPlacementEnabled ||
+                        objectEditingEnabled || annotationEditingEnabled
                 } else if gesture is NSRotationGestureRecognizer {
                     gesture.isEnabled = objectEditingEnabled
                 } else {
-                    gesture.isEnabled = objectEditingEnabled ||
-                        (annotationEditingEnabled && selectedAnnotation.wrappedValue != nil)
+                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
                 }
             }
 #else
-            gestures.forEach { $0.isEnabled = objectEditingEnabled || annotationEditingEnabled }
+            for gesture in gestures {
+                if gesture is UITapGestureRecognizer {
+                    gesture.isEnabled = commentPlacementEnabled ||
+                        objectEditingEnabled || annotationEditingEnabled
+                } else {
+                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
+                }
+            }
 #endif
             refreshOverlay()
         }
@@ -439,18 +472,21 @@ extension PDFKitView {
                   let document = pdfView.document else { return }
             let pageIndex = document.index(for: page)
             let pagePoint = pdfView.convert(viewPoint, to: page)
+            if commentPlacementEnabled {
+                selectedObject.wrappedValue = nil
+                selectedAnnotation.wrappedValue = nil
+                selectedPageIndex.wrappedValue = pageIndex
+                onPlaceComment(pageIndex, pagePoint)
+                updateGestureAvailability()
+                return
+            }
             if annotationEditingEnabled {
                 selectedObject.wrappedValue = nil
-                selectedAnnotation.wrappedValue = annotations
-                    .filter {
-                        $0.reference.pageIndex == pageIndex &&
-                        $0.bounds.insetBy(dx: -3, dy: -3).contains(pagePoint)
-                    }
-                    .min { lhs, rhs in
-                        lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
-                    }
-                if selectedAnnotation.wrappedValue != nil {
+                let annotation = annotation(at: pagePoint, pageIndex: pageIndex)
+                selectedAnnotation.wrappedValue = annotation
+                if let annotation {
                     selectedPageIndex.wrappedValue = pageIndex
+                    onOpenAnnotation(annotation)
                 }
                 updateGestureAvailability()
                 return
@@ -471,6 +507,20 @@ extension PDFKitView {
             refreshOverlay()
         }
 
+        private func annotation(
+            at pagePoint: CGPoint,
+            pageIndex: Int
+        ) -> PDFAnnotationSnapshot? {
+            annotations
+                .filter {
+                    $0.reference.pageIndex == pageIndex &&
+                    $0.bounds.insetBy(dx: -8, dy: -8).contains(pagePoint)
+                }
+                .min { lhs, rhs in
+                    lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
+                }
+        }
+
         private func objectPriority(_ object: PDFPageObjectSnapshot) -> Int {
             switch object.kind {
             case .text, .image: 0
@@ -481,10 +531,17 @@ extension PDFKitView {
         }
 
         private func beginPan(at viewPoint: CGPoint) {
-            guard let pdfView else { return }
+            guard let pdfView,
+                  let page = pdfView.page(for: viewPoint, nearest: false),
+                  let document = pdfView.document else { return }
+            let touchedPageIndex = document.index(for: page)
+            let pagePoint = pdfView.convert(viewPoint, to: page)
             let pageIndex: Int
             let bounds: CGRect
-            if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
+            if annotationEditingEnabled,
+               let annotation = annotation(at: pagePoint, pageIndex: touchedPageIndex) {
+                selectedObject.wrappedValue = nil
+                selectedAnnotation.wrappedValue = annotation
                 interactionAnnotation = annotation
                 pageIndex = annotation.reference.pageIndex
                 bounds = annotation.bounds
@@ -494,7 +551,7 @@ extension PDFKitView {
                 bounds = object.bounds
                 interactionStartTransform = object.transform
             } else { return }
-            guard let page = pdfView.document?.page(at: pageIndex) else { return }
+            guard pageIndex == touchedPageIndex else { return }
             let selectionRect = pdfView.convert(bounds, from: page).standardized
             guard selectionRect.insetBy(dx: -18, dy: -18).contains(viewPoint) else { return }
             interactionPage = page
@@ -506,8 +563,13 @@ extension PDFKitView {
                 CGPoint(x: selectionRect.maxX, y: selectionRect.maxY),
                 CGPoint(x: selectionRect.minX, y: selectionRect.maxY),
             ]
-            dragMode = corners.contains { hypot($0.x - viewPoint.x, $0.y - viewPoint.y) <= 20 }
-                ? .scale : .move
+            if interactionAnnotation?.kind == .note {
+                dragMode = .move
+            } else {
+                dragMode = corners.contains {
+                    hypot($0.x - viewPoint.x, $0.y - viewPoint.y) <= 20
+                } ? .scale : .move
+            }
         }
 
         private func updatePan(at viewPoint: CGPoint, finished: Bool) {
@@ -656,7 +718,12 @@ extension PDFKitView {
             guard let pdfView else { return }
             let point = recognizer.location(in: pdfView)
             switch recognizer.state {
-            case .began: beginPan(at: point)
+            case .began:
+                let translation = recognizer.translation(in: pdfView)
+                beginPan(at: CGPoint(
+                    x: point.x - translation.x,
+                    y: point.y - translation.y
+                ))
             case .changed: updatePan(at: point, finished: false)
             case .ended: updatePan(at: point, finished: true)
             case .cancelled: clearInteraction(); refreshOverlay()
@@ -705,7 +772,12 @@ extension PDFKitView {
             guard let pdfView else { return }
             let point = recognizer.location(in: pdfView)
             switch recognizer.state {
-            case .began: beginPan(at: point)
+            case .began:
+                let translation = recognizer.translation(in: pdfView)
+                beginPan(at: CGPoint(
+                    x: point.x - translation.x,
+                    y: point.y - translation.y
+                ))
             case .changed: updatePan(at: point, finished: false)
             case .ended: updatePan(at: point, finished: true)
             case .cancelled: clearInteraction(); refreshOverlay()
@@ -742,7 +814,7 @@ extension PDFKitView {
 extension PDFKitView.Coordinator: UIGestureRecognizerDelegate {
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer is UITapGestureRecognizer {
-            return objectEditingEnabled || annotationEditingEnabled
+            return commentPlacementEnabled || objectEditingEnabled || annotationEditingEnabled
         }
         if gestureRecognizer is UIRotationGestureRecognizer, annotationEditingEnabled {
             return false
@@ -750,7 +822,20 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate {
         guard let pdfView else { return false }
         let pageIndex: Int
         let bounds: CGRect
-        if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
+        if annotationEditingEnabled,
+           gestureRecognizer is UIPanGestureRecognizer,
+           let page = pdfView.page(
+               for: gestureRecognizer.location(in: pdfView),
+               nearest: false
+           ),
+           let document = pdfView.document,
+           let annotation = annotation(
+               at: pdfView.convert(gestureRecognizer.location(in: pdfView), to: page),
+               pageIndex: document.index(for: page)
+           ) {
+            pageIndex = annotation.reference.pageIndex
+            bounds = annotation.bounds
+        } else if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
             pageIndex = annotation.reference.pageIndex
             bounds = annotation.bounds
         } else if objectEditingEnabled, let object = selectedObject.wrappedValue {

@@ -29,7 +29,7 @@ This repository uses the following terms:
 - Add text and images; replace existing text and images; move, scale, rotate, reorder, and delete supported page objects.
 - Preserve an existing text object's font when it covers the replacement text and does not require advanced shaping. Otherwise, create a CoreText-rendered searchable replacement layer using the bundled Unicode font.
 - Add notes, free-text annotations, highlights, and ink-based handwritten signatures.
-- Select annotations directly on the page without a separate annotation-editing mode; move, resize, edit supported properties of, and delete them. The left-panel Edit comment action opens a page-scoped Comment List for the same editing operations. Style changes are intentionally disabled for annotations with fixed appearance streams.
+- Select annotations directly on the page without a separate annotation-editing mode; move, resize, edit supported properties of, and delete them. The left-panel Edit comment action opens a page-scoped Comment List for the same editing operations. Successful annotation changes update the existing PDFKit document in place to avoid a visible reload; error rollback and Undo/Redo may rebuild it from serialized bytes. Style changes are intentionally disabled for annotations with fixed appearance streams.
 - Run on-device Vision text recognition on one page or all scanned pages. Pages that already contain selectable text are skipped, and recognized text is reviewed before an invisible searchable text layer is added.
 - Unlock encrypted PDFs and preserve encryption during ordinary saves. Password removal is an explicit save option for an already unlocked document.
 - Detect the presence of PDF signature objects and require confirmation before the first in-place mutation that may invalidate them.
@@ -164,14 +164,15 @@ Third-party licensing is documented separately:
 
 ## Verification status
 
-Verified in this documentation task on 2026-08-24:
+Verified in this documentation task through 2026-08-25:
 
-- `PDFiumBridge` package tests: 23 tests passed with 0 failures.
+- `PDFiumBridge` package tests: 24 tests passed with 0 failures.
 - Standalone annotation round-trip and OCR policy validations passed.
 - Protected-PDF fixture self-validation passed.
 - Phase-six corpus acceptance passed for the 120-page, mixed selectable/scanned content, rotated, protected, and truncated cases.
 - Unsigned Debug builds succeeded for macOS, generic iOS Simulator, and generic iOS device destinations.
-- The latest explicit-save and panel changes were revalidated with unsigned Debug builds for macOS and the generic iOS Simulator destination.
+- The latest explicit-save, panel, annotation-style, and no-flash Apply changes were revalidated with unsigned Debug builds for macOS and the generic iOS Simulator destination.
+- A macOS UI workflow created and edited a comment, applied a blue color and approximately 36% opacity, and confirmed that the Comment Editor remained stable without resetting after Apply.
 - The four checked-in PDFium binary SHA-256 values matched `Packages/PDFiumBridge/Vendor/NOTICE.md`.
 
-The exact commands and boundaries are recorded in `TECHNICAL_DOCUMENTATION.md`. No app UI test, manual visual inspection, physical-device run, signed build, archive, installation, or external-service validation was performed. Source and compile evidence do not establish App Store compliance, PDFium reproducibility, third-party vulnerability status, or complete license compliance.
+The exact commands and boundaries are recorded in `TECHNICAL_DOCUMENTATION.md`. No automated app UI test, physical-device run, signed build, archive, installation, or external-service validation was performed. Source, compile, and the scoped macOS UI evidence do not establish App Store compliance, PDFium reproducibility, third-party vulnerability status, or complete license compliance.

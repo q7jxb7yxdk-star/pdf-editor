@@ -389,7 +389,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
         actionName: String,
         _ mutation: () throws -> Void
     ) throws {
-        try mutate(undoManager: undoManager, actionName: actionName) {
+        try mutate(
+            undoManager: undoManager,
+            actionName: actionName,
+            refreshesPDFKitDocument: false
+        ) {
             try mutation()
             guard let data = pdfDocument.dataRepresentation() else {
                 throw PDFEditingError.exportFailed
@@ -430,7 +434,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
         undoManager: UndoManager?
     ) throws -> PDFAnnotationSnapshot {
         let service = PDFAnnotationService()
-        try mutate(undoManager: undoManager, actionName: "修改註解") {
+        try mutate(
+            undoManager: undoManager,
+            actionName: "修改註解",
+            refreshesPDFKitDocument: false
+        ) {
             _ = try service.update(reference, with: update, in: pdfDocument)
             guard let data = pdfDocument.dataRepresentation(),
                   PDFDocument(data: data) != nil else {
@@ -488,18 +496,20 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFEditingError.invalidDocument
         }
         let service = PDFAnnotationService()
-        let serializedAppearanceStreams = Dictionary(uniqueKeysWithValues:
+        let serializedAnnotations = Dictionary(uniqueKeysWithValues:
             (0..<serializedDocument.pageCount).flatMap { pageIndex in
                 guard let page = serializedDocument.page(at: pageIndex) else {
-                    return [(PDFAnnotationReference, Bool)]()
+                    return [(PDFAnnotationReference, PDFAnnotationSnapshot)]()
                 }
                 return service.snapshots(on: page, pageIndex: pageIndex).map {
-                    ($0.reference, $0.hasAppearanceStream)
+                    ($0.reference, $0)
                 }
             }
         )
         for (reference, color) in colorOverrides
-        where serializedAppearanceStreams[reference] == false {
+        where serializedAnnotations[reference].map({
+            !$0.hasAppearanceStream || $0.kind == .note
+        }) == true {
             try annotationSession.setAnnotationColor(
                 pageIndex: reference.pageIndex,
                 annotationIndex: reference.annotationIndex,
@@ -531,6 +541,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private func mutate<Result>(
         undoManager: UndoManager?,
         actionName: String,
+        refreshesPDFKitDocument: Bool = true,
         _ mutation: () throws -> Result
     ) throws -> Result {
         if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
@@ -540,7 +551,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let result: Result
         do {
             result = try mutation()
-            try refreshPDFKitDocument(markingUnsaved: true)
+            if refreshesPDFKitDocument {
+                try refreshPDFKitDocument(markingUnsaved: true)
+            } else {
+                editorState.documentDidChange(markingUnsaved: true)
+            }
         } catch {
             if let session = try? PDFiumEditingEngine().makeSession(
                 data: previousData,

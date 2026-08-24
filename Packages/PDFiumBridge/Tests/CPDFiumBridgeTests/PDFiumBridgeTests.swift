@@ -49,6 +49,35 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(alpha, 115)
     }
 
+    func testTextAnnotationColorReplacesAppearanceAndRoundTripsOpacity() throws {
+        let document = try open(makeTextCommentWithAppearancePDF())
+        defer { PEPDFDocumentClose(document) }
+
+        XCTAssertTrue(PEPDFAnnotationSetColor(document, 0, 0, 25, 100, 220, 90))
+        var red: UInt32 = 0
+        var green: UInt32 = 0
+        var blue: UInt32 = 0
+        var alpha: UInt32 = 0
+        XCTAssertTrue(PEPDFAnnotationGetColor(
+            document, 0, 0, &red, &green, &blue, &alpha
+        ))
+        XCTAssertEqual(red, 25)
+        XCTAssertEqual(green, 100)
+        XCTAssertEqual(blue, 220)
+        XCTAssertEqual(alpha, 90)
+
+        let saved = try copyData(document)
+        let reopened = try open(saved)
+        defer { PEPDFDocumentClose(reopened) }
+        XCTAssertTrue(PEPDFAnnotationGetColor(
+            reopened, 0, 0, &red, &green, &blue, &alpha
+        ))
+        XCTAssertEqual(red, 25)
+        XCTAssertEqual(green, 100)
+        XCTAssertEqual(blue, 220)
+        XCTAssertEqual(alpha, 90)
+    }
+
     func testExistingTextObjectCanBeRewrittenAndPreservesStyleGeometry() throws {
         let document = try open(makeTextPDF())
         defer { PEPDFDocumentClose(document) }
@@ -1103,6 +1132,18 @@ final class PDFiumBridgeTests: XCTestCase {
             "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Resources << /Font << /F1 6 0 R >> >> /Length \(shared.utf8.count) >>\nstream\n\(shared)\nendstream",
         ]
         return makePDF(objects: objects)
+    }
+
+    private func makeTextCommentWithAppearancePDF() -> Data {
+        let appearance = "1 0.8 0 rg 0 0 24 24 re f"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Annots [5 0 R] /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+            "<< /Type /Annot /Subtype /Text /Rect [20 20 44 44] /Contents (Styled note) /Name /Comment /C [1 0.8 0] /P 3 0 R /AP << /N 6 0 R >> >>",
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 24 24] /Resources << >> /Length \(appearance.utf8.count) >>\nstream\n\(appearance)\nendstream",
+        ])
     }
 
     private func makeLargeTextPDF(pageCount: Int) -> Data {

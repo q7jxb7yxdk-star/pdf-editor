@@ -16,7 +16,11 @@ struct AnnotationRoundTripValidation {
         let page = document.page(at: 0)!
 
         let service = PDFAnnotationService()
-        _ = try service.addNote(text: "Original note", at: CGPoint(x: 40, y: 700), to: page)
+        let note = try service.addNote(
+            text: "Original note",
+            at: CGPoint(x: 40, y: 700),
+            to: page
+        )
         _ = try service.addFreeText(
             text: "Original text",
             bounds: CGRect(x: 80, y: 600, width: 220, height: 50),
@@ -48,9 +52,26 @@ struct AnnotationRoundTripValidation {
             throw NSError(
                 domain: "AnnotationValidation",
                 code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Expected 3 annotations, found \(snapshots.count): \(snapshots.map(\.kind.rawValue))"]
+                userInfo: [NSLocalizedDescriptionKey: "Expected 4 annotations, found \(snapshots.count): \(snapshots.map(\.kind.rawValue))"]
             )
         }
+
+        var expectedNote = snapshots[0]
+        precondition(note.iconType == .comment)
+        precondition(abs(expectedNote.bounds.width - 24) < 0.05)
+        precondition(abs(expectedNote.bounds.height - 24) < 0.05)
+        let noteColor = PDFAnnotationColor(
+            red: 0.1,
+            green: 0.4,
+            blue: 0.95,
+            alpha: 0.35
+        )
+        expectedNote = try service.update(
+            expectedNote.reference,
+            with: PDFAnnotationUpdate(color: noteColor),
+            in: document
+        )
+        precondition(abs(expectedNote.color.alpha - 0.35) < 0.01)
 
         let freeText = snapshots[1]
         let expectedText = try service.update(
@@ -89,6 +110,7 @@ struct AnnotationRoundTripValidation {
               let reopened = PDFDocument(data: serialized) else {
             throw CocoaError(.fileWriteUnknown)
         }
+        try service.verify(expectedNote, in: reopened)
         try serialized.write(
             to: URL(fileURLWithPath: "/tmp/PDFEditor-Phase4-Annotations.pdf"),
             options: .atomic
@@ -98,6 +120,7 @@ struct AnnotationRoundTripValidation {
         try service.verify(expectedMarkup, in: reopened)
 
         let reopenedPage = reopened.page(at: 0)!
+        precondition(reopenedPage.annotations[0].iconType == .comment)
         snapshots = service.snapshots(on: reopenedPage, pageIndex: 0)
         precondition(snapshots[1].contents == "Edited text")
         precondition(abs(snapshots[1].fontSize! - 24) < 0.05)
