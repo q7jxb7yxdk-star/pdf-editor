@@ -1,0 +1,253 @@
+diff --git a/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp b/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp
+--- a/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp
++++ b/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp
+@@ -341,6 +341,11 @@
+         ->SetDataFromStringstreamAndRemoveFilter(&stream_data);
+     obj_holder_->TakeDirtyStreams();
+     UpdateResourcesDict();
++    return;
++  }
++
++  if (obj_holder_->NeedsFullContentRegeneration()) {
++    GenerateFullPageContent();
+     return;
+   }
+ 
+@@ -352,6 +357,27 @@
+   }
+ 
+   UpdateContentStreams(std::move(new_stream_data));
++  UpdateResourcesDict();
++}
++
++void CPDF_PageContentGenerator::GenerateFullPageContent() {
++  CHECK(obj_holder_->IsPage());
++  fxcrt::ostringstream stream_data;
++  stream_data << "q\n";
++  ProcessDefaultGraphics(&stream_data);
++  ProcessPageObjects(&stream_data);
++  stream_data << "Q\n";
++
++  auto stream = document_->NewIndirect<CPDF_Stream>(&stream_data);
++  obj_holder_->GetMutableDict()->SetNewFor<CPDF_Reference>(
++      pdfium::page_object::kContents, document_, stream->GetObjNum());
++  for (CPDF_PageObject* page_object : page_objects_) {
++    if (page_object->IsActive()) {
++      page_object->SetContentStream(0);
++    }
++  }
++  obj_holder_->TakeDirtyStreams();
++  obj_holder_->ClearFullContentRegeneration();
+   UpdateResourcesDict();
+ }
+ 
+diff --git a/core/fpdfapi/edit/cpdf_pagecontentgenerator.h b/core/fpdfapi/edit/cpdf_pagecontentgenerator.h
+--- a/core/fpdfapi/edit/cpdf_pagecontentgenerator.h
++++ b/core/fpdfapi/edit/cpdf_pagecontentgenerator.h
+@@ -33,6 +33,7 @@
+   ~CPDF_PageContentGenerator();
+ 
+   void GenerateContent();
++  void GenerateFullPageContent();
+   bool ProcessPageObjects(fxcrt::ostringstream* buf);
+ 
+  private:
+diff --git a/core/fpdfapi/page/cpdf_pageobjectholder.cpp b/core/fpdfapi/page/cpdf_pageobjectholder.cpp
+--- a/core/fpdfapi/page/cpdf_pageobjectholder.cpp
++++ b/core/fpdfapi/page/cpdf_pageobjectholder.cpp
+@@ -211,6 +211,31 @@
+   return true;
+ }
+ 
++bool CPDF_PageObjectHolder::MovePageObjectAtIndex(
++    size_t source_index,
++    size_t destination_index) {
++  if (source_index >= page_object_list_.size() ||
++      destination_index >= page_object_list_.size()) {
++    return false;
++  }
++  if (source_index == destination_index) {
++    return true;
++  }
++
++  std::unique_ptr<CPDF_PageObject> object =
++      std::move(page_object_list_[source_index]);
++  page_object_list_.erase(
++      UNSAFE_TODO(page_object_list_.begin() + source_index));
++  page_object_list_.insert(
++      UNSAFE_TODO(page_object_list_.begin() + destination_index),
++      std::move(object));
++  for (const auto& page_object : page_object_list_) {
++    page_object->SetDirty(true);
++  }
++  needs_full_content_regeneration_ = IsPage();
++  return true;
++}
++
+ std::unique_ptr<CPDF_PageObject> CPDF_PageObjectHolder::RemovePageObject(
+     CPDF_PageObject* pPageObj) {
+   auto it = std::ranges::find_if(page_object_list_,
+diff --git a/core/fpdfapi/page/cpdf_pageobjectholder.h b/core/fpdfapi/page/cpdf_pageobjectholder.h
+--- a/core/fpdfapi/page/cpdf_pageobjectholder.h
++++ b/core/fpdfapi/page/cpdf_pageobjectholder.h
+@@ -106,6 +106,7 @@
+ 
+   bool InsertPageObjectAtIndex(size_t index,
+                                std::unique_ptr<CPDF_PageObject> page_obj);
++  bool MovePageObjectAtIndex(size_t source_index, size_t destination_index);
+ 
+   // Remove `pPageObj` if present, and transfer ownership to the caller.
+   std::unique_ptr<CPDF_PageObject> RemovePageObject(CPDF_PageObject* pPageObj);
+@@ -132,6 +133,12 @@
+   void AddImageMaskBoundingBox(const CFX_FloatRect& box);
+   bool HasDirtyStreams() const { return !dirty_streams_.empty(); }
+   bool HasDirtyPageObjects() const;
++  bool NeedsFullContentRegeneration() const {
++    return needs_full_content_regeneration_;
++  }
++  void ClearFullContentRegeneration() {
++    needs_full_content_regeneration_ = false;
++  }
+   std::set<int32_t> TakeDirtyStreams();
+ 
+   std::optional<ByteString> GraphicsMapSearch(const GraphicsData& gd);
+@@ -173,6 +180,7 @@
+ 
+   // The indexes of Content streams that are dirty and need to be regenerated.
+   std::set<int32_t> dirty_streams_;
++  bool needs_full_content_regeneration_ = false;
+ 
+   // All the resources from `resources_` that are unused. Hold on to them here
+   // in case they need to be restored.
+diff --git a/fpdfsdk/fpdf_editimg.cpp b/fpdfsdk/fpdf_editimg.cpp
+--- a/fpdfsdk/fpdf_editimg.cpp
++++ b/fpdfsdk/fpdf_editimg.cpp
+@@ -200,6 +200,41 @@
+   return true;
+ }
+ 
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFImageObj_SetBitmapIsolated(FPDF_PAGE* pages,
++                               int count,
++                               FPDF_PAGEOBJECT image_object,
++                               FPDF_BITMAP bitmap) {
++  CPDF_ImageObject* image = CPDFImageObjectFromFPDFPageObject(image_object);
++  if (!image) {
++    return false;
++  }
++
++  RetainPtr<CFX_DIBitmap> bitmap_holder(CFXDIBitmapFromFPDFBitmap(bitmap));
++  if (!bitmap_holder) {
++    return false;
++  }
++  ValidateBitmapPremultiplyState(bitmap_holder);
++
++  RetainPtr<CPDF_Image> old_image = image->GetImage();
++  if (pages) {
++    for (int index = 0; index < count; ++index) {
++      CPDF_Page* page = CPDFPageFromFPDFPage(UNSAFE_TODO(pages[index]));
++      if (page) {
++        old_image->ResetCache(page);
++      }
++    }
++  }
++
++  auto isolated_image =
++      pdfium::MakeRetain<CPDF_Image>(old_image->GetDocument());
++  isolated_image->SetImage(bitmap_holder);
++  image->SetImage(std::move(isolated_image));
++  image->CalcBoundingBox();
++  image->SetDirty(true);
++  return true;
++}
++
+ FPDF_EXPORT FPDF_BITMAP FPDF_CALLCONV
+ FPDFImageObj_GetBitmap(FPDF_PAGEOBJECT image_object) {
+   CPDF_ImageObject* pImgObj = CPDFImageObjectFromFPDFPageObject(image_object);
+diff --git a/fpdfsdk/fpdf_editpage.cpp b/fpdfsdk/fpdf_editpage.cpp
+--- a/fpdfsdk/fpdf_editpage.cpp
++++ b/fpdfsdk/fpdf_editpage.cpp
+@@ -331,6 +331,15 @@
+   return !!pPage->RemovePageObject(pPageObj).release();
+ }
+ 
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFPage_MoveObject(FPDF_PAGE page,
++                    size_t source_index,
++                    size_t destination_index) {
++  CPDF_Page* pdf_page = CPDFPageFromFPDFPage(page);
++  return IsPageObject(pdf_page) &&
++         pdf_page->MovePageObjectAtIndex(source_index, destination_index);
++}
++
+ FPDF_EXPORT int FPDF_CALLCONV FPDFPage_CountObjects(FPDF_PAGE page) {
+   CPDF_Page* pPage = CPDFPageFromFPDFPage(page);
+   if (!IsPageObject(pPage)) {
+@@ -1214,3 +1223,17 @@
+   removed_object.release();
+   return true;
+ }
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFFormObj_MoveObject(FPDF_PAGEOBJECT form_object,
++                       size_t source_index,
++                       size_t destination_index) {
++  CPDF_FormObject* form =
++      CPDFFormObjectFromFPDFPageObject(form_object);
++  if (!form || !form->form()->MovePageObjectAtIndex(source_index,
++                                                     destination_index)) {
++    return false;
++  }
++  form->SetDirty(true);
++  return true;
++}
+diff --git a/public/fpdf_edit.h b/public/fpdf_edit.h
+--- a/public/fpdf_edit.h
++++ b/public/fpdf_edit.h
+@@ -226,6 +226,14 @@
+ FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
+ FPDFPage_RemoveObject(FPDF_PAGE page, FPDF_PAGEOBJECT page_object);
+ 
++// Experimental API.
++// Move an existing page object to a new final drawing-order index.
++// Both indexes must refer to existing objects on |page|.
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFPage_MoveObject(FPDF_PAGE page,
++                    size_t source_index,
++                    size_t destination_index);
++
+ // Get number of page objects inside |page|.
+ //
+ //   page - handle to a page.
+@@ -787,6 +795,16 @@
+                        int count,
+                        FPDF_PAGEOBJECT image_object,
+                        FPDF_BITMAP bitmap);
++
++// Experimental API.
++// Set |bitmap| while first giving |image_object| a new independent image
++// stream. Other objects that referenced the original Image XObject are not
++// modified.
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFImageObj_SetBitmapIsolated(FPDF_PAGE* pages,
++                               int count,
++                               FPDF_PAGEOBJECT image_object,
++                               FPDF_BITMAP bitmap);
+ 
+ // Get a bitmap rasterization of |image_object|. FPDFImageObj_GetBitmap() only
+ // operates on |image_object| and does not take the associated image mask into
+@@ -1701,6 +1719,14 @@
+ FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
+ FPDFFormObj_RemoveObject(FPDF_PAGEOBJECT form_object,
+                          FPDF_PAGEOBJECT page_object);
++
++// Experimental API.
++// Move an existing child object to a new final drawing-order index inside a
++// Form XObject. Both indexes must refer to existing children.
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFFormObj_MoveObject(FPDF_PAGEOBJECT form_object,
++                       size_t source_index,
++                       size_t destination_index);
+ 
+ #ifdef __cplusplus
+ }  // extern "C"

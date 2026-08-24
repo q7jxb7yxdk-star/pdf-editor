@@ -1,0 +1,215 @@
+diff --git a/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp b/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp
+index aa3fede..de37914 100644
+--- a/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp
++++ b/core/fpdfapi/edit/cpdf_pagecontentgenerator.cpp
+@@ -330,6 +330,20 @@ CPDF_PageContentGenerator::CPDF_PageContentGenerator(
+ CPDF_PageContentGenerator::~CPDF_PageContentGenerator() = default;
+ 
+ void CPDF_PageContentGenerator::GenerateContent() {
++  if (!obj_holder_->IsPage()) {
++    fxcrt::ostringstream stream_data;
++    stream_data << "q\n";
++    ProcessDefaultGraphics(&stream_data);
++    ProcessPageObjects(&stream_data);
++    stream_data << "Q\n";
++    static_cast<CPDF_Form*>(obj_holder_.get())
++        ->GetMutableStream()
++        ->SetDataFromStringstreamAndRemoveFilter(&stream_data);
++    obj_holder_->TakeDirtyStreams();
++    UpdateResourcesDict();
++    return;
++  }
++
+   std::map<int32_t, fxcrt::ostringstream> new_stream_data =
+       GenerateModifiedStreams();
+   // If no streams were regenerated or removed, nothing to do here.
+@@ -558,8 +572,8 @@ bool CPDF_PageContentGenerator::ProcessPageObjects(fxcrt::ostringstream* buf) {
+   const CPDF_ContentMarks* content_marks = empty_content_marks.get();
+ 
+   for (auto& pPageObj : page_objects_) {
+-    if (obj_holder_->IsPage() &&
+-        (!pPageObj->IsDirty() || !pPageObj->IsActive())) {
++    if (!pPageObj->IsActive() ||
++        (obj_holder_->IsPage() && !pPageObj->IsDirty())) {
+       continue;
+     }
+ 
+@@ -703,7 +717,8 @@ void CPDF_PageContentGenerator::ProcessForm(fxcrt::ostringstream* buf,
+ void CPDF_PageContentGenerator::ProcessForm(fxcrt::ostringstream* buf,
+                                             CPDF_FormObject* pFormObj) {
+   CPDF_Form* form_xobject = pFormObj->form();
+-  if (form_xobject->HasDirtyStreams()) {
++  if (form_xobject->HasDirtyStreams() ||
++      form_xobject->HasDirtyPageObjects()) {
+     // The Form XObject itself has modified content (e.g., an object was
+     // removed). We need to regenerate its content stream before using it.
+     CPDF_PageContentGenerator form_content_generator(form_xobject);
+diff --git a/core/fpdfapi/page/cpdf_form.cpp b/core/fpdfapi/page/cpdf_form.cpp
+index a363f9d..bb4b09a 100644
+--- a/core/fpdfapi/page/cpdf_form.cpp
++++ b/core/fpdfapi/page/cpdf_form.cpp
+@@ -14,6 +14,8 @@
+ #include "core/fpdfapi/page/cpdf_pageobject.h"
+ #include "core/fpdfapi/page/cpdf_pageobjectholder.h"
+ #include "core/fpdfapi/parser/cpdf_dictionary.h"
++#include "core/fpdfapi/parser/cpdf_document.h"
++#include "core/fpdfapi/parser/cpdf_reference.h"
+ #include "core/fpdfapi/parser/cpdf_stream.h"
+ #include "core/fxcrt/check_op.h"
+ #include "core/fxge/dib/cfx_dibitmap.h"
+@@ -121,5 +123,32 @@ RetainPtr<const CPDF_Stream> CPDF_Form::GetStream() const {
+   return form_stream_;
+ }
+ 
++RetainPtr<CPDF_Stream> CPDF_Form::GetMutableStream() {
++  return form_stream_;
++}
++
++bool CPDF_Form::CloneStreamForEditing() {
++  RetainPtr<CPDF_Stream> cloned_stream = ToStream(form_stream_->Clone());
++  if (!cloned_stream) {
++    return false;
++  }
++
++  GetDocument()->AddIndirectObject(cloned_stream);
++  RetainPtr<CPDF_Dictionary> cloned_dict = cloned_stream->GetMutableDict();
++  SetDictForEditing(cloned_dict);
++  RetainPtr<CPDF_Dictionary> resources = GetMutableResources();
++  if (resources) {
++    RetainPtr<CPDF_Dictionary> cloned_resources =
++        pdfium::WrapRetain(resources->Clone()->AsMutableDictionary());
++    const uint32_t resources_object_number =
++        GetDocument()->AddIndirectObject(cloned_resources);
++    cloned_dict->SetNewFor<CPDF_Reference>(
++        "Resources", GetDocument(), resources_object_number);
++    SetResources(std::move(cloned_resources));
++  }
++  form_stream_ = std::move(cloned_stream);
++  return true;
++}
++
+ std::optional<std::pair<RetainPtr<CFX_DIBitmap>, CFX_Matrix>>
+ CPDF_Form::GetBitmapAndMatrixFromSoleImageOfForm() const {
+diff --git a/core/fpdfapi/page/cpdf_form.h b/core/fpdfapi/page/cpdf_form.h
+index ae864b0..b9063fb 100644
+--- a/core/fpdfapi/page/cpdf_form.h
++++ b/core/fpdfapi/page/cpdf_form.h
+@@ -59,5 +59,7 @@ class CPDF_Form final : public CPDF_PageObjectHolder,
+ 
+   // Never returns nullptr.
+   RetainPtr<const CPDF_Stream> GetStream() const;
++  RetainPtr<CPDF_Stream> GetMutableStream();
++  bool CloneStreamForEditing();
+ 
+  private:
+@@ -67,5 +69,5 @@ class CPDF_Form final : public CPDF_PageObjectHolder,
+                             RecursionState* recursion_state);
+ 
+   RecursionState recursion_state_;
+-  RetainPtr<CPDF_Stream> const form_stream_;
++  RetainPtr<CPDF_Stream> form_stream_;
+ };
+diff --git a/core/fpdfapi/page/cpdf_formobject.cpp b/core/fpdfapi/page/cpdf_formobject.cpp
+index 7af69c4..74fb68e 100644
+--- a/core/fpdfapi/page/cpdf_formobject.cpp
++++ b/core/fpdfapi/page/cpdf_formobject.cpp
+@@ -49,3 +49,11 @@ void CPDF_FormObject::SetFormMatrix(const CFX_Matrix& matrix) {
+   form_matrix_ = matrix;
+   CalcBoundingBox();
+ }
++
++bool CPDF_FormObject::CloneFormStreamForEditing() {
++  if (!form_->CloneStreamForEditing()) {
++    return false;
++  }
++  SetDirty(true);
++  return true;
++}
+diff --git a/core/fpdfapi/page/cpdf_formobject.h b/core/fpdfapi/page/cpdf_formobject.h
+index 49c76c2..adc2d09 100644
+--- a/core/fpdfapi/page/cpdf_formobject.h
++++ b/core/fpdfapi/page/cpdf_formobject.h
+@@ -33,5 +33,6 @@ class CPDF_FormObject final : public CPDF_PageObject {
+   CPDF_Form* form() { return form_.get(); }
+   const CFX_Matrix& form_matrix() const { return form_matrix_; }
+   void SetFormMatrix(const CFX_Matrix& matrix);
++  bool CloneFormStreamForEditing();
+ 
+  private:
+diff --git a/core/fpdfapi/page/cpdf_pageobjectholder.cpp b/core/fpdfapi/page/cpdf_pageobjectholder.cpp
+index 362b988..177e57e 100644
+--- a/core/fpdfapi/page/cpdf_pageobjectholder.cpp
++++ b/core/fpdfapi/page/cpdf_pageobjectholder.cpp
+@@ -90,4 +90,11 @@ std::set<int32_t> CPDF_PageObjectHolder::TakeDirtyStreams() {
+   return dirty_streams;
+ }
+ 
++bool CPDF_PageObjectHolder::HasDirtyPageObjects() const {
++  return std::ranges::any_of(page_object_list_,
++                             [](const auto& object) {
++                               return object->IsDirty();
++                             });
++}
++
+ std::optional<ByteString> CPDF_PageObjectHolder::GraphicsMapSearch(
+diff --git a/core/fpdfapi/page/cpdf_pageobjectholder.h b/core/fpdfapi/page/cpdf_pageobjectholder.h
+index 7ca2bbf..3390508 100644
+--- a/core/fpdfapi/page/cpdf_pageobjectholder.h
++++ b/core/fpdfapi/page/cpdf_pageobjectholder.h
+@@ -85,4 +85,7 @@ class CPDF_PageObjectHolder {
+   CPDF_Document* GetDocument() const { return document_; }
+   RetainPtr<const CPDF_Dictionary> GetDict() const { return dict_; }
+   RetainPtr<CPDF_Dictionary> GetMutableDict() { return dict_; }
++  void SetDictForEditing(RetainPtr<CPDF_Dictionary> dict) {
++    dict_ = std::move(dict);
++  }
+   RetainPtr<const CPDF_Dictionary> GetResources() const { return resources_; }
+@@ -128,3 +131,4 @@ class CPDF_PageObjectHolder {
+   void AddImageMaskBoundingBox(const CFX_FloatRect& box);
+   bool HasDirtyStreams() const { return !dirty_streams_.empty(); }
++  bool HasDirtyPageObjects() const;
+   std::set<int32_t> TakeDirtyStreams();
+@@ -159,5 +163,5 @@ class CPDF_PageObjectHolder {
+  private:
+   bool background_alpha_needed_ = false;
+   ParseState parse_state_ = ParseState::kNotParsed;
+-  RetainPtr<CPDF_Dictionary> const dict_;
++  RetainPtr<CPDF_Dictionary> dict_;
+   UnownedPtr<CPDF_Document> document_;
+diff --git a/fpdfsdk/fpdf_editpage.cpp b/fpdfsdk/fpdf_editpage.cpp
+index 0a0d115..a367b07 100644
+--- a/fpdfsdk/fpdf_editpage.cpp
++++ b/fpdfsdk/fpdf_editpage.cpp
+@@ -1178,5 +1178,12 @@ FPDFFormObj_GetObject(FPDF_PAGEOBJECT form_object, unsigned long index) {
+       pObjectList->GetPageObjectByIndex(index));
+ }
+ 
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFFormObj_CloneForEditing(FPDF_PAGEOBJECT form_object) {
++  CPDF_FormObject* form =
++      CPDFFormObjectFromFPDFPageObject(form_object);
++  return form && form->CloneFormStreamForEditing();
++}
++
+ FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
+ FPDFFormObj_RemoveObject(FPDF_PAGEOBJECT form_object,
+diff --git a/public/fpdf_edit.h b/public/fpdf_edit.h
+index 6f6cf11..aa2fc9d 100644
+--- a/public/fpdf_edit.h
++++ b/public/fpdf_edit.h
+@@ -1676,4 +1676,15 @@ FPDFFormObj_CountObjects(FPDF_PAGEOBJECT form_object);
+ FPDF_EXPORT FPDF_PAGEOBJECT FPDF_CALLCONV
+ FPDFFormObj_GetObject(FPDF_PAGEOBJECT form_object, unsigned long index);
+ 
++// Experimental API.
++//
++// Give |form_object| an isolated copy of its backing Form XObject stream so
++// descendant edits do not affect other uses of a shared Form resource.
++// Call this for every Form ancestor on the selected object path before
++// changing the descendant, then call FPDFPage_GenerateContent().
++//
++// Returns TRUE on success.
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFFormObj_CloneForEditing(FPDF_PAGEOBJECT form_object);
++
+ // Experimental API.

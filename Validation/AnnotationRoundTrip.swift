@@ -1,0 +1,110 @@
+import AppKit
+import Foundation
+import PDFKit
+
+@main
+struct AnnotationRoundTripValidation {
+    static func main() throws {
+        let data = NSMutableData()
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let consumer = CGDataConsumer(data: data as CFMutableData)!
+        let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil)!
+        context.beginPDFPage(nil)
+        context.endPDFPage()
+        context.closePDF()
+        let document = PDFDocument(data: data as Data)!
+        let page = document.page(at: 0)!
+
+        let service = PDFAnnotationService()
+        _ = try service.addNote(text: "Original note", at: CGPoint(x: 40, y: 700), to: page)
+        _ = try service.addFreeText(
+            text: "Original text",
+            bounds: CGRect(x: 80, y: 600, width: 220, height: 50),
+            to: page
+        )
+        _ = try service.addSignature(
+            strokes: [SignatureStroke(points: [
+                CGPoint(x: 0, y: 0.6),
+                CGPoint(x: 0.35, y: 0.2),
+                CGPoint(x: 0.7, y: 0.8),
+                CGPoint(x: 1, y: 0.3),
+            ])],
+            bounds: CGRect(x: 120, y: 450, width: 240, height: 90),
+            to: page
+        )
+        let highlightBounds = CGRect(x: 90, y: 350, width: 180, height: 24)
+        let highlight = PDFAnnotation(bounds: highlightBounds, forType: .highlight, withProperties: nil)
+        highlight.color = .systemYellow
+        highlight.quadrilateralPoints = [
+            NSValue(point: CGPoint(x: highlightBounds.minX, y: highlightBounds.maxY)),
+            NSValue(point: CGPoint(x: highlightBounds.maxX, y: highlightBounds.maxY)),
+            NSValue(point: CGPoint(x: highlightBounds.minX, y: highlightBounds.minY)),
+            NSValue(point: CGPoint(x: highlightBounds.maxX, y: highlightBounds.minY)),
+        ]
+        page.addAnnotation(highlight)
+
+        var snapshots = service.snapshots(on: page, pageIndex: 0)
+        guard snapshots.count == 4 else {
+            throw NSError(
+                domain: "AnnotationValidation",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Expected 3 annotations, found \(snapshots.count): \(snapshots.map(\.kind.rawValue))"]
+            )
+        }
+
+        let freeText = snapshots[1]
+        let expectedText = try service.update(
+            freeText.reference,
+            with: PDFAnnotationUpdate(
+                contents: "Edited text",
+                color: .blue,
+                fontColor: .blue,
+                fontSize: 24,
+                lineWidth: 2
+            ),
+            in: document
+        )
+
+        let ink = snapshots[2]
+        let resizedBounds = CGRect(x: 160, y: 410, width: 300, height: 120)
+        let expectedInk = try service.update(
+            ink.reference,
+            with: PDFAnnotationUpdate(
+                bounds: resizedBounds,
+                color: .red,
+                lineWidth: 4
+            ),
+            in: document
+        )
+        precondition(expectedInk.geometryPointCount == ink.geometryPointCount)
+        let markup = snapshots[3]
+        let expectedMarkup = try service.update(
+            markup.reference,
+            with: .bounds(CGRect(x: 110, y: 330, width: 220, height: 30)),
+            in: document
+        )
+        precondition(expectedMarkup.geometryPointCount == 4)
+
+        guard let serialized = document.dataRepresentation(),
+              let reopened = PDFDocument(data: serialized) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try serialized.write(
+            to: URL(fileURLWithPath: "/tmp/PDFEditor-Phase4-Annotations.pdf"),
+            options: .atomic
+        )
+        try service.verify(expectedText, in: reopened)
+        try service.verify(expectedInk, in: reopened)
+        try service.verify(expectedMarkup, in: reopened)
+
+        let reopenedPage = reopened.page(at: 0)!
+        snapshots = service.snapshots(on: reopenedPage, pageIndex: 0)
+        precondition(snapshots[1].contents == "Edited text")
+        precondition(abs(snapshots[1].fontSize! - 24) < 0.05)
+        precondition(abs(snapshots[2].bounds.width - 300) < 0.05)
+        precondition(snapshots[2].geometryPointCount == 4)
+        precondition(snapshots[3].geometryPointCount == 4)
+
+        print("Annotation round-trip validation passed (note, free text, ink, highlight geometry and style).")
+    }
+}
