@@ -1,6 +1,301 @@
 import PDFKit
 import SwiftUI
 
+enum PDFToolAction {
+    case addComment
+    case highlight
+    case drawFreehand
+    case eraseDrawing
+    case deletePage
+    case extractPage
+    case movePageEarlier
+    case movePageLater
+    case rotateLeft
+    case rotateRight
+    case insertPage
+    case cropPage
+    case numberPages
+    case combineFiles
+    case splitPDF
+    case compressPDF
+    case exportWord
+    case exportExcel
+    case exportPowerPoint
+    case exportImage
+    case fillAndSign
+    case requestSignatures
+    case addSignature
+    case createSignTemplate
+    case createWebForm
+    case sendInBulk
+    case addSignBranding
+    case protectPDF
+    case redactPDF
+}
+
+struct PDFToolSidebar: View {
+    let pageCount: Int
+    let hasSelectedPage: Bool
+    let hasTextSelection: Bool
+    let onAction: (PDFToolAction) -> Void
+
+    @State private var expandedSections: Set<String> = ["Edit text", "Edit pages"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "wrench.and.screwdriver")
+                    .foregroundStyle(.tint)
+                Text("All tools")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    section("Edit text") {
+                        tool("Add a comment", icon: "note.text.badge.plus", action: .addComment)
+                        tool("Highlight", icon: "highlighter", action: .highlight, enabled: hasTextSelection)
+                        tool("Draw freehand", icon: "pencil.and.outline", action: .drawFreehand)
+                        tool("Erase a drawing", icon: "eraser", action: .eraseDrawing)
+                    }
+
+                    section("Edit pages") {
+                        tool("Delete", icon: "trash", action: .deletePage, enabled: pageCount > 1 && hasSelectedPage)
+                        tool("Extract", icon: "doc.badge.arrow.up", action: .extractPage, enabled: hasSelectedPage)
+                        menuTool("Reorder", icon: "rectangle.2.swap") {
+                            Button("Move page earlier") { onAction(.movePageEarlier) }
+                            Button("Move page later") { onAction(.movePageLater) }
+                        }
+                        menuTool("Rotate", icon: "rotate.right") {
+                            Button("Rotate left") { onAction(.rotateLeft) }
+                            Button("Rotate right") { onAction(.rotateRight) }
+                        }
+                        tool("Insert", icon: "doc.badge.plus", action: .insertPage)
+                        tool("Crop", icon: "crop", action: .cropPage, enabled: hasSelectedPage)
+                        tool("Number Pages", icon: "number.square", action: .numberPages)
+                    }
+
+                    section("Organize a PDF") {
+                        tool("Combine files", icon: "doc.on.doc", action: .combineFiles)
+                        tool("Split a PDF", icon: "square.split.2x1", action: .splitPDF, enabled: pageCount > 0)
+                        tool("Compress PDF", icon: "arrow.down.right.and.arrow.up.left", action: .compressPDF)
+                    }
+
+                    section("Export PDF to") {
+                        tool("Microsoft Word", icon: "doc.text", action: .exportWord)
+                        tool("Microsoft Excel", icon: "tablecells", action: .exportExcel)
+                        tool("Microsoft PowerPoint", icon: "rectangle.on.rectangle", action: .exportPowerPoint)
+                        tool("Image format", icon: "photo", action: .exportImage)
+                    }
+
+                    section("E-sign") {
+                        tool("Fill & Sign", icon: "pencil.and.scribble", action: .fillAndSign)
+                        tool("Request e-signatures", icon: "paperplane", action: .requestSignatures)
+                        tool("Add a signature", icon: "signature", action: .addSignature)
+                        tool("Create e-sign template", icon: "doc.badge.gearshape", action: .createSignTemplate)
+                        tool("Create a web form", icon: "network", action: .createWebForm)
+                        tool("Send in bulk", icon: "person.3", action: .sendInBulk)
+                        tool("Add e-sign branding", icon: "paintpalette", action: .addSignBranding)
+                    }
+
+                    section("Secure PDF") {
+                        tool("Protect PDF", icon: "lock", action: .protectPDF)
+                        tool("Redact PDF", icon: "rectangle.fill", action: .redactPDF)
+                    }
+                }
+                .padding(.bottom, 18)
+            }
+        }
+        .background(.background)
+    }
+
+    private func section<Content: View>(
+        _ title: String,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        let isExpanded = Binding(
+            get: { expandedSections.contains(title) },
+            set: { expanded in
+                if expanded { expandedSections.insert(title) }
+                else { expandedSections.remove(title) }
+            }
+        )
+        return DisclosureGroup(isExpanded: isExpanded) {
+            VStack(spacing: 2) { content() }
+                .padding(.top, 6)
+        } label: {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+        }
+        .tint(.primary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func tool(
+        _ title: String,
+        icon: String,
+        action: PDFToolAction,
+        enabled: Bool = true
+    ) -> some View {
+        Button { onAction(action) } label: {
+            ToolRowLabel(title: title, icon: icon)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private func menuTool<Content: View>(
+        _ title: String,
+        icon: String,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        Menu(content: content) {
+            ToolRowLabel(title: title, icon: icon, showsDisclosure: true)
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(!hasSelectedPage)
+    }
+}
+
+private struct ToolRowLabel: View {
+    let title: String
+    let icon: String
+    var showsDisclosure = false
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: icon)
+                .frame(width: 22)
+                .foregroundStyle(.secondary)
+            Text(title)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 6)
+            if showsDisclosure {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .font(.callout)
+        .contentShape(Rectangle())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+    }
+}
+
+struct PDFRightPanel: View {
+    let page: PDFPage?
+    let pageCount: Int
+    @Binding var selectedPageIndex: Int?
+    @Binding var viewerMode: PDFViewerMode
+    let onViewerCommand: (PDFViewerCommand.Action) -> Void
+    let onAddComment: () -> Void
+    let onFullScreen: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Button(action: onAddComment) {
+                    Label("Add a comment", systemImage: "note.text.badge.plus")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.borderedProminent)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Page")
+                        .font(.headline)
+                    if let page, let selectedPageIndex {
+                        PageThumbnailView(page: page, pageNumber: selectedPageIndex + 1)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        ContentUnavailableView("No page", systemImage: "doc")
+                            .frame(height: 150)
+                    }
+                    HStack {
+                        Button {
+                            guard let index = selectedPageIndex, index > 0 else { return }
+                            selectedPageIndex = index - 1
+                        } label: {
+                            Image(systemName: "chevron.up")
+                        }
+                        .disabled((selectedPageIndex ?? 0) <= 0)
+                        Spacer()
+                        Text(pageCounter)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            guard let index = selectedPageIndex, index + 1 < pageCount else { return }
+                            selectedPageIndex = index + 1
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .disabled((selectedPageIndex ?? pageCount) + 1 >= pageCount)
+                    }
+                    .buttonStyle(.borderless)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Zoom")
+                        .font(.headline)
+                        .padding(.bottom, 5)
+                    modeButton("Single-page view", icon: "doc", mode: .singlePage)
+                    modeButton("Two-page view", icon: "book.pages", mode: .twoPage)
+                    modeButton("View with scrolling", icon: "scroll", mode: .scrolling)
+                    commandButton("Fit one page", icon: "arrow.up.left.and.arrow.down.right", action: .fitPage)
+                    commandButton("Fit to width", icon: "arrow.left.and.right", action: .fitWidth)
+                    Button(action: onFullScreen) {
+                        ToolRowLabel(title: "Full screen", icon: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(.plain)
+                    commandButton("Zoom in", icon: "plus.magnifyingglass", action: .zoomIn)
+                    commandButton("Zoom out", icon: "minus.magnifyingglass", action: .zoomOut)
+                }
+            }
+            .padding(16)
+        }
+        .background(.background)
+    }
+
+    private var pageCounter: String {
+        guard let selectedPageIndex else { return "0 / \(pageCount)" }
+        return "\(selectedPageIndex + 1) / \(pageCount)"
+    }
+
+    private func modeButton(_ title: String, icon: String, mode: PDFViewerMode) -> some View {
+        Button { viewerMode = mode } label: {
+            HStack {
+                ToolRowLabel(title: title, icon: icon)
+                if viewerMode == mode {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.tint)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func commandButton(
+        _ title: String,
+        icon: String,
+        action: PDFViewerCommand.Action
+    ) -> some View {
+        Button { onViewerCommand(action) } label: {
+            ToolRowLabel(title: title, icon: icon)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct ProtectedPDFMergeView: View {
     let filename: String
     let onMerge: (String) throws -> Void
@@ -13,12 +308,12 @@ struct ProtectedPDFMergeView: View {
         NavigationStack {
             Form {
                 Section {
-                    SecureField("PDF 密碼", text: $password)
+                    SecureField("PDF password", text: $password)
                         .onSubmit(merge)
                 } header: {
                     Text(filename)
                 } footer: {
-                    Text("密碼只用於本次匯入，不會儲存。")
+                    Text("The password is used only for this import and is not stored.")
                 }
 
                 if let errorMessage {
@@ -26,13 +321,13 @@ struct ProtectedPDFMergeView: View {
                         .foregroundStyle(.red)
                 }
             }
-            .navigationTitle("合併受保護 PDF")
+            .navigationTitle("Combine Protected PDF")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("解鎖並合併", action: merge)
+                    Button("Unlock and Combine", action: merge)
                         .disabled(password.isEmpty)
                 }
             }
@@ -62,27 +357,27 @@ struct OCRBatchResultView: View {
     var body: some View {
         NavigationStack {
             List {
-                LabeledContent("辨識頁面", value: "\(result.recognizedPageCount)")
-                LabeledContent("文字區塊", value: "\(result.recognizedItemCount)")
-                LabeledContent("略過真實文字頁", value: "\(result.skippedTextPageIndices.count)")
-                LabeledContent("沒有辨識結果", value: "\(result.emptyPageIndices.count)")
+                LabeledContent("Recognized pages", value: "\(result.recognizedPageCount)")
+                LabeledContent("Text blocks", value: "\(result.recognizedItemCount)")
+                LabeledContent("Skipped text pages", value: "\(result.skippedTextPageIndices.count)")
+                LabeledContent("No recognition result", value: "\(result.emptyPageIndices.count)")
 
                 if !result.recognizedPages.isEmpty {
-                    Section("將加入可搜尋文字層") {
+                    Section("Searchable text layers to add") {
                         ForEach(result.recognizedPages) { page in
-                            Text("第 \(page.pageIndex + 1) 頁 · \(page.observations.count) 個文字區塊")
+                            Text("Page \(page.pageIndex + 1) · \(page.observations.count) text blocks")
                         }
                     }
                 }
             }
-            .navigationTitle("整份文件 OCR 結果")
+            .navigationTitle("Document OCR Results")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
                 if !result.recognizedPages.isEmpty {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("加入可搜尋文字層") {
+                        Button("Add Searchable Text Layers") {
                             onAddTextLayers()
                             dismiss()
                         }
@@ -117,14 +412,14 @@ struct PageObjectInspectorView: View {
 
                     if object.kind == .text {
                         TextField(
-                            "文字",
+                            "Text",
                             text: Binding(
                                 get: { replacementText[object.id] ?? object.text ?? "" },
                                 set: { replacementText[object.id] = $0 }
                             )
                         )
                         .textFieldStyle(.roundedBorder)
-                        Button("套用文字修改") {
+                        Button("Apply Text Change") {
                             onReplaceText(
                                 object,
                                 replacementText[object.id] ?? object.text ?? ""
@@ -133,7 +428,7 @@ struct PageObjectInspectorView: View {
                     }
 
                     if object.kind == .image {
-                        Button("替換圖片…") { onReplaceImage(object) }
+                        Button("Replace Image…") { onReplaceImage(object) }
                     }
 
                     HStack {
@@ -141,24 +436,24 @@ struct PageObjectInspectorView: View {
                         Button("→") { onMove(object, CGSize(width: 5, height: 0)) }
                         Button("↑") { onMove(object, CGSize(width: 0, height: 5)) }
                         Button("↓") { onMove(object, CGSize(width: 0, height: -5)) }
-                        Menu("層級") {
-                            Button("移至最前") {
+                        Menu("Layer") {
+                            Button("Bring to Front") {
                                 onMoveToIndex(object, siblingCount(for: object) - 1)
                             }
-                            Button("移至最後") { onMoveToIndex(object, 0) }
+                            Button("Send to Back") { onMoveToIndex(object, 0) }
                         }
                         .disabled(siblingCount(for: object) < 2)
                         Spacer()
-                        Button("刪除", role: .destructive) { onDelete(object) }
+                        Button("Delete", role: .destructive) { onDelete(object) }
                     }
                     .buttonStyle(.bordered)
                 }
                 .padding(.vertical, 4)
             }
-            .navigationTitle("PDF 物件")
+            .navigationTitle("PDF Objects")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
         }
@@ -168,12 +463,12 @@ struct PageObjectInspectorView: View {
     private func objectTitle(_ object: PDFPageObjectSnapshot) -> String {
         let type: String
         switch object.kind {
-        case .text: type = "文字"
-        case .image: type = "圖片"
-        case .path: type = "向量路徑"
-        case .form: type = "表單物件"
-        case .shading: type = "漸層"
-        case .unknown: type = "未知物件"
+        case .text: type = "Text"
+        case .image: type = "Image"
+        case .path: type = "Vector Path"
+        case .form: type = "Form Object"
+        case .shading: type = "Gradient"
+        case .unknown: type = "Unknown Object"
         }
         if let fontName = object.fontName, let fontSize = object.fontSize {
             let nesting = object.isNestedInForm ? " · Form \(object.path.displayValue)" : ""
@@ -236,13 +531,13 @@ struct SignaturePadView: View {
                 )
                 .padding()
             }
-            .navigationTitle("手寫簽名")
+            .navigationTitle("Handwritten Signature")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("清除") { strokes.removeAll() }
+                    Button("Clear") { strokes.removeAll() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("加入 PDF") {
+                    Button("Add to PDF") {
                         onSave(strokes.map(SignatureStroke.init(points:)))
                         dismiss()
                     }
@@ -275,13 +570,13 @@ struct AnnotationInspectorView: View {
             }
             .overlay {
                 if annotations.isEmpty {
-                    ContentUnavailableView("此頁沒有註解", systemImage: "note.text")
+                    ContentUnavailableView("No annotations on this page", systemImage: "note.text")
                 }
             }
-            .navigationTitle("頁面註解")
+            .navigationTitle("Page Annotations")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
         }
@@ -324,21 +619,21 @@ private struct AnnotationEditorRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(annotation.kind.displayName, systemImage: iconName)
+                Label(annotationTitle, systemImage: iconName)
                     .font(.headline)
                 Spacer()
-                Button(isSelected ? "已選取" : "在頁面選取", action: onSelect)
+                Button(isSelected ? "Selected" : "Select on Page", action: onSelect)
                     .buttonStyle(.bordered)
                     .disabled(isSelected)
             }
 
             if annotation.kind == .note || annotation.kind == .freeText {
-                TextField("內容", text: $contents, axis: .vertical)
+                TextField("Contents", text: $contents, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
             }
 
             HStack(spacing: 12) {
-                Text("顏色")
+                Text("Color")
                 ForEach(colorPresets.indices, id: \.self) { index in
                     let preset = colorPresets[index]
                     Button {
@@ -358,27 +653,27 @@ private struct AnnotationEditorRow: View {
             }
 
             HStack {
-                Text("透明度")
+                Text("Opacity")
                 Slider(value: $opacity, in: 0.05...1)
                 Text(opacity.formatted(.percent.precision(.fractionLength(0))))
                     .frame(width: 44, alignment: .trailing)
             }
 
             if annotation.kind == .freeText {
-                Stepper("字級 \(Int(fontSize)) pt", value: $fontSize, in: 6...144)
+                Stepper("Font size \(Int(fontSize)) pt", value: $fontSize, in: 6...144)
             }
             if annotation.kind == .ink {
-                Stepper("線寬 \(lineWidth.formatted(.number.precision(.fractionLength(1)))) pt", value: $lineWidth, in: 0.5...24, step: 0.5)
+                Stepper("Line width \(lineWidth.formatted(.number.precision(.fractionLength(1)))) pt", value: $lineWidth, in: 0.5...24, step: 0.5)
             }
 
             if annotation.hasAppearanceStream {
-                Label("此註解含固定外觀；只允許移動、縮放及修改內容。", systemImage: "exclamationmark.triangle")
+                Label("This annotation has a fixed appearance. Only moving, resizing, and content changes are allowed.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             HStack {
-                Button("套用") {
+                Button("Apply") {
                     onApply(PDFAnnotationUpdate(
                         contents: contents,
                         color: annotation.hasAppearanceStream ? nil : color.withAlpha(CGFloat(opacity)),
@@ -395,13 +690,23 @@ private struct AnnotationEditorRow: View {
                 }
                 .buttonStyle(.borderedProminent)
                 Spacer()
-                Button("刪除", role: .destructive, action: onDelete)
+                Button("Delete", role: .destructive, action: onDelete)
             }
         }
         .padding(.vertical, 6)
     }
 
     private var colorPresets: [PDFAnnotationColor] { [.yellow, .red, .blue, .black] }
+
+    private var annotationTitle: String {
+        switch annotation.kind {
+        case .note: "Comment"
+        case .freeText: "Free Text"
+        case .highlight: "Highlight"
+        case .ink: "Signature / Ink"
+        case .other: "Annotation"
+        }
+    }
 
     private var iconName: String {
         switch annotation.kind {

@@ -1,0 +1,5 @@
+# Swift Package Manager build artifacts
+.build/
+
+# Swift Package Manager and Xcode local settings
+.swiftpm/

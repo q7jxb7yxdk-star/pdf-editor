@@ -5,6 +5,24 @@ import SwiftUI
 #if os(macOS)
 import AppKit
 
+enum PDFViewerMode: Equatable {
+    case singlePage
+    case twoPage
+    case scrolling
+}
+
+struct PDFViewerCommand: Equatable {
+    enum Action: Equatable {
+        case fitPage
+        case fitWidth
+        case zoomIn
+        case zoomOut
+    }
+
+    let id = UUID()
+    let action: Action
+}
+
 struct PDFKitView: NSViewRepresentable {
     let document: PDFDocument
     @Binding var selectedPageIndex: Int?
@@ -18,6 +36,8 @@ struct PDFKitView: NSViewRepresentable {
     @Binding var selectedAnnotation: PDFAnnotationSnapshot?
     let annotationEditingEnabled: Bool
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+    let viewerMode: PDFViewerMode
+    let viewerCommand: PDFViewerCommand?
 
     func makeCoordinator() -> Coordinator { makeSharedCoordinator() }
 
@@ -29,7 +49,7 @@ struct PDFKitView: NSViewRepresentable {
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         updateCoordinator(context.coordinator)
-        update(pdfView)
+        update(pdfView, coordinator: context.coordinator)
     }
 
     static func dismantleNSView(_ pdfView: PDFView, coordinator: Coordinator) {
@@ -38,6 +58,24 @@ struct PDFKitView: NSViewRepresentable {
 }
 #elseif os(iOS)
 import UIKit
+
+enum PDFViewerMode: Equatable {
+    case singlePage
+    case twoPage
+    case scrolling
+}
+
+struct PDFViewerCommand: Equatable {
+    enum Action: Equatable {
+        case fitPage
+        case fitWidth
+        case zoomIn
+        case zoomOut
+    }
+
+    let id = UUID()
+    let action: Action
+}
 
 struct PDFKitView: UIViewRepresentable {
     let document: PDFDocument
@@ -52,6 +90,8 @@ struct PDFKitView: UIViewRepresentable {
     @Binding var selectedAnnotation: PDFAnnotationSnapshot?
     let annotationEditingEnabled: Bool
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+    let viewerMode: PDFViewerMode
+    let viewerCommand: PDFViewerCommand?
 
     func makeCoordinator() -> Coordinator { makeSharedCoordinator() }
 
@@ -63,7 +103,7 @@ struct PDFKitView: UIViewRepresentable {
 
     func updateUIView(_ pdfView: PDFView, context: Context) {
         updateCoordinator(context.coordinator)
-        update(pdfView)
+        update(pdfView, coordinator: context.coordinator)
     }
 
     static func dismantleUIView(_ pdfView: PDFView, coordinator: Coordinator) {
@@ -92,19 +132,21 @@ private extension PDFKitView {
     func makePDFView() -> PDFView {
         let pdfView = PDFView()
         pdfView.autoScales = true
-        pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
         pdfView.displaysPageBreaks = true
         pdfView.document = document
+        applyViewerMode(to: pdfView)
         goToSelectedPage(in: pdfView)
         return pdfView
     }
 
-    func update(_ pdfView: PDFView) {
+    func update(_ pdfView: PDFView, coordinator: Coordinator) {
         if pdfView.document !== document {
             pdfView.document = document
         }
         goToSelectedPage(in: pdfView)
+        applyViewerMode(to: pdfView)
+        applyViewerCommand(to: pdfView, coordinator: coordinator)
     }
 
     func updateCoordinator(_ coordinator: Coordinator) {
@@ -120,6 +162,42 @@ private extension PDFKitView {
         coordinator.annotationEditingEnabled = annotationEditingEnabled
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
         coordinator.refreshOverlay()
+    }
+
+    func applyViewerMode(to pdfView: PDFView) {
+        let displayMode: PDFDisplayMode
+        switch viewerMode {
+        case .singlePage: displayMode = .singlePage
+        case .twoPage: displayMode = .twoUp
+        case .scrolling: displayMode = .singlePageContinuous
+        }
+        guard pdfView.displayMode != displayMode else { return }
+        pdfView.displayMode = displayMode
+        pdfView.displayDirection = .vertical
+        pdfView.displaysAsBook = false
+    }
+
+    func applyViewerCommand(to pdfView: PDFView, coordinator: Coordinator) {
+        guard let viewerCommand,
+              coordinator.lastViewerCommandID != viewerCommand.id else { return }
+        coordinator.lastViewerCommandID = viewerCommand.id
+        switch viewerCommand.action {
+        case .fitPage:
+            pdfView.autoScales = true
+        case .fitWidth:
+            guard let page = pdfView.currentPage else { return }
+            pdfView.autoScales = false
+            let pageWidth = max(page.bounds(for: pdfView.displayBox).width, 1)
+            let availableWidth = max(pdfView.bounds.width - 28, 1)
+            let scale = availableWidth / pageWidth
+            pdfView.scaleFactor = min(max(scale, pdfView.minScaleFactor), pdfView.maxScaleFactor)
+        case .zoomIn:
+            pdfView.autoScales = false
+            pdfView.zoomIn(nil)
+        case .zoomOut:
+            pdfView.autoScales = false
+            pdfView.zoomOut(nil)
+        }
     }
 
     func goToSelectedPage(in pdfView: PDFView) {
@@ -155,6 +233,7 @@ extension PDFKitView {
             }
         }
         var onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+        var lastViewerCommandID: UUID?
 
         private weak var pdfView: PDFView?
         private var observers: [NSObjectProtocol] = []

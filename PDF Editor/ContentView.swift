@@ -2,6 +2,10 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(macOS)
+import AppKit
+#endif
+
 private enum FileImportPurpose: Equatable {
     case mergePDF
     case addImage
@@ -56,7 +60,13 @@ struct ContentView: View {
     @State private var showsAnnotationInspector = false
     @State private var replacementNotice: String?
     @State private var pendingMergeData: Data?
-    @State private var pendingMergeFilename = "受保護的 PDF"
+    @State private var pendingMergeFilename = "Protected PDF"
+    @State private var viewerMode: PDFViewerMode = .scrolling
+    @State private var viewerCommand: PDFViewerCommand?
+    @State private var unavailableTool: String?
+    @State private var showsCommentPrompt = false
+    @State private var showsToolPanel = false
+    @State private var showsViewPanel = false
 
     private let annotationService = PDFAnnotationService()
     private let ocrService = VisionOCRService()
@@ -67,14 +77,47 @@ struct ContentView: View {
     }
 
     private var editorRoot: some View {
-        NavigationSplitView {
-            pageSidebar
-                .navigationTitle("頁面")
-                .toolbar { pageToolbar }
-        } detail: {
-            documentView
+        GeometryReader { proxy in
+            if proxy.size.width >= 900 {
+                HStack(spacing: 0) {
+                    toolSidebar
+                        .frame(width: 270)
+                    Divider()
+                    documentView
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider()
+                    rightPanel
+                        .frame(width: 220)
+                }
+            } else {
+                documentView
+                    .sheet(isPresented: $showsToolPanel) {
+                        NavigationStack {
+                            toolSidebar
+                                .navigationTitle("Tools")
+                                .toolbar {
+                                    ToolbarItem(placement: .confirmationAction) {
+                                        Button("Done") { showsToolPanel = false }
+                                    }
+                                }
+                        }
+                        .frame(minWidth: 300, minHeight: 560)
+                    }
+                    .sheet(isPresented: $showsViewPanel) {
+                        NavigationStack {
+                            rightPanel
+                                .navigationTitle("View")
+                                .toolbar {
+                                    ToolbarItem(placement: .confirmationAction) {
+                                        Button("Done") { showsViewPanel = false }
+                                    }
+                                }
+                        }
+                        .frame(minWidth: 280, minHeight: 520)
+                    }
+            }
         }
-        .toolbar { editingToolbar }
+        .toolbar { adaptiveToolbar }
         .onChange(of: document.pageCount, initial: true) { _, pageCount in
             guard pageCount > 0 else {
                 selectedPageIndex = nil
@@ -93,52 +136,68 @@ struct ContentView: View {
 
     private var presentedEditor: some View {
         editorRoot
-        .alert("無法完成操作", isPresented: errorAlertBinding) {
-            Button("好", role: .cancel) {}
+        .alert("Unable to Complete Operation", isPresented: errorAlertBinding) {
+            Button("OK", role: .cancel) {}
         } message: {
-            Text(errorMessage ?? "未知錯誤")
+            Text(errorMessage ?? "Unknown error")
         }
-        .alert("數位簽章會失效", isPresented: $showsSignatureWarning) {
-            Button("取消", role: .cancel) {}
-            Button("仍要允許修改", role: .destructive) {
+        .alert("Digital Signatures Will Become Invalid", isPresented: $showsSignatureWarning) {
+            Button("Cancel", role: .cancel) {}
+            Button("Allow Editing", role: .destructive) {
                 document.authorizeDigitalSignatureInvalidation()
             }
         } message: {
-            Text("此 PDF 含有數位簽章。任何內容或註解修改都會令現有簽章失效；確認後請重新執行剛才的操作。")
+            Text("This PDF contains digital signatures. Editing content or annotations will invalidate them. Confirm, then repeat the operation.")
         }
-        .alert("移除 PDF 密碼保護？", isPresented: $showsPasswordRemovalConfirmation) {
-            Button("取消", role: .cancel) {}
-            Button("儲存時移除", role: .destructive) {
+        .alert("Remove PDF Password Protection?", isPresented: $showsPasswordRemovalConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Remove When Saving", role: .destructive) {
                 document.setRemovesPasswordProtectionOnSave(true)
             }
         } message: {
-            Text("下一次儲存會建立不再需要密碼的 PDF。原檔只有在你儲存覆寫時才會被取代。")
+            Text("The next save will create a PDF that no longer requires a password. The original is replaced only if you save over it.")
         }
-        .alert("新增文字", isPresented: $showsAddTextPrompt) {
-            TextField("文字", text: $newText)
-            Button("取消", role: .cancel) { newText = "" }
-            Button("加入") { addText(newText) }
+        .alert("Add Text", isPresented: $showsAddTextPrompt) {
+            TextField("Text", text: $newText)
+            Button("Cancel", role: .cancel) { newText = "" }
+            Button("Add") { addText(newText) }
                 .disabled(newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
-            Text("文字會加入目前頁面中央，之後可在 PDF 物件面板移動及修改。")
+            Text("Text will be added to the center of the current page. You can move or edit it from the PDF Objects panel.")
         }
-        .alert("修改原有文字", isPresented: $showsSelectedTextPrompt) {
-            TextField("文字", text: $selectedTextDraft)
-            Button("取消", role: .cancel) {}
-            Button("套用") {
+        .alert("Edit Existing Text", isPresented: $showsSelectedTextPrompt) {
+            TextField("Text", text: $selectedTextDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Apply") {
                 guard let selectedObject else { return }
                 replaceText(selectedObject, text: selectedTextDraft)
             }
         } message: {
-            Text("會先嘗試沿用原字型；缺字或需要複雜 shaping 時才使用 CoreText 替代層。")
+            Text("The editor first tries to preserve the original font. A CoreText replacement layer is used only for missing glyphs or complex shaping.")
         }
-        .alert("已使用安全替代文字層", isPresented: Binding(
+        .alert("Safe Replacement Text Layer Used", isPresented: Binding(
             get: { replacementNotice != nil },
             set: { if !$0 { replacementNotice = nil } }
         )) {
-            Button("好", role: .cancel) {}
+            Button("OK", role: .cancel) {}
         } message: {
             Text(replacementNotice ?? "")
+        }
+        .alert("Add a comment", isPresented: $showsCommentPrompt) {
+            TextField("Comment", text: $annotationText)
+            Button("Cancel", role: .cancel) { annotationText = "" }
+            Button("Add") { addNote() }
+                .disabled(annotationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("The comment will be placed near the center of the current page.")
+        }
+        .alert("Feature unavailable", isPresented: Binding(
+            get: { unavailableTool != nil },
+            set: { if !$0 { unavailableTool = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("\(unavailableTool ?? "This tool") is visible in the workspace, but its PDF processing workflow has not been implemented yet.")
         }
         .sheet(isPresented: $showsObjectInspector) {
             PageObjectInspectorView(
@@ -228,24 +287,24 @@ struct ContentView: View {
         if document.isLocked {
             VStack(spacing: 14) {
                 ContentUnavailableView(
-                    "需要密碼",
+                    "Password Required",
                     systemImage: "lock",
-                    description: Text("輸入正確密碼後才會載入及編輯此 PDF。")
+                    description: Text("Enter the correct password to load and edit this PDF.")
                 )
-                SecureField("PDF 密碼", text: $password)
+                SecureField("PDF password", text: $password)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 320)
                     .onSubmit(unlockDocument)
-                Button("解鎖", action: unlockDocument)
+                Button("Unlock", action: unlockDocument)
                     .buttonStyle(.borderedProminent)
                     .disabled(password.isEmpty)
             }
             .padding()
         } else if document.pageCount == 0 {
             ContentUnavailableView(
-                "空白 PDF",
+                "Empty PDF",
                 systemImage: "doc",
-                description: Text("此文件沒有頁面。")
+                description: Text("This document has no pages.")
             )
         } else {
             PDFKitView(
@@ -260,52 +319,43 @@ struct ContentView: View {
                 annotations: pageAnnotations,
                 selectedAnnotation: $selectedAnnotation,
                 annotationEditingEnabled: annotationEditingEnabled,
-                onSetAnnotationBounds: setAnnotationBounds
+                onSetAnnotationBounds: setAnnotationBounds,
+                viewerMode: viewerMode,
+                viewerCommand: viewerCommand
             )
             .ignoresSafeArea(.container, edges: .bottom)
         }
     }
 
-    @ToolbarContentBuilder
-    private var pageToolbar: some ToolbarContent {
-        ToolbarItemGroup {
-            Button {
-                apply(.insertBlankPage(at: document.pageCount, size: .a4), name: "新增頁面")
-            } label: {
-                Label("新增頁面", systemImage: "plus")
-            }
-            Button(role: .destructive) {
-                guard let index = selectedPageIndex else { return }
-                apply(.deletePage(at: index), name: "刪除頁面")
-            } label: {
-                Label("刪除頁面", systemImage: "trash")
-            }
-            .disabled(document.pageCount <= 1 || selectedPageIndex == nil)
-        }
+    private var toolSidebar: some View {
+        PDFToolSidebar(
+            pageCount: document.pageCount,
+            hasSelectedPage: selectedPageIndex != nil,
+            hasTextSelection: pdfSelection != nil,
+            onAction: handleToolAction
+        )
+    }
+
+    private var rightPanel: some View {
+        PDFRightPanel(
+            page: selectedPage,
+            pageCount: document.pageCount,
+            selectedPageIndex: $selectedPageIndex,
+            viewerMode: $viewerMode,
+            onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
+            onAddComment: { showsCommentPrompt = true },
+            onFullScreen: toggleFullScreen
+        )
     }
 
     @ToolbarContentBuilder
-    private var editingToolbar: some ToolbarContent {
+    private var adaptiveToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            Menu {
-                Button("向左旋轉") { rotate(by: -90) }
-                Button("向右旋轉") { rotate(by: 90) }
-                Divider()
-                Button("向前移一頁") { movePage(by: -1) }
-                Button("向後移一頁") { movePage(by: 1) }
-                Divider()
-                Button("合併另一個 PDF…") { beginFileImport(.mergePDF) }
-                Button("匯出目前頁面…") { exportSelectedPage() }
-                Button("分割成每頁一個 PDF…") { splitEveryPage() }
-            } label: {
-                Label("頁面工具", systemImage: "rectangle.stack")
+            Button { showsToolPanel = true } label: {
+                Label("Tools", systemImage: "wrench.and.screwdriver")
             }
-            Menu {
-                Button("檢視及修改原有物件…") { loadObjects() }
-                Button("新增文字") { showsAddTextPrompt = true }
-                Button("新增圖片…") { beginFileImport(.addImage) }
-            } label: {
-                Label("內容工具", systemImage: "textformat")
+            Button { showsViewPanel = true } label: {
+                Label("View", systemImage: "sidebar.right")
             }
             Button {
                 objectEditingEnabled.toggle()
@@ -315,7 +365,7 @@ struct ContentView: View {
                 if objectEditingEnabled { loadCanvasObjects() }
             } label: {
                 Label(
-                    objectEditingEnabled ? "結束物件編輯" : "直接編輯物件",
+                    objectEditingEnabled ? "Finish object editing" : "Edit PDF objects",
                     systemImage: objectEditingEnabled ? "cursorarrow.rays" : "cursorarrow.click"
                 )
             }
@@ -327,68 +377,221 @@ struct ContentView: View {
                 if annotationEditingEnabled { loadCanvasAnnotations() }
             } label: {
                 Label(
-                    annotationEditingEnabled ? "結束註解編輯" : "直接編輯註解",
+                    annotationEditingEnabled ? "Finish annotation editing" : "Edit annotations",
+                    systemImage: annotationEditingEnabled ? "pencil.line" : "pencil.tip.crop.circle"
+                )
+            }
+            Menu {
+                Button("Recognize current page", action: runOCR)
+                    .disabled(selectedPage == nil)
+                Button("Recognize all scanned pages", action: runDocumentOCR)
+                    .disabled(document.pageCount == 0)
+            } label: {
+                Label("OCR", systemImage: "viewfinder")
+            }
+            .disabled(isRunningOCR)
+        }
+    }
+
+    private func handleToolAction(_ action: PDFToolAction) {
+        switch action {
+        case .addComment:
+            showsCommentPrompt = true
+        case .highlight:
+            addHighlight()
+        case .deletePage:
+            guard let index = selectedPageIndex else { return }
+            apply(.deletePage(at: index), name: "Delete Page")
+        case .extractPage:
+            exportSelectedPage()
+        case .movePageEarlier:
+            movePage(by: -1)
+        case .movePageLater:
+            movePage(by: 1)
+        case .rotateLeft:
+            rotate(by: -90)
+        case .rotateRight:
+            rotate(by: 90)
+        case .insertPage:
+            let insertionIndex = min((selectedPageIndex ?? document.pageCount - 1) + 1, document.pageCount)
+            apply(.insertBlankPage(at: insertionIndex, size: .a4), name: "Insert Page")
+            selectedPageIndex = insertionIndex
+        case .combineFiles:
+            beginFileImport(.mergePDF)
+        case .splitPDF:
+            splitEveryPage()
+        case .fillAndSign, .addSignature:
+            showsSignaturePad = true
+        case .drawFreehand:
+            showsSignaturePad = true
+        case .eraseDrawing:
+            loadAnnotations()
+        case .cropPage:
+            showUnavailable("Crop")
+        case .numberPages:
+            showUnavailable("Number Pages")
+        case .compressPDF:
+            showUnavailable("Compress PDF")
+        case .exportWord:
+            showUnavailable("Microsoft Word export")
+        case .exportExcel:
+            showUnavailable("Microsoft Excel export")
+        case .exportPowerPoint:
+            showUnavailable("Microsoft PowerPoint export")
+        case .exportImage:
+            showUnavailable("Image format export")
+        case .requestSignatures:
+            showUnavailable("Request e-signatures")
+        case .createSignTemplate:
+            showUnavailable("Create e-sign template")
+        case .createWebForm:
+            showUnavailable("Create a web form")
+        case .sendInBulk:
+            showUnavailable("Send in bulk")
+        case .addSignBranding:
+            showUnavailable("Add e-sign branding")
+        case .protectPDF:
+            showUnavailable("Protect PDF")
+        case .redactPDF:
+            showUnavailable("Redact PDF")
+        }
+    }
+
+    private func showUnavailable(_ tool: String) {
+        unavailableTool = tool
+    }
+
+    private func toggleFullScreen() {
+#if os(macOS)
+        NSApp.keyWindow?.toggleFullScreen(nil)
+#else
+        showUnavailable("Full screen")
+#endif
+    }
+
+    @ToolbarContentBuilder
+    private var pageToolbar: some ToolbarContent {
+        ToolbarItemGroup {
+            Button {
+                apply(.insertBlankPage(at: document.pageCount, size: .a4), name: "Insert Page")
+            } label: {
+                Label("Insert Page", systemImage: "plus")
+            }
+            Button(role: .destructive) {
+                guard let index = selectedPageIndex else { return }
+                apply(.deletePage(at: index), name: "Delete Page")
+            } label: {
+                Label("Delete Page", systemImage: "trash")
+            }
+            .disabled(document.pageCount <= 1 || selectedPageIndex == nil)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var editingToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Menu {
+                Button("Rotate Left") { rotate(by: -90) }
+                Button("Rotate Right") { rotate(by: 90) }
+                Divider()
+                Button("Move Page Earlier") { movePage(by: -1) }
+                Button("Move Page Later") { movePage(by: 1) }
+                Divider()
+                Button("Combine Another PDF…") { beginFileImport(.mergePDF) }
+                Button("Extract Current Page…") { exportSelectedPage() }
+                Button("Split into Individual Pages…") { splitEveryPage() }
+            } label: {
+                Label("Page Tools", systemImage: "rectangle.stack")
+            }
+            Menu {
+                Button("Inspect and Edit Existing Objects…") { loadObjects() }
+                Button("Add Text") { showsAddTextPrompt = true }
+                Button("Add Image…") { beginFileImport(.addImage) }
+            } label: {
+                Label("Content Tools", systemImage: "textformat")
+            }
+            Button {
+                objectEditingEnabled.toggle()
+                annotationEditingEnabled = false
+                selectedAnnotation = nil
+                selectedObject = nil
+                if objectEditingEnabled { loadCanvasObjects() }
+            } label: {
+                Label(
+                    objectEditingEnabled ? "Finish Object Editing" : "Edit Objects Directly",
+                    systemImage: objectEditingEnabled ? "cursorarrow.rays" : "cursorarrow.click"
+                )
+            }
+            Button {
+                annotationEditingEnabled.toggle()
+                objectEditingEnabled = false
+                selectedObject = nil
+                selectedAnnotation = nil
+                if annotationEditingEnabled { loadCanvasAnnotations() }
+            } label: {
+                Label(
+                    annotationEditingEnabled ? "Finish Annotation Editing" : "Edit Annotations Directly",
                     systemImage: annotationEditingEnabled ? "pencil.line" : "pencil.tip.crop.circle"
                 )
             }
             if annotationEditingEnabled, let selectedAnnotation {
                 Menu {
-                    Button("向左移 5 pt") { nudgeAnnotation(selectedAnnotation, dx: -5, dy: 0) }
-                    Button("向右移 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 5, dy: 0) }
-                    Button("向上移 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 0, dy: 5) }
-                    Button("向下移 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 0, dy: -5) }
+                    Button("Move Left 5 pt") { nudgeAnnotation(selectedAnnotation, dx: -5, dy: 0) }
+                    Button("Move Right 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 5, dy: 0) }
+                    Button("Move Up 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 0, dy: 5) }
+                    Button("Move Down 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 0, dy: -5) }
                     Divider()
-                    Button("放大 10%") { scaleAnnotation(selectedAnnotation, factor: 1.1) }
-                    Button("縮小 10%") { scaleAnnotation(selectedAnnotation, factor: 0.9) }
+                    Button("Enlarge 10%") { scaleAnnotation(selectedAnnotation, factor: 1.1) }
+                    Button("Reduce 10%") { scaleAnnotation(selectedAnnotation, factor: 0.9) }
                     Divider()
-                    Button("編輯屬性…") { showsAnnotationInspector = true }
-                    Button("刪除", role: .destructive) { deleteAnnotation(selectedAnnotation) }
+                    Button("Edit Properties…") { showsAnnotationInspector = true }
+                    Button("Delete", role: .destructive) { deleteAnnotation(selectedAnnotation) }
                 } label: {
-                    Label("選取註解", systemImage: "square.dashed.inset.filled")
+                    Label("Selected Annotation", systemImage: "square.dashed.inset.filled")
                 }
             }
             if objectEditingEnabled, let selectedObject {
                 Menu {
                     if selectedObject.kind == .text {
-                        Button("修改文字…") {
+                        Button("Edit Text…") {
                             selectedTextDraft = selectedObject.text ?? ""
                             showsSelectedTextPrompt = true
                         }
                     }
                     if selectedObject.kind == .image {
-                        Button("替換圖片…") { beginImageReplacement(selectedObject) }
+                        Button("Replace Image…") { beginImageReplacement(selectedObject) }
                     }
                     Divider()
-                    Button("放大 10%") { scaleObject(selectedObject, factor: 1.1) }
-                    Button("縮小 10%") { scaleObject(selectedObject, factor: 0.9) }
-                    Button("向左旋轉 15°") { rotateObject(selectedObject, radians: .pi / 12) }
-                    Button("向右旋轉 15°") { rotateObject(selectedObject, radians: -.pi / 12) }
+                    Button("Enlarge 10%") { scaleObject(selectedObject, factor: 1.1) }
+                    Button("Reduce 10%") { scaleObject(selectedObject, factor: 0.9) }
+                    Button("Rotate Left 15°") { rotateObject(selectedObject, radians: .pi / 12) }
+                    Button("Rotate Right 15°") { rotateObject(selectedObject, radians: -.pi / 12) }
                     Divider()
-                    Button("移至最前") {
+                    Button("Bring to Front") {
                         moveObject(selectedObject, destinationIndex: siblingCount(for: selectedObject) - 1)
                     }
-                    Button("移至最後") { moveObject(selectedObject, destinationIndex: 0) }
+                    Button("Send to Back") { moveObject(selectedObject, destinationIndex: 0) }
                     Divider()
-                    Button("刪除", role: .destructive) { deleteObject(selectedObject) }
+                    Button("Delete", role: .destructive) { deleteObject(selectedObject) }
                 } label: {
-                    Label("選取物件", systemImage: "square.dashed")
+                    Label("Selected Object", systemImage: "square.dashed")
                 }
             }
             Menu {
-                TextField("註解文字", text: $annotationText)
-                Button("新增文字註解") { addFreeText() }
-                Button("新增便條") { addNote() }
-                Button("標示選取文字") { addHighlight() }
+                TextField("Annotation text", text: $annotationText)
+                Button("Add Text Annotation") { addFreeText() }
+                Button("Add Comment") { addNote() }
+                Button("Highlight Selected Text") { addHighlight() }
                     .disabled(pdfSelection == nil)
-                Button("手寫簽名…") { showsSignaturePad = true }
-                Button("管理頁面註解…") { loadAnnotations() }
+                Button("Handwritten Signature…") { showsSignaturePad = true }
+                Button("Manage Page Annotations…") { loadAnnotations() }
             } label: {
-                Label("註解與簽名", systemImage: "pencil.and.scribble")
+                Label("Annotations and Signatures", systemImage: "pencil.and.scribble")
             }
             Menu {
-                Button("辨識目前頁面", action: runOCR)
+                Button("Recognize Current Page", action: runOCR)
                     .disabled(selectedPage == nil)
-                Button("辨識所有掃描頁面", action: runDocumentOCR)
+                Button("Recognize All Scanned Pages", action: runDocumentOCR)
                     .disabled(document.pageCount == 0)
             } label: {
                 Label("OCR", systemImage: "viewfinder")
@@ -396,7 +599,7 @@ struct ContentView: View {
             .disabled(isRunningOCR)
             if document.isEncrypted && !document.isLocked {
                 Toggle(
-                    "儲存時移除密碼",
+                    "Remove Password When Saving",
                     isOn: Binding(
                         get: { document.removesPasswordProtectionOnSave },
                         set: { newValue in
@@ -428,16 +631,16 @@ struct ContentView: View {
                 switch ocrResult {
                 case let .existingText(text):
                     ContentUnavailableView(
-                        "不需要 OCR",
+                        "OCR Not Needed",
                         systemImage: "text.cursor",
-                        description: Text("此頁已有可選取的真實文字：\n\(text.prefix(300))")
+                        description: Text("This page already contains selectable text:\n\(text.prefix(300))")
                     )
                 case let .recognized(observations):
                     List(observations.indices, id: \.self) { index in
                         let item = observations[index]
                         VStack(alignment: .leading) {
                             Text(item.text)
-                            Text("信心度 \(item.confidence.formatted(.percent.precision(.fractionLength(0))))")
+                            Text("Confidence \(item.confidence.formatted(.percent.precision(.fractionLength(0))))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -446,17 +649,17 @@ struct ContentView: View {
                     ProgressView()
                 }
             }
-            .navigationTitle("OCR 結果")
+            .navigationTitle("OCR Results")
             .toolbar {
                 if let observations = recognizedOCRObservations, !observations.isEmpty {
                     ToolbarItem(placement: .primaryAction) {
-                        Button("加入可搜尋文字層") {
+                        Button("Add Searchable Text Layer") {
                             addOCRTextLayer(observations)
                         }
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { showsOCRResult = false }
+                    Button("Done") { showsOCRResult = false }
                 }
             }
         }
@@ -483,14 +686,14 @@ struct ContentView: View {
 
     private func rotate(by degrees: Int) {
         guard let index = selectedPageIndex else { return }
-        apply(.rotatePage(at: index, byDegrees: degrees), name: "旋轉頁面")
+        apply(.rotatePage(at: index, byDegrees: degrees), name: "Rotate Page")
     }
 
     private func movePage(by offset: Int) {
         guard let index = selectedPageIndex else { return }
         let destination = index + offset
         guard (0..<document.pageCount).contains(destination) else { return }
-        apply(.movePage(from: index, to: destination), name: "重新排列頁面")
+        apply(.movePage(from: index, to: destination), name: "Reorder Page")
         selectedPageIndex = destination
     }
 
@@ -500,7 +703,7 @@ struct ContentView: View {
             let result = try document.apply(
                 .split(ranges: [PDFPageRange(index, through: index)]),
                 undoManager: nil,
-                actionName: "分割 PDF"
+                actionName: "Split PDF"
             )
             guard case let .split(documents) = result, let data = documents.first else { return }
             splitExportDocument = PDFExportDocument(data: data, filename: "Page \(index + 1).pdf")
@@ -514,7 +717,7 @@ struct ContentView: View {
             let result = try document.apply(
                 .split(ranges: ranges),
                 undoManager: nil,
-                actionName: "分割 PDF"
+                actionName: "Split PDF"
             )
             guard case let .split(documents) = result else { return }
             splitExportDocuments = documents.enumerated().map {
@@ -538,7 +741,7 @@ struct ContentView: View {
             } else {
                 apply(
                     .merge(documentData: data, password: nil, at: document.pageCount),
-                    name: "合併 PDF"
+                    name: "Combine PDF"
                 )
             }
         } catch { present(error) }
@@ -584,10 +787,10 @@ struct ContentView: View {
                 at: document.pageCount
             ),
             undoManager: undoManager,
-            actionName: "合併受保護 PDF"
+            actionName: "Combine Protected PDF"
         )
         self.pendingMergeData = nil
-        pendingMergeFilename = "受保護的 PDF"
+        pendingMergeFilename = "Protected PDF"
     }
 
     private func loadObjects() {
@@ -617,7 +820,15 @@ struct ContentView: View {
                 undoManager: undoManager
             )
             pageObjects = try document.pageObjects(at: object.pageIndex)
-            replacementNotice = result.userMessage
+            if case let .usedCoreTextFallback(originalFontName) = result {
+                replacementNotice = if let originalFontName {
+                    "The original font \(originalFontName) does not contain every required glyph or the text needs complex shaping. A searchable CoreText vector layer was used instead."
+                } else {
+                    "The original PDF font cannot safely render this text. A searchable CoreText vector layer was used instead."
+                }
+            } else {
+                replacementNotice = nil
+            }
         } catch { present(error) }
     }
 
@@ -780,7 +991,7 @@ struct ContentView: View {
     private func addFreeText() {
         guard let page = selectedPage else { return }
         do {
-            try document.mutateAnnotations(undoManager: undoManager, actionName: "新增文字註解") {
+            try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Text Annotation") {
                 let bounds = page.bounds(for: .cropBox)
                 _ = try annotationService.addFreeText(
                     text: annotationText,
@@ -796,7 +1007,7 @@ struct ContentView: View {
     private func addNote() {
         guard let page = selectedPage else { return }
         do {
-            try document.mutateAnnotations(undoManager: undoManager, actionName: "新增便條") {
+            try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Comment") {
                 let bounds = page.bounds(for: .cropBox)
                 _ = try annotationService.addNote(
                     text: annotationText,
@@ -812,7 +1023,7 @@ struct ContentView: View {
     private func addHighlight() {
         guard let selection = pdfSelection else { return }
         do {
-            try document.mutateAnnotations(undoManager: undoManager, actionName: "標示文字") {
+            try document.mutateAnnotations(undoManager: undoManager, actionName: "Highlight Text") {
                 _ = try annotationService.addHighlight(to: selection)
             }
             refreshAnnotationsIfNeeded()
@@ -822,7 +1033,7 @@ struct ContentView: View {
     private func addSignature(_ strokes: [SignatureStroke]) {
         guard let page = selectedPage else { return }
         do {
-            try document.mutateAnnotations(undoManager: undoManager, actionName: "新增簽名") {
+            try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Signature") {
                 let bounds = page.bounds(for: .cropBox)
                 _ = try annotationService.addSignature(
                     strokes: strokes,
@@ -1004,17 +1215,17 @@ private struct PhaseFiveWorkflowModifier: ViewModifier {
                             value: Double(ocrProgressCompleted),
                             total: Double(max(ocrProgressTotal, 1))
                         )
-                        Text("已檢查 \(ocrProgressCompleted)／\(ocrProgressTotal) 頁")
+                        Text("Checked \(ocrProgressCompleted) of \(ocrProgressTotal) pages")
                             .foregroundStyle(.secondary)
-                        Text("已有可選取真實文字的頁面會自動略過。")
+                        Text("Pages that already contain selectable text are skipped automatically.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .padding(28)
-                    .navigationTitle("正在辨識掃描頁面")
+                    .navigationTitle("Recognizing Scanned Pages")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("取消", action: onCancelOCR)
+                            Button("Cancel", action: onCancelOCR)
                         }
                     }
                 }
@@ -1039,7 +1250,7 @@ private struct PhaseFiveWorkflowModifier: ViewModifier {
                     set: {
                         if !$0 {
                             pendingMergeData = nil
-                            pendingMergeFilename = "受保護的 PDF"
+                            pendingMergeFilename = "Protected PDF"
                         }
                     }
                 )
