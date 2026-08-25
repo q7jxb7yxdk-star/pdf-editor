@@ -681,6 +681,62 @@ struct PDFCommentEditor: View {
     }
 }
 
+struct PDFAddCommentView: View {
+    @Binding var text: String
+    let onAdd: () -> Void
+    let onCancel: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var isEditorFocused: Bool
+
+    private var canAdd: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Enter the message for the selected document location.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                TextEditor(text: $text)
+                    .font(.body)
+                    .focused($isEditorFocused)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 150)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.separator, lineWidth: 1)
+                    }
+
+                Spacer(minLength: 0)
+            }
+            .padding()
+            .navigationTitle("Add a comment")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        onAdd()
+                        dismiss()
+                    }
+                    .disabled(!canAdd)
+                }
+            }
+            .onAppear { isEditorFocused = true }
+        }
+        .frame(minWidth: 320, idealWidth: 440, minHeight: 280, idealHeight: 320)
+    }
+}
+
 private struct AnnotationEditorRow: View {
     let annotation: PDFAnnotationSnapshot
     let isSelected: Bool

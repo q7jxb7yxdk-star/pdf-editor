@@ -39,7 +39,7 @@ struct ContentView: View {
     @State private var errorMessage: String?
     @State private var pageObjects: [PDFPageObjectSnapshot] = []
     @State private var selectedObject: PDFPageObjectSnapshot?
-    @State private var objectEditingEnabled = false
+    private let objectEditingEnabled = true
     @State private var ocrResult: OCRPageResult?
     @State private var ocrBatchResult: OCRBatchResult?
     @State private var ocrBatchTask: Task<Void, Never>?
@@ -55,9 +55,8 @@ struct ContentView: View {
     @State private var isSaving = false
     @State private var pageAnnotations: [PDFAnnotationSnapshot] = []
     @State private var selectedAnnotation: PDFAnnotationSnapshot?
-    @State private var annotationEditingEnabled = true
+    private let annotationEditingEnabled = true
     @State private var newText = ""
-    @State private var selectedTextDraft = ""
     @State private var showsFileImporter = false
     @State private var fileImportPurpose: FileImportPurpose = .mergePDF
     @State private var imageReplacementTarget: PDFPageObjectSnapshot?
@@ -67,7 +66,6 @@ struct ContentView: View {
     @State private var showsSignatureWarning = false
     @State private var showsPasswordRemovalConfirmation = false
     @State private var showsAddTextPrompt = false
-    @State private var showsSelectedTextPrompt = false
     @State private var showsAnnotationInspector = false
     @State private var replacementNotice: String?
     @State private var pendingMergeData: Data?
@@ -168,14 +166,22 @@ struct ContentView: View {
                 selectedPageIndex = nil
                 return
             }
-            if let selectedPageIndex, selectedPageIndex < pageCount { return }
+            if let selectedPageIndex, selectedPageIndex < pageCount {
+                loadCanvasObjects()
+                loadCanvasAnnotations()
+                return
+            }
             selectedPageIndex = 0
         }
         .onChange(of: selectedPageIndex) { _, _ in
             selectedObject = nil
             selectedAnnotation = nil
-            if objectEditingEnabled { loadCanvasObjects() }
-            if annotationEditingEnabled { loadCanvasAnnotations() }
+            loadCanvasObjects()
+            loadCanvasAnnotations()
+        }
+        .onChange(of: editorState.revision) { _, _ in
+            loadCanvasObjects()
+            loadCanvasAnnotations()
         }
     }
 
@@ -210,16 +216,6 @@ struct ContentView: View {
         } message: {
             Text("Text will be added to the center of the current page. You can move or edit it from the PDF Objects panel.")
         }
-        .alert("Edit Existing Text", isPresented: $showsSelectedTextPrompt) {
-            TextField("Text", text: $selectedTextDraft)
-            Button("Cancel", role: .cancel) {}
-            Button("Apply") {
-                guard let selectedObject else { return }
-                replaceText(selectedObject, text: selectedTextDraft)
-            }
-        } message: {
-            Text("The editor first tries to preserve the original font. A CoreText replacement layer is used only for missing glyphs or complex shaping.")
-        }
         .alert("Safe Replacement Text Layer Used", isPresented: Binding(
             get: { replacementNotice != nil },
             set: { if !$0 { replacementNotice = nil } }
@@ -227,14 +223,6 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(replacementNotice ?? "")
-        }
-        .alert("Add a comment", isPresented: $showsCommentPrompt) {
-            TextField("Comment", text: $annotationText)
-            Button("Cancel", role: .cancel) { cancelCommentPlacement() }
-            Button("Add") { addNote(at: pendingCommentPlacement) }
-                .disabled(annotationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        } message: {
-            Text("Enter the message for the selected document location.")
         }
         .alert("Feature unavailable", isPresented: Binding(
             get: { unavailableTool != nil },
@@ -272,6 +260,13 @@ struct ContentView: View {
                 annotation: annotation,
                 onApply: { updateAnnotation(annotation, update: $0) },
                 onDelete: { deleteAnnotation(annotation) }
+            )
+        }
+        .sheet(isPresented: $showsCommentPrompt, onDismiss: cancelCommentPlacement) {
+            PDFAddCommentView(
+                text: $annotationText,
+                onAdd: { addNote(at: pendingCommentPlacement) },
+                onCancel: cancelCommentPlacement
             )
         }
         .sheet(isPresented: $showsOCRResult) { ocrResultView }
@@ -390,6 +385,9 @@ struct ContentView: View {
                     onSetAnnotationBounds: setAnnotationBounds,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
+                    onReplaceTextObject: replaceText,
+                    onReplaceAnnotationText: replaceAnnotationText,
+                    onOpenObject: openObject,
                     onOpenAnnotation: openAnnotation,
                     viewerMode: viewerMode,
                     viewerCommand: viewerCommand
@@ -464,23 +462,6 @@ struct ContentView: View {
                 Label("View", systemImage: "sidebar.right")
             }
             .help("View")
-            Button {
-                objectEditingEnabled.toggle()
-                annotationEditingEnabled = !objectEditingEnabled
-                selectedAnnotation = nil
-                selectedObject = nil
-                if objectEditingEnabled {
-                    loadCanvasObjects()
-                } else {
-                    loadCanvasAnnotations()
-                }
-            } label: {
-                Label(
-                    objectEditingEnabled ? "Finish object editing" : "Edit PDF objects",
-                    systemImage: objectEditingEnabled ? "cursorarrow.rays" : "cursorarrow.click"
-                )
-            }
-            .help(objectEditingEnabled ? "Finish object editing" : "Edit PDF objects")
             Menu {
                 Button("Recognize current page", action: runOCR)
                     .disabled(selectedPage == nil)
@@ -553,8 +534,6 @@ struct ContentView: View {
         case .addComment:
             beginCommentPlacement()
         case .editComments:
-            objectEditingEnabled = false
-            annotationEditingEnabled = true
             selectedObject = nil
             loadCanvasAnnotations()
             if !usesInlinePanels {
@@ -674,22 +653,6 @@ struct ContentView: View {
             } label: {
                 Label("Content Tools", systemImage: "textformat")
             }
-            Button {
-                objectEditingEnabled.toggle()
-                annotationEditingEnabled = !objectEditingEnabled
-                selectedAnnotation = nil
-                selectedObject = nil
-                if objectEditingEnabled {
-                    loadCanvasObjects()
-                } else {
-                    loadCanvasAnnotations()
-                }
-            } label: {
-                Label(
-                    objectEditingEnabled ? "Finish Object Editing" : "Edit Objects Directly",
-                    systemImage: objectEditingEnabled ? "cursorarrow.rays" : "cursorarrow.click"
-                )
-            }
             if annotationEditingEnabled, let selectedAnnotation {
                 Menu {
                     Button("Move Left 5 pt") { nudgeAnnotation(selectedAnnotation, dx: -5, dy: 0) }
@@ -708,12 +671,6 @@ struct ContentView: View {
             }
             if objectEditingEnabled, let selectedObject {
                 Menu {
-                    if selectedObject.kind == .text {
-                        Button("Edit Text…") {
-                            selectedTextDraft = selectedObject.text ?? ""
-                            showsSelectedTextPrompt = true
-                        }
-                    }
                     if selectedObject.kind == .image {
                         Button("Replace Image…") { beginImageReplacement(selectedObject) }
                     }
@@ -976,16 +933,53 @@ struct ContentView: View {
                 undoManager: undoManager
             )
             pageObjects = try document.pageObjects(at: object.pageIndex)
-            if case let .usedCoreTextFallback(originalFontName) = result {
+            loadCanvasAnnotations()
+            switch result {
+            case let .usedCoreTextFallback(originalFontName):
                 replacementNotice = if let originalFontName {
                     "The original font \(originalFontName) does not contain every required glyph or the text needs complex shaping. A searchable CoreText vector layer was used instead."
                 } else {
                     "The original PDF font cannot safely render this text. A searchable CoreText vector layer was used instead."
                 }
-            } else {
+            case let .usedAppearanceSafeAnnotationFallback(originalFontName):
+                replacementNotice = if let originalFontName {
+                    "This page cannot safely regenerate its color resources. An editable FreeText layer replaced the \(originalFontName) text, and the original page colors were preserved."
+                } else {
+                    "This page cannot safely regenerate its color resources. An editable FreeText layer was used, and the original page colors were preserved."
+                }
+            case .preservedOriginalFont:
                 replacementNotice = nil
             }
         } catch { present(error) }
+    }
+
+    private func replaceAnnotationText(
+        _ annotation: PDFAnnotationSnapshot,
+        text: String
+    ) {
+        do {
+            let fontSize = max(annotation.fontSize ?? annotation.bounds.height / 1.8, 6)
+            var bounds = annotation.bounds
+            bounds.size.width = max(
+                bounds.width,
+                fontSize * 0.72 * CGFloat(max(text.count, 1)) + fontSize
+            )
+            selectedAnnotation = try document.updateAnnotation(
+                annotation.reference,
+                with: PDFAnnotationUpdate(
+                    bounds: bounds,
+                    contents: text,
+                    color: nil,
+                    fontColor: nil,
+                    fontSize: nil,
+                    lineWidth: nil
+                ),
+                undoManager: undoManager
+            )
+            loadCanvasAnnotations()
+        } catch {
+            present(error)
+        }
     }
 
     private func moveObject(_ object: PDFPageObjectSnapshot, offset: CGSize) {
@@ -1162,8 +1156,6 @@ struct ContentView: View {
 
     private func beginCommentPlacement() {
         guard document.pageCount > 0 else { return }
-        objectEditingEnabled = false
-        annotationEditingEnabled = true
         selectedObject = nil
         selectedAnnotation = nil
         annotationText = ""
@@ -1194,6 +1186,16 @@ struct ContentView: View {
         pendingCommentPlacement = nil
         selectedAnnotation = annotation
         commentEditorAnnotation = annotation
+    }
+
+    private func openObject(_ object: PDFPageObjectSnapshot) {
+        selectedObject = object
+        switch object.kind {
+        case .image:
+            beginImageReplacement(object)
+        case .text, .path, .form, .shading, .unknown:
+            break
+        }
     }
 
     private func addNote(at placement: PDFCommentPlacement?) {
@@ -1264,7 +1266,7 @@ struct ContentView: View {
     }
 
     private func refreshAnnotationsIfNeeded() {
-        if annotationEditingEnabled || showsAnnotationInspector { loadCanvasAnnotations() }
+        loadCanvasAnnotations()
     }
 
     private func updateAnnotation(

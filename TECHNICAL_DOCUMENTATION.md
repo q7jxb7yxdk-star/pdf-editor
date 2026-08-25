@@ -174,7 +174,9 @@ The fallback is a new searchable vector layer, not preservation of the original 
 ### 4.6 Annotation flow
 
 - PDFKit creates notes, free text, highlights, and ink signatures.
-- Annotation selection is enabled whenever object editing is not active, so clicking a supported annotation selects it without a separate Edit annotations toolbar mode.
+- Annotation and page-object selection are simultaneously available without toolbar mode switches. Comment placement takes precedence, followed by annotation hit testing and then page-object hit testing; selecting one target clears the other.
+- A single click or tap selects a page object for movement and transforms. Object hit testing converts bounds into view coordinates and applies a six-point screen-space tolerance; the custom click/tap recognizers may recognize alongside PDFKit's built-in selection recognizers. A double-click on macOS or double-tap on iOS activates type-specific editing: text receives a borderless native text field positioned over its converted page bounds, while images open the replacement importer. Return/Done or clicking outside commits through the existing replacement transaction; Escape cancels on macOS. Note comments retain their single-click editor behavior, while FreeText annotations can be edited again in place.
+- Add a comment uses a cross-platform sheet with a focused multi-line `TextEditor`, replacing the size-constrained alert text field.
 - Edit comment in the left Tools panel opens a page-scoped Comment List. Wide layouts place it beside the Tools panel; compact layouts present it as a sheet. It reuses the same annotation editor for content, color, opacity, font size, line width, selection, and deletion.
 - Annotation identity is a page index plus annotation-array index, not a persistent PDF object identifier.
 - Update validation enforces minimum 4-point bounds, 6–144 point font sizes, and 0.5–24 point ink widths.
@@ -272,7 +274,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, editing modes, Tools/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. This state is neither persisted nor versioned by application code.
+`ContentView` holds transient state for selected page/text/object/annotation, comment placement, Tools/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
 
 ### Persistence and storage boundaries
 
@@ -304,7 +306,7 @@ Recursive paths allow mutation below Form XObjects. Local PDFium patches impleme
 
 ### Font and shaping policy
 
-The original font is used only when glyph mapping succeeds and the text is not in the explicit advanced-shaping categories/ranges. The range check is a conservative heuristic, not a complete Unicode shaping classifier. The fallback uses a one-line CoreText overlay and semantic search verification; it is not a general paragraph-layout engine.
+The original font is used only when glyph mapping succeeds and the text is not in the explicit advanced-shaping categories/ranges. The range check is a conservative heuristic, not a complete Unicode shaping classifier. The normal fallback uses a one-line CoreText overlay and semantic search verification; it is not a general paragraph-layout engine. Before accepting a PDFium rewrite, the bridge renders color metrics before mutation and after serialization/reopening. If regeneration would substantially discard ICC or pattern color, the transaction rolls back and `PDFEditorDocument` creates an opaque PDFKit FreeText visual replacement without regenerating the page content. The annotation remains directly editable, but the original content-stream text remains underneath and may still be returned by search.
 
 ### OCR scaling and warm-up
 
@@ -564,7 +566,7 @@ The builds establish compilation and bundle construction for those destinations.
 - OCR stale-task protection checks cancellation and target-page state but has no document revision token.
 - Annotation references are array-index based and are not stable across arbitrary external mutations.
 - The advanced-shaping detector is a fixed Unicode-range/category heuristic, and the fallback is single-line overlay rendering.
-- Object/page postconditions are intentionally narrow; full semantic preservation depends on regression corpora and manual inspection.
+- Object/page postconditions are intentionally narrow; full semantic preservation depends on regression corpora and manual inspection. The appearance-safe FreeText fallback assumes an opaque white background around the replaced text and is therefore not a semantic content-stream rewrite.
 - Explicit permission enforcement covers page assembly and PDFKit metadata, but not visibly every object/annotation mutation.
 - Signature invalidation consent lasts for the open document rather than one operation.
 - Passwords remain in ordinary process memory for the active encrypted-document session.
@@ -594,7 +596,7 @@ Local PDFium patches clone Form ancestry before descendant mutations to isolate 
 
 ### Preserve-font then fallback text strategy
 
-The app first attempts an in-place rewrite only when font coverage and shaping policy permit it. The CoreText overlay path favors visible correctness and searchability when the original font cannot safely represent the requested text. The trade-off is a changed internal object structure.
+The app first attempts an in-place rewrite only when font coverage and shaping policy permit it. The CoreText overlay path favors visible correctness and searchability when the original font cannot safely represent the requested text. If serialized color metrics show that PDFium regeneration is unsafe, an opaque FreeText annotation replaces the text visually while preserving the original page resources. These fallbacks change the internal object structure, and the color-safety fallback intentionally retains the original underlying text.
 
 ### Review-before-write OCR
 

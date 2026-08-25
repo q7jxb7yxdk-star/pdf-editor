@@ -223,6 +223,9 @@ bool PEPDFPageObjectReplaceTextAtPath(
     const uint16_t* text,
     size_t textLength
 );
+bool PEPDFDocumentLastMutationRejectedForAppearance(
+    PEPDFDocumentRef document
+);
 bool PEPDFPageObjectTranslateAtPath(
     PEPDFDocumentRef document,
     int32_t pageIndex,

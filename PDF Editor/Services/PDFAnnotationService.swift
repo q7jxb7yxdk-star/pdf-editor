@@ -83,6 +83,12 @@ final class PDFAnnotationService {
 
         let requestsStyleChange = update.color != nil || update.fontColor != nil ||
             update.fontSize != nil || update.lineWidth != nil
+        let regeneratesFreeTextContents = annotation.type == "FreeText" &&
+            update.contents != nil
+        if annotation.hasAppearanceStream, regeneratesFreeTextContents {
+            annotation.removeValue(forAnnotationKey: appearanceDictionaryKey)
+            annotation.removeValue(forAnnotationKey: appearanceStateKey)
+        }
         if annotation.hasAppearanceStream, requestsStyleChange {
             let canRegenerateNoteAppearance = annotation.type == "Text" &&
                 update.color != nil && update.fontColor == nil &&
@@ -176,6 +182,59 @@ final class PDFAnnotationService {
         annotation.alignment = .left
         page.addAnnotation(annotation)
         return annotation
+    }
+
+    @discardableResult
+    func addAppearanceSafeTextReplacement(
+        text: String,
+        replacing object: PDFPageObjectSnapshot,
+        to page: PDFPage
+    ) throws -> PDFAnnotation {
+        let text = try validated(text)
+        let padding = max(1, min(object.bounds.height * 0.08, 3))
+        let fontSize = max(
+            object.fontSize ?? 0,
+            object.bounds.height * 1.35,
+            6
+        )
+        let width = max(
+            object.bounds.width + padding * 2,
+            fontSize * 0.72 * CGFloat(max(text.count, 1)) + fontSize
+        )
+        let height = max(object.bounds.height + padding * 2, fontSize * 1.35)
+        let bounds = CGRect(
+            x: object.bounds.minX - padding,
+            y: object.bounds.maxY + padding - height,
+            width: width,
+            height: height
+        ).standardized
+        let annotation = PDFAnnotation(
+            bounds: bounds,
+            forType: .freeText,
+            withProperties: nil
+        )
+        annotation.contents = text
+        annotation.font = appearanceSafeReplacementFont(for: object, size: fontSize)
+        annotation.fontColor = platformColor(PDFAnnotationColor(
+            red: CGFloat(object.fillColor.red) / 255,
+            green: CGFloat(object.fillColor.green) / 255,
+            blue: CGFloat(object.fillColor.blue) / 255,
+            alpha: CGFloat(object.fillColor.alpha) / 255
+        ))
+        annotation.color = .white
+        annotation.alignment = .left
+        page.addAnnotation(annotation)
+        return annotation
+    }
+
+    private func appearanceSafeReplacementFont(
+        for object: PDFPageObjectSnapshot,
+        size: CGFloat
+    ) -> PlatformFont {
+        let fontName = object.fontName?.lowercased() ?? ""
+        let usesBoldWeight = ["bold", "black", "heavy", "semibold", "demibold"]
+            .contains { fontName.contains($0) }
+        return .systemFont(ofSize: size, weight: usesBoldWeight ? .bold : .regular)
     }
 
     func addHighlight(

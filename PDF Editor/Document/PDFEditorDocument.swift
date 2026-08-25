@@ -164,16 +164,41 @@ final class PDFEditorDocument: ReferenceFileDocument {
         with text: String,
         undoManager: UndoManager?
     ) throws -> PDFTextReplacementResult {
-        try mutate(undoManager: undoManager, actionName: "Replace PDF Text") {
-            guard let objectSession = editingSession as? any PDFObjectEditingSession else {
-                throw PDFObjectEditingError.objectMutationFailed
+        let object = try pageObjects(at: pageIndex).first { $0.path == path }
+        guard let object else {
+            throw PDFObjectEditingError.objectInspectionFailed
+        }
+        do {
+            return try mutate(undoManager: undoManager, actionName: "Replace PDF Text") {
+                guard let objectSession = editingSession as? any PDFObjectEditingSession else {
+                    throw PDFObjectEditingError.objectMutationFailed
+                }
+                return try objectSession.replaceText(
+                    pageIndex: pageIndex,
+                    path: path,
+                    with: text,
+                    fallbackFontData: try unicodeFontData()
+                )
             }
-            return try objectSession.replaceText(
-                pageIndex: pageIndex,
-                path: path,
-                with: text,
-                fallbackFontData: try unicodeFontData()
-            )
+        } catch PDFObjectEditingError.pageAppearanceWouldChange {
+            let service = PDFAnnotationService()
+            try mutateAnnotations(
+                undoManager: undoManager,
+                actionName: "Replace PDF Text Safely"
+            ) {
+                guard let page = pdfDocument.page(at: pageIndex) else {
+                    throw PDFEditingError.invalidPageIndex(
+                        index: pageIndex,
+                        pageCount: pdfDocument.pageCount
+                    )
+                }
+                _ = try service.addAppearanceSafeTextReplacement(
+                    text: text,
+                    replacing: object,
+                    to: page
+                )
+            }
+            return .usedAppearanceSafeAnnotationFallback(originalFontName: object.fontName)
         }
     }
 

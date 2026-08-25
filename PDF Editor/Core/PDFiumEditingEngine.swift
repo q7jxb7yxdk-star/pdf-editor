@@ -64,6 +64,7 @@ private extension CGAffineTransform {
 nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
     case preservedOriginalFont
     case usedCoreTextFallback(originalFontName: String?)
+    case usedAppearanceSafeAnnotationFallback(originalFontName: String?)
 
     var userMessage: String? {
         switch self {
@@ -74,6 +75,12 @@ nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
                 "原字型 \(originalFontName) 缺少字形或文字需要複雜 shaping；已使用 CoreText 產生可搜尋的向量文字替代層。"
             } else {
                 "原 PDF 字型無法安全處理這段文字；已使用 CoreText 產生可搜尋的向量文字替代層。"
+            }
+        case let .usedAppearanceSafeAnnotationFallback(originalFontName):
+            if let originalFontName {
+                "The page's color resources cannot be regenerated safely. An editable FreeText layer replaces the \(originalFontName) text."
+            } else {
+                "The page's color resources cannot be regenerated safely. The replacement uses an editable FreeText layer."
             }
         }
     }
@@ -87,6 +94,7 @@ nonisolated enum PDFObjectEditingError: Error, LocalizedError, Equatable, Sendab
     case imageMustBeJPEG
     case replacementVerificationFailed
     case shapingFallbackFailed
+    case pageAppearanceWouldChange
     case invalidBitmapPayload
 
     var errorDescription: String? {
@@ -105,6 +113,8 @@ nonisolated enum PDFObjectEditingError: Error, LocalizedError, Equatable, Sendab
             "The replacement did not round-trip through the original PDF font safely."
         case .shapingFallbackFailed:
             "The CoreText replacement could not be written back as a searchable PDF overlay."
+        case .pageAppearanceWouldChange:
+            "This page uses color resources that PDFium cannot regenerate safely. The text was not changed, and the original page appearance was preserved."
         case .invalidBitmapPayload:
             "The decoded image bitmap is invalid or too large."
         }
@@ -486,7 +496,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
 
         if analysis.coversAllCharacters && !analysis.requiresAdvancedShaping {
             do {
-                guard replaceTextDirectly(pageIndex: pageIndex, path: path, text: text) else {
+                guard try replaceTextDirectly(pageIndex: pageIndex, path: path, text: text) else {
                     throw PDFObjectEditingError.replacementVerificationFailed
                 }
                 let updatedData = try dataRepresentation(options: PDFExportOptions())
@@ -497,6 +507,9 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                     throw PDFObjectEditingError.replacementVerificationFailed
                 }
                 return .preservedOriginalFont
+            } catch PDFObjectEditingError.pageAppearanceWouldChange {
+                try replaceHandle(with: beforeData, password: authorizedPassword)
+                throw PDFObjectEditingError.pageAppearanceWouldChange
             } catch {
                 try replaceHandle(with: beforeData, password: authorizedPassword)
             }
@@ -515,7 +528,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             )
 
             let actualText = Array(text.utf16)
-            guard replaceTextDirectly(pageIndex: pageIndex, path: path, text: " "),
+            guard try replaceTextDirectly(pageIndex: pageIndex, path: path, text: " "),
                   overlayData.withUnsafeBytes({ bytes in
                       actualText.withUnsafeBufferPointer { textBuffer in
                           PEPDFPageImportOverlayWithActualText(
@@ -1131,9 +1144,9 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         pageIndex: Int,
         path: PDFPageObjectPath,
         text: String
-    ) -> Bool {
+    ) throws -> Bool {
         let utf16 = Array(text.utf16)
-        return path.indices.withUnsafeBufferPointer { pathBuffer in
+        let success = path.indices.withUnsafeBufferPointer { pathBuffer in
             utf16.withUnsafeBufferPointer { textBuffer in
                 PEPDFPageObjectReplaceTextAtPath(
                     handle,
@@ -1145,6 +1158,10 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                 )
             }
         }
+        if !success, PEPDFDocumentLastMutationRejectedForAppearance(handle) {
+            throw PDFObjectEditingError.pageAppearanceWouldChange
+        }
+        return success
     }
 
     private func mediaBox(pageIndex: Int, data: Data) throws -> CGRect {

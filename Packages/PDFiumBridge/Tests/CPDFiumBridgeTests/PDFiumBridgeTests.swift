@@ -110,6 +110,34 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(after.matrixF, before.matrixF, accuracy: 0.001)
     }
 
+    func testICCPageRejectsTextRegenerationThatWouldDiscardColor() throws {
+        let source = try makeICCColoredTextPDF()
+        let document = try open(source)
+        defer { PEPDFDocumentClose(document) }
+        let count = Int(PEPDFPageObjectCountRecursive(document, 0))
+        let target = try XCTUnwrap((0..<count).lazy.compactMap { flatIndex -> [Int32]? in
+            guard let path = try? self.objectPath(document, flatIndex: Int32(flatIndex)),
+                  let info = try? self.objectInfo(document, path: path),
+                  info.type == Int32(PEPDFObjectTypeText.rawValue),
+                  (try? self.objectText(document, path: path).isEmpty) == false else {
+                return nil
+            }
+            return path
+        }.first)
+        let originalText = try objectText(document, path: target)
+        let replacement = Array("TEST".utf16)
+        XCTAssertFalse(target.withUnsafeBufferPointer { path in
+            replacement.withUnsafeBufferPointer { text in
+                PEPDFPageObjectReplaceTextAtPath(
+                    document, 0, path.baseAddress, path.count,
+                    text.baseAddress, text.count
+                )
+            }
+        })
+        XCTAssertTrue(PEPDFDocumentLastMutationRejectedForAppearance(document))
+        XCTAssertEqual(try objectText(document, path: target), originalText)
+    }
+
     func testMoveAddDeleteAndUnicodeSearchLayerRoundTrip() throws {
         let document = try open(makeTextPDF())
         defer { PEPDFDocumentClose(document) }
@@ -1000,6 +1028,39 @@ final class PDFiumBridgeTests: XCTestCase {
         let consumer = try XCTUnwrap(CGDataConsumer(data: data as CFMutableData))
         let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &mediaBox, nil))
         context.beginPDFPage(nil)
+        context.textPosition = CGPoint(x: 72, y: 700)
+        CTLineDraw(line, context)
+        context.endPDFPage()
+        context.closePDF()
+        return data as Data
+    }
+
+    private func makeICCColoredTextPDF() throws -> Data {
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        let data = NSMutableData()
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let consumer = try XCTUnwrap(CGDataConsumer(data: data as CFMutableData))
+        let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &mediaBox, nil))
+        context.beginPDFPage(nil)
+        context.setFillColor(try XCTUnwrap(CGColor(
+            colorSpace: colorSpace,
+            components: [0.8, 0.1, 0.2, 1]
+        )))
+        context.fill(CGRect(x: 40, y: 80, width: 240, height: 180))
+        context.setFillColor(try XCTUnwrap(CGColor(
+            colorSpace: colorSpace,
+            components: [0.1, 0.65, 0.25, 1]
+        )))
+        context.fill(CGRect(x: 320, y: 80, width: 240, height: 180))
+
+        let font = CTFontCreateWithName("Helvetica" as CFString, 24, nil)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "Original Text",
+            attributes: [
+                kCTFontAttributeName as NSAttributedString.Key: font,
+                kCTForegroundColorAttributeName as NSAttributedString.Key: CGColor.black,
+            ]
+        ))
         context.textPosition = CGPoint(x: 72, y: 700)
         CTLineDraw(line, context)
         context.endPDFPage()

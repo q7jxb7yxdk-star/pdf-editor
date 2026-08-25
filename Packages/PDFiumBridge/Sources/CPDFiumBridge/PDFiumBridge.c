@@ -21,6 +21,8 @@ struct PEPDFDocument {
     FPDF_DOCUMENT handle;
     uint8_t* sourceBytes;
     size_t sourceLength;
+    char* password;
+    bool lastMutationRejectedForAppearance;
     PERetainedSourceDocument* retainedSources;
     size_t retainedSourceCount;
     size_t retainedSourceCapacity;
@@ -496,15 +498,26 @@ PEPDFDocumentRef PEPDFDocumentCreate(
     }
     memcpy(document->sourceBytes, bytes, length);
     document->sourceLength = length;
+    if (password != NULL) {
+        size_t passwordLength = strlen(password);
+        document->password = (char*)malloc(passwordLength + 1);
+        if (document->password == NULL) {
+            free(document->sourceBytes);
+            free(document);
+            return NULL;
+        }
+        memcpy(document->password, password, passwordLength + 1);
+    }
     document->handle = FPDF_LoadMemDocument64(
         document->sourceBytes,
         length,
-        password
+        document->password
     );
     if (document->handle == NULL) {
         if (errorCode != NULL) {
             *errorCode = (uint32_t)FPDF_GetLastError();
         }
+        free(document->password);
         free(document->sourceBytes);
         free(document);
         return NULL;
@@ -524,6 +537,7 @@ void PEPDFDocumentClose(PEPDFDocumentRef document) {
         free(document->retainedSources[index].bytes);
     }
     free(document->retainedSources);
+    free(document->password);
     free(document->sourceBytes);
     free(document);
 }
@@ -533,6 +547,12 @@ int32_t PEPDFDocumentPageCount(PEPDFDocumentRef document) {
         return 0;
     }
     return FPDF_GetPageCount(document->handle);
+}
+
+bool PEPDFDocumentLastMutationRejectedForAppearance(
+    PEPDFDocumentRef document
+) {
+    return document != NULL && document->lastMutationRejectedForAppearance;
 }
 
 bool PEPDFDocumentIsEncrypted(PEPDFDocumentRef document) {
@@ -723,6 +743,48 @@ static bool PECopyDocumentData(
     }
     *outputBytes = buffer.bytes;
     *outputLength = buffer.length;
+    return true;
+}
+
+static void PEClearRetainedSources(PEPDFDocumentRef document) {
+    for (size_t index = 0; index < document->retainedSourceCount; ++index) {
+        FPDF_CloseDocument(document->retainedSources[index].handle);
+        free(document->retainedSources[index].bytes);
+    }
+    free(document->retainedSources);
+    document->retainedSources = NULL;
+    document->retainedSourceCount = 0;
+    document->retainedSourceCapacity = 0;
+}
+
+static bool PEReloadDocumentFromData(
+    PEPDFDocumentRef document,
+    const uint8_t* bytes,
+    size_t length
+) {
+    if (document == NULL || bytes == NULL || length == 0) {
+        return false;
+    }
+    uint8_t* copiedBytes = (uint8_t*)malloc(length);
+    if (copiedBytes == NULL) {
+        return false;
+    }
+    memcpy(copiedBytes, bytes, length);
+    FPDF_DOCUMENT replacement = FPDF_LoadMemDocument64(
+        copiedBytes,
+        length,
+        document->password
+    );
+    if (replacement == NULL) {
+        free(copiedBytes);
+        return false;
+    }
+    FPDF_CloseDocument(document->handle);
+    PEClearRetainedSources(document);
+    free(document->sourceBytes);
+    document->handle = replacement;
+    document->sourceBytes = copiedBytes;
+    document->sourceLength = length;
     return true;
 }
 
@@ -1164,6 +1226,175 @@ bool PEPDFPageObjectCopyFontDataAtPath(
     return success;
 }
 
+typedef struct PEPageColorMetrics {
+    uint64_t sampledPixels;
+    uint64_t chromaticPixels;
+    uint64_t chromaSum;
+} PEPageColorMetrics;
+
+static bool PEPageObjectBoundsInPage(
+    PEObjectContext context,
+    float* left,
+    float* bottom,
+    float* right,
+    float* top
+) {
+    float localLeft = 0;
+    float localBottom = 0;
+    float localRight = 0;
+    float localTop = 0;
+    if (!FPDFPageObj_GetBounds(
+        context.object,
+        &localLeft,
+        &localBottom,
+        &localRight,
+        &localTop
+    )) {
+        return false;
+    }
+    float x[4];
+    float y[4];
+    PETransformPoint(context.parentMatrix, localLeft, localBottom, &x[0], &y[0]);
+    PETransformPoint(context.parentMatrix, localRight, localBottom, &x[1], &y[1]);
+    PETransformPoint(context.parentMatrix, localLeft, localTop, &x[2], &y[2]);
+    PETransformPoint(context.parentMatrix, localRight, localTop, &x[3], &y[3]);
+    *left = *right = x[0];
+    *bottom = *top = y[0];
+    for (int index = 1; index < 4; ++index) {
+        if (x[index] < *left) *left = x[index];
+        if (x[index] > *right) *right = x[index];
+        if (y[index] < *bottom) *bottom = y[index];
+        if (y[index] > *top) *top = y[index];
+    }
+    return true;
+}
+
+static bool PEPageColorMetricsCreate(
+    FPDF_PAGE page,
+    float excludedLeft,
+    float excludedBottom,
+    float excludedRight,
+    float excludedTop,
+    PEPageColorMetrics* output
+) {
+    if (page == NULL || output == NULL) {
+        return false;
+    }
+    float pageWidth = FPDF_GetPageWidthF(page);
+    float pageHeight = FPDF_GetPageHeightF(page);
+    if (pageWidth <= 0 || pageHeight <= 0) {
+        return false;
+    }
+    const int maximumDimension = 256;
+    float scale = (float)maximumDimension /
+        (pageWidth > pageHeight ? pageWidth : pageHeight);
+    int width = (int)(pageWidth * scale + 0.5f);
+    int height = (int)(pageHeight * scale + 0.5f);
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
+        width,
+        height,
+        FPDFBitmap_BGRA,
+        NULL,
+        0
+    );
+    if (bitmap == NULL) {
+        return false;
+    }
+    FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
+    FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, 0, 0);
+    uint8_t* bytes = (uint8_t*)FPDFBitmap_GetBuffer(bitmap);
+    int stride = FPDFBitmap_GetStride(bitmap);
+    if (bytes == NULL || stride < width * 4) {
+        FPDFBitmap_Destroy(bitmap);
+        return false;
+    }
+    memset(output, 0, sizeof(*output));
+    const float margin = 4.0f;
+    excludedLeft -= margin;
+    excludedBottom -= margin;
+    excludedRight += margin;
+    excludedTop += margin;
+    for (int row = 0; row < height; ++row) {
+        float pageY = pageHeight * (1.0f - ((float)row + 0.5f) / (float)height);
+        const uint8_t* scanline = bytes + (size_t)row * (size_t)stride;
+        for (int column = 0; column < width; ++column) {
+            float pageX = pageWidth * ((float)column + 0.5f) / (float)width;
+            if (pageX >= excludedLeft && pageX <= excludedRight &&
+                pageY >= excludedBottom && pageY <= excludedTop) {
+                continue;
+            }
+            const uint8_t* pixel = scanline + (size_t)column * 4;
+            uint8_t blue = pixel[0];
+            uint8_t green = pixel[1];
+            uint8_t red = pixel[2];
+            uint8_t maximum = red > green ? red : green;
+            if (blue > maximum) maximum = blue;
+            uint8_t minimum = red < green ? red : green;
+            if (blue < minimum) minimum = blue;
+            uint8_t chroma = maximum - minimum;
+            output->sampledPixels += 1;
+            output->chromaSum += chroma;
+            if (chroma >= 12) {
+                output->chromaticPixels += 1;
+            }
+        }
+    }
+    FPDFBitmap_Destroy(bitmap);
+    return true;
+}
+
+static bool PEPageColorsPreserved(
+    PEPageColorMetrics before,
+    PEPageColorMetrics after
+) {
+    if (before.chromaticPixels < 16 || before.chromaSum < 512) {
+        return true;
+    }
+    return after.chromaticPixels * 4 >= before.chromaticPixels &&
+        after.chromaSum * 4 >= before.chromaSum;
+}
+
+static bool PESerializedPageColorMetricsCreate(
+    PEPDFDocumentRef document,
+    int32_t pageIndex,
+    float excludedLeft,
+    float excludedBottom,
+    float excludedRight,
+    float excludedTop,
+    PEPageColorMetrics* output
+) {
+    uint8_t* bytes = NULL;
+    size_t length = 0;
+    if (!PECopyDocumentData(
+        document->handle,
+        FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS,
+        &bytes,
+        &length
+    )) {
+        return false;
+    }
+    FPDF_DOCUMENT reopened = FPDF_LoadMemDocument64(
+        bytes,
+        length,
+        document->password
+    );
+    FPDF_PAGE page = reopened == NULL ? NULL : FPDF_LoadPage(reopened, pageIndex);
+    bool success = PEPageColorMetricsCreate(
+        page,
+        excludedLeft,
+        excludedBottom,
+        excludedRight,
+        excludedTop,
+        output
+    );
+    if (page != NULL) FPDF_ClosePage(page);
+    if (reopened != NULL) FPDF_CloseDocument(reopened);
+    free(bytes);
+    return success;
+}
+
 bool PEPDFPageObjectReplaceText(
     PEPDFDocumentRef document,
     int32_t pageIndex,
@@ -1171,10 +1402,51 @@ bool PEPDFPageObjectReplaceText(
     const uint16_t* text,
     size_t textLength
 ) {
+    if (document != NULL) {
+        document->lastMutationRejectedForAppearance = false;
+    }
     FPDF_PAGE page = PELoadPage(document, pageIndex);
     FPDF_PAGEOBJECT object = PEGetObject(page, objectIndex);
     if (object == NULL || FPDFPageObj_GetType(object) != FPDF_PAGEOBJ_TEXT) {
         if (page != NULL) FPDF_ClosePage(page);
+        return false;
+    }
+    float excludedLeft = 0;
+    float excludedBottom = 0;
+    float excludedRight = 0;
+    float excludedTop = 0;
+    PEObjectContext context = {
+        page,
+        object,
+        NULL,
+        kPEIdentityMatrix
+    };
+    PEPageColorMetrics beforeMetrics;
+    uint8_t* beforeBytes = NULL;
+    size_t beforeLength = 0;
+    bool prepared = PEPageObjectBoundsInPage(
+        context,
+        &excludedLeft,
+        &excludedBottom,
+        &excludedRight,
+        &excludedTop
+    ) && PEPageColorMetricsCreate(
+        page,
+        excludedLeft,
+        excludedBottom,
+        excludedRight,
+        excludedTop,
+        &beforeMetrics
+    ) && PECopyDocumentData(
+        document->handle,
+        FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS,
+        &beforeBytes,
+        &beforeLength
+    );
+    if (!prepared) {
+        document->lastMutationRejectedForAppearance = true;
+        free(beforeBytes);
+        FPDF_ClosePage(page);
         return false;
     }
     uint16_t* terminatedText = PECopyWideString(text, textLength);
@@ -1182,7 +1454,28 @@ bool PEPDFPageObjectReplaceText(
         FPDFText_SetText(object, terminatedText) &&
         FPDFPage_GenerateContent(page);
     free(terminatedText);
+    PEPageColorMetrics afterMetrics;
+    if (success) {
+        bool measured = PESerializedPageColorMetricsCreate(
+            document,
+            pageIndex,
+            excludedLeft,
+            excludedBottom,
+            excludedRight,
+            excludedTop,
+            &afterMetrics
+        );
+        bool preserved = measured && PEPageColorsPreserved(beforeMetrics, afterMetrics);
+        if (!preserved) {
+            document->lastMutationRejectedForAppearance = true;
+        }
+        success = preserved;
+    }
     FPDF_ClosePage(page);
+    if (!success) {
+        PEReloadDocumentFromData(document, beforeBytes, beforeLength);
+    }
+    free(beforeBytes);
     return success;
 }
 
@@ -1231,9 +1524,44 @@ bool PEPDFPageObjectReplaceTextAtPath(
     const uint16_t* text,
     size_t textLength
 ) {
+    if (document != NULL) {
+        document->lastMutationRejectedForAppearance = false;
+    }
     PEObjectContext context = {0};
     if (!PEResolveObject(document, pageIndex, path, pathLength, &context) ||
         FPDFPageObj_GetType(context.object) != FPDF_PAGEOBJ_TEXT) {
+        PECloseObjectContext(&context);
+        return false;
+    }
+    float excludedLeft = 0;
+    float excludedBottom = 0;
+    float excludedRight = 0;
+    float excludedTop = 0;
+    PEPageColorMetrics beforeMetrics;
+    uint8_t* beforeBytes = NULL;
+    size_t beforeLength = 0;
+    bool prepared = PEPageObjectBoundsInPage(
+        context,
+        &excludedLeft,
+        &excludedBottom,
+        &excludedRight,
+        &excludedTop
+    ) && PEPageColorMetricsCreate(
+        context.page,
+        excludedLeft,
+        excludedBottom,
+        excludedRight,
+        excludedTop,
+        &beforeMetrics
+    ) && PECopyDocumentData(
+        document->handle,
+        FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS,
+        &beforeBytes,
+        &beforeLength
+    );
+    if (!prepared) {
+        document->lastMutationRejectedForAppearance = true;
+        free(beforeBytes);
         PECloseObjectContext(&context);
         return false;
     }
@@ -1243,7 +1571,28 @@ bool PEPDFPageObjectReplaceTextAtPath(
         FPDFText_SetText(context.object, terminatedText) &&
         FPDFPage_GenerateContent(context.page);
     free(terminatedText);
+    PEPageColorMetrics afterMetrics;
+    if (success) {
+        bool measured = PESerializedPageColorMetricsCreate(
+            document,
+            pageIndex,
+            excludedLeft,
+            excludedBottom,
+            excludedRight,
+            excludedTop,
+            &afterMetrics
+        );
+        bool preserved = measured && PEPageColorsPreserved(beforeMetrics, afterMetrics);
+        if (!preserved) {
+            document->lastMutationRejectedForAppearance = true;
+        }
+        success = preserved;
+    }
     PECloseObjectContext(&context);
+    if (!success) {
+        PEReloadDocumentFromData(document, beforeBytes, beforeLength);
+    }
+    free(beforeBytes);
     return success;
 }
 

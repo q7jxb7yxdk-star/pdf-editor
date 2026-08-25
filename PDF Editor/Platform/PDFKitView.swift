@@ -5,6 +5,38 @@ import SwiftUI
 #if os(macOS)
 import AppKit
 
+private protocol PDFInteractionMouseHandling: AnyObject {
+    func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
+    func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool
+}
+
+private final class PDFInteractionPDFView: PDFView {
+    weak var interactionHandler: PDFInteractionMouseHandling?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let defaultHit = super.hitTest(point)
+        if interactionHandler?.shouldCaptureMouse(at: point, in: self) == true {
+            return self
+        }
+        if let textView = defaultHit as? NSTextView,
+           !(textView is PDFPassiveTextView) {
+            return textView
+        }
+        return defaultHit
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if interactionHandler?.handleMouseDown(event, in: self) == true {
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+private final class PDFPassiveTextView: NSTextView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 enum PDFViewerMode: Equatable {
     case singlePage
     case twoPage
@@ -38,6 +70,9 @@ struct PDFKitView: NSViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let onReplaceTextObject: (PDFPageObjectSnapshot, String) -> Void
+    let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+    let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
@@ -95,6 +130,9 @@ struct PDFKitView: UIViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let onReplaceTextObject: (PDFPageObjectSnapshot, String) -> Void
+    let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+    let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
@@ -134,12 +172,19 @@ private extension PDFKitView {
             onSetAnnotationBounds: onSetAnnotationBounds,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
+            onReplaceTextObject: onReplaceTextObject,
+            onReplaceAnnotationText: onReplaceAnnotationText,
+            onOpenObject: onOpenObject,
             onOpenAnnotation: onOpenAnnotation
         )
     }
 
     func makePDFView() -> PDFView {
+#if os(macOS)
+        let pdfView = PDFInteractionPDFView()
+#else
         let pdfView = PDFView()
+#endif
         pdfView.autoScales = true
         pdfView.displayDirection = .vertical
         pdfView.displaysPageBreaks = true
@@ -151,9 +196,11 @@ private extension PDFKitView {
 
     func update(_ pdfView: PDFView, coordinator: Coordinator) {
         if pdfView.document !== document {
+            coordinator.prepareForDocumentReplacement()
             pdfView.document = document
+            coordinator.completeDocumentReplacement()
         }
-        goToSelectedPage(in: pdfView)
+        goToSelectedPage(in: pdfView, coordinator: coordinator)
         applyViewerMode(to: pdfView)
         applyViewerCommand(to: pdfView, coordinator: coordinator)
     }
@@ -172,6 +219,9 @@ private extension PDFKitView {
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
+        coordinator.onReplaceTextObject = onReplaceTextObject
+        coordinator.onReplaceAnnotationText = onReplaceAnnotationText
+        coordinator.onOpenObject = onOpenObject
         coordinator.onOpenAnnotation = onOpenAnnotation
         coordinator.updateGestureAvailability()
     }
@@ -212,10 +262,17 @@ private extension PDFKitView {
         }
     }
 
-    func goToSelectedPage(in pdfView: PDFView) {
+    func goToSelectedPage(
+        in pdfView: PDFView,
+        coordinator: Coordinator? = nil
+    ) {
         guard let selectedPageIndex,
-              let page = document.page(at: selectedPageIndex),
-              pdfView.currentPage !== page else { return }
+              let page = document.page(at: selectedPageIndex) else { return }
+        if pdfView.currentPage === page {
+            coordinator?.pendingPageNavigationIndex = nil
+            return
+        }
+        coordinator?.pendingPageNavigationIndex = selectedPageIndex
         pdfView.go(to: page)
     }
 }
@@ -252,8 +309,12 @@ extension PDFKitView {
             }
         }
         var onPlaceComment: (Int, CGPoint) -> Void
+        var onReplaceTextObject: (PDFPageObjectSnapshot, String) -> Void
+        var onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+        var onOpenObject: (PDFPageObjectSnapshot) -> Void
         var onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
         var lastViewerCommandID: UUID?
+        var pendingPageNavigationIndex: Int?
 
         private weak var pdfView: PDFView?
         private var observers: [NSObjectProtocol] = []
@@ -269,9 +330,18 @@ extension PDFKitView {
 
 #if os(macOS)
         private var gestures: [NSGestureRecognizer] = []
+        private var inlineTextField: NSTextView?
+        private var inlineEditorDidGainFocus = false
+        private var stagedTextByObjectID: [String: String] = [:]
+        private var stagedTextViews: [String: PDFPassiveTextView] = [:]
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
+        private var inlineTextField: UITextField?
 #endif
+        private var inlineEditingObject: PDFPageObjectSnapshot?
+        private var inlineEditingAnnotation: PDFAnnotationSnapshot?
+        private var isFinishingInlineTextEditing = false
+        private var overlayRefreshScheduled = false
 
         init(
             selectedPageIndex: Binding<Int?>,
@@ -287,6 +357,9 @@ extension PDFKitView {
             onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
+            onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String) -> Void,
+            onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String) -> Void,
+            onOpenObject: @escaping (PDFPageObjectSnapshot) -> Void,
             onOpenAnnotation: @escaping (PDFAnnotationSnapshot) -> Void
         ) {
             self.selectedPageIndex = selectedPageIndex
@@ -302,6 +375,9 @@ extension PDFKitView {
             self.onSetAnnotationBounds = onSetAnnotationBounds
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
+            self.onReplaceTextObject = onReplaceTextObject
+            self.onReplaceAnnotationText = onReplaceAnnotationText
+            self.onOpenObject = onOpenObject
             self.onOpenAnnotation = onOpenAnnotation
             super.init()
             configureOverlay()
@@ -310,6 +386,7 @@ extension PDFKitView {
         func observe(_ pdfView: PDFView) {
             self.pdfView = pdfView
 #if os(macOS)
+            (pdfView as? PDFInteractionPDFView)?.interactionHandler = self
             pdfView.wantsLayer = true
             pdfView.layer?.addSublayer(outlineLayer)
             handleLayers.forEach { pdfView.layer?.addSublayer($0) }
@@ -330,12 +407,17 @@ extension PDFKitView {
                           let document = pdfView.document,
                           let page = pdfView.currentPage else { return }
                     let pageIndex = document.index(for: page)
+                    if let pendingPageNavigationIndex {
+                        guard pageIndex == pendingPageNavigationIndex else { return }
+                        self.pendingPageNavigationIndex = nil
+                    }
                     if selectedPageIndex.wrappedValue != pageIndex {
+                        finishInlineTextEditing(commit: true)
                         selectedPageIndex.wrappedValue = pageIndex
                         selectedObject.wrappedValue = nil
                         selectedAnnotation.wrappedValue = nil
                     }
-                    refreshOverlay()
+                    scheduleOverlayRefresh()
                 },
                 center.addObserver(
                     forName: .PDFViewSelectionChanged,
@@ -348,26 +430,56 @@ extension PDFKitView {
                     forName: .PDFViewScaleChanged,
                     object: pdfView,
                     queue: .main
-                ) { [weak self] _ in self?.refreshOverlay() },
+                ) { [weak self] _ in self?.scheduleOverlayRefresh() },
                 center.addObserver(
                     forName: .PDFViewVisiblePagesChanged,
                     object: pdfView,
                     queue: .main
-                ) { [weak self] _ in self?.refreshOverlay() },
+                ) { [weak self] _ in self?.scheduleOverlayRefresh() },
             ]
             updateGestureAvailability()
-            refreshOverlay()
+            scheduleOverlayRefresh()
         }
 
         func stopObserving() {
+            finishInlineTextEditing(commit: false)
             observers.forEach(NotificationCenter.default.removeObserver)
             observers.removeAll()
             outlineLayer.removeFromSuperlayer()
             handleLayers.forEach { $0.removeFromSuperlayer() }
             if let pdfView {
+#if os(macOS)
+                (pdfView as? PDFInteractionPDFView)?.interactionHandler = nil
+                stagedTextViews.values.forEach { $0.removeFromSuperview() }
+                stagedTextViews.removeAll()
+#endif
                 gestures.forEach(pdfView.removeGestureRecognizer)
             }
             gestures.removeAll()
+            overlayRefreshScheduled = false
+            self.pdfView = nil
+        }
+
+        func prepareForDocumentReplacement() {
+            finishInlineTextEditing(commit: false)
+#if os(macOS)
+            stagedTextByObjectID.removeAll()
+            stagedTextViews.values.forEach { $0.removeFromSuperview() }
+            stagedTextViews.removeAll()
+#endif
+            clearInteraction()
+            setOverlayHidden(true)
+        }
+
+        func completeDocumentReplacement() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                selection.wrappedValue = nil
+                selectedObject.wrappedValue = nil
+                selectedAnnotation.wrappedValue = nil
+                pdfView?.clearSelection()
+                refreshOverlay()
+            }
         }
 
         func refreshOverlay(previewBounds: CGRect? = nil) {
@@ -375,6 +487,10 @@ extension PDFKitView {
                 setOverlayHidden(true)
                 return
             }
+#if os(macOS)
+            updateStagedTextOverlays()
+#endif
+            updateInlineTextEditorFrame()
             let pageIndex: Int
             let pageBounds: CGRect
             if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
@@ -396,22 +512,49 @@ extension PDFKitView {
                 setOverlayHidden(true)
                 return
             }
+            let displayBounds: CGRect
+            if objectEditingEnabled, selectedObject.wrappedValue?.kind == .text {
+                displayBounds = minimumVisibleSelectionRect(viewBounds)
+            } else {
+                displayBounds = viewBounds
+            }
             setOverlayHidden(false)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             outlineLayer.frame = pdfView.bounds
-            outlineLayer.path = CGPath(rect: viewBounds, transform: nil)
+            outlineLayer.path = CGPath(rect: displayBounds, transform: nil)
             let points = [
-                CGPoint(x: viewBounds.minX, y: viewBounds.minY),
-                CGPoint(x: viewBounds.maxX, y: viewBounds.minY),
-                CGPoint(x: viewBounds.maxX, y: viewBounds.maxY),
-                CGPoint(x: viewBounds.minX, y: viewBounds.maxY),
+                CGPoint(x: displayBounds.minX, y: displayBounds.minY),
+                CGPoint(x: displayBounds.maxX, y: displayBounds.minY),
+                CGPoint(x: displayBounds.maxX, y: displayBounds.maxY),
+                CGPoint(x: displayBounds.minX, y: displayBounds.maxY),
             ]
             for (layer, point) in zip(handleLayers, points) {
                 layer.frame = CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)
                 layer.path = CGPath(ellipseIn: layer.bounds, transform: nil)
             }
             CATransaction.commit()
+        }
+
+        private func minimumVisibleSelectionRect(_ rect: CGRect) -> CGRect {
+            let width = max(rect.width, 28)
+            let height = max(rect.height, 20)
+            return CGRect(
+                x: rect.midX - width / 2,
+                y: rect.midY - height / 2,
+                width: width,
+                height: height
+            )
+        }
+
+        private func scheduleOverlayRefresh() {
+            guard !overlayRefreshScheduled else { return }
+            overlayRefreshScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                overlayRefreshScheduled = false
+                refreshOverlay()
+            }
         }
 
         private func configureOverlay() {
@@ -443,14 +586,17 @@ extension PDFKitView {
 
         func updateGestureAvailability() {
 #if os(macOS)
+            let hasSelectedObject = objectEditingEnabled &&
+                selectedObject.wrappedValue != nil
+            let hasSelectedAnnotation = annotationEditingEnabled &&
+                selectedAnnotation.wrappedValue != nil
             for gesture in gestures {
-                if gesture is NSClickGestureRecognizer {
-                    gesture.isEnabled = commentPlacementEnabled ||
-                        objectEditingEnabled || annotationEditingEnabled
-                } else if gesture is NSRotationGestureRecognizer {
-                    gesture.isEnabled = objectEditingEnabled
+                if gesture is NSRotationGestureRecognizer {
+                    gesture.isEnabled = hasSelectedObject && !hasSelectedAnnotation
+                } else if gesture is NSMagnificationGestureRecognizer {
+                    gesture.isEnabled = hasSelectedObject || hasSelectedAnnotation
                 } else {
-                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
+                    gesture.isEnabled = hasSelectedObject || hasSelectedAnnotation
                 }
             }
 #else
@@ -463,11 +609,12 @@ extension PDFKitView {
                 }
             }
 #endif
-            refreshOverlay()
+            scheduleOverlayRefresh()
         }
 
         private func selectTarget(at viewPoint: CGPoint) {
-            guard let pdfView,
+            guard prepareForCanvasInteraction(at: viewPoint),
+                  let pdfView,
                   let page = pdfView.page(for: viewPoint, nearest: false),
                   let document = pdfView.document else { return }
             let pageIndex = document.index(for: page)
@@ -480,32 +627,607 @@ extension PDFKitView {
                 updateGestureAvailability()
                 return
             }
-            if annotationEditingEnabled {
+            if annotationEditingEnabled,
+               let annotation = annotation(at: pagePoint, pageIndex: pageIndex) {
+                pdfView.clearSelection()
+                selection.wrappedValue = nil
                 selectedObject.wrappedValue = nil
-                let annotation = annotation(at: pagePoint, pageIndex: pageIndex)
                 selectedAnnotation.wrappedValue = annotation
-                if let annotation {
-                    selectedPageIndex.wrappedValue = pageIndex
-                    onOpenAnnotation(annotation)
-                }
+                selectedPageIndex.wrappedValue = pageIndex
+                onOpenAnnotation(annotation)
                 updateGestureAvailability()
                 return
             }
             guard objectEditingEnabled else { return }
-            let candidates = objects.filter {
-                $0.pageIndex == pageIndex && $0.bounds.insetBy(dx: -2, dy: -2).contains(pagePoint)
-            }.sorted { lhs, rhs in
-                let leftPriority = objectPriority(lhs)
-                let rightPriority = objectPriority(rhs)
-                if leftPriority != rightPriority { return leftPriority < rightPriority }
-                return lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
+            selectedAnnotation.wrappedValue = nil
+            let touchedObject = editableObject(
+                at: viewPoint,
+                on: page,
+                pageIndex: pageIndex
+            )
+            if touchedObject?.kind == .text {
+                _ = selectCopyableText(at: pagePoint, on: page, pageIndex: pageIndex)
+                return
             }
-            selectedObject.wrappedValue = candidates.first
-            if let first = candidates.first {
-                selectedPageIndex.wrappedValue = first.pageIndex
+            if selectCopyableText(at: pagePoint, on: page, pageIndex: pageIndex) {
+                return
             }
+            pdfView.clearSelection()
+            selection.wrappedValue = nil
+            selectedObject.wrappedValue = touchedObject
+            if let touchedObject {
+                selectedPageIndex.wrappedValue = touchedObject.pageIndex
+            }
+            updateGestureAvailability()
             refreshOverlay()
         }
+
+        private func activateTarget(at viewPoint: CGPoint) {
+            guard prepareForCanvasInteraction(at: viewPoint),
+                  !commentPlacementEnabled,
+                  let pdfView,
+                  let page = pdfView.page(for: viewPoint, nearest: false),
+                  let document = pdfView.document else { return }
+            let pageIndex = document.index(for: page)
+            if annotationEditingEnabled,
+               let annotation = annotation(
+                   at: pdfView.convert(viewPoint, to: page),
+                   pageIndex: pageIndex
+               ) {
+                pdfView.clearSelection()
+                selection.wrappedValue = nil
+                selectedObject.wrappedValue = nil
+                selectedAnnotation.wrappedValue = annotation
+                selectedPageIndex.wrappedValue = pageIndex
+                updateGestureAvailability()
+                refreshOverlay()
+                if annotation.kind == .freeText {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.beginInlineTextEditing(annotation)
+                    }
+                } else {
+                    onOpenAnnotation(annotation)
+                }
+                return
+            }
+            guard objectEditingEnabled,
+                  let object = editableObject(
+                      at: viewPoint,
+                      on: page,
+                      pageIndex: pageIndex
+                  ) else { return }
+            pdfView.clearSelection()
+            selection.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            selectedObject.wrappedValue = object
+            selectedPageIndex.wrappedValue = pageIndex
+            updateGestureAvailability()
+            refreshOverlay()
+            if object.kind == .text {
+                DispatchQueue.main.async { [weak self] in
+                    self?.beginInlineTextEditing(object)
+                }
+            } else {
+                onOpenObject(object)
+            }
+        }
+
+        private func selectCopyableText(
+            at pagePoint: CGPoint,
+            on page: PDFPage,
+            pageIndex: Int
+        ) -> Bool {
+            guard let pdfView,
+                  let wordSelection = copyableWordSelection(at: pagePoint, on: page),
+                  let text = wordSelection.string,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                pdfView?.clearSelection()
+                selection.wrappedValue = nil
+                selectedObject.wrappedValue = nil
+                refreshOverlay()
+                return false
+            }
+            selectedObject.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            selectedPageIndex.wrappedValue = pageIndex
+#if os(macOS)
+            pdfView.window?.makeFirstResponder(pdfView)
+#endif
+            pdfView.setCurrentSelection(wordSelection, animate: false)
+            selection.wrappedValue = wordSelection
+            updateGestureAvailability()
+            refreshOverlay()
+            return true
+        }
+
+        private func copyableWordSelection(
+            at pagePoint: CGPoint,
+            on page: PDFPage
+        ) -> PDFSelection? {
+            let offsets: [CGFloat] = [0, -1.5, 1.5, -3, 3]
+            for yOffset in offsets {
+                for xOffset in offsets {
+                    let point = CGPoint(
+                        x: pagePoint.x + xOffset,
+                        y: pagePoint.y + yOffset
+                    )
+                    if let selection = page.selectionForWord(at: point),
+                       let text = selection.string,
+                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return expandedContiguousWord(from: selection)
+                    }
+                }
+            }
+            let fallbackRect = CGRect(
+                x: pagePoint.x - 4,
+                y: pagePoint.y - 4,
+                width: 8,
+                height: 8
+            )
+            guard let selection = page.selection(for: fallbackRect),
+                  let text = selection.string,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return expandedContiguousWord(from: selection)
+        }
+
+        private func expandedContiguousWord(from selection: PDFSelection) -> PDFSelection {
+            guard var expanded = selection.copy() as? PDFSelection else { return selection }
+            for _ in 0..<32 {
+                guard let currentText = expanded.string else { break }
+                let candidates: [PDFSelection] = [true, false].compactMap { extendsStart in
+                    guard let candidate = expanded.copy() as? PDFSelection else { return nil }
+                    if extendsStart {
+                        candidate.extend(atStart: 1)
+                    } else {
+                        candidate.extend(atEnd: 1)
+                    }
+                    return candidate
+                }
+                guard let candidate = candidates.first(where: { candidate in
+                    guard let candidateText = candidate.string,
+                          candidateText != currentText else { return false }
+                    let addedText: Substring
+                    if candidateText.hasPrefix(currentText) {
+                        addedText = candidateText.dropFirst(currentText.count)
+                    } else if candidateText.hasSuffix(currentText) {
+                        addedText = candidateText.dropLast(currentText.count)
+                    } else {
+                        return false
+                    }
+                    return !addedText.isEmpty && addedText.allSatisfy(isWordCharacter)
+                }) else { break }
+                expanded = candidate
+            }
+            return expanded
+        }
+
+        private func isWordCharacter(_ character: Character) -> Bool {
+            character.unicodeScalars.allSatisfy {
+                CharacterSet.alphanumerics.contains($0) || $0.value == 95
+            }
+        }
+
+        private func object(
+            at pagePoint: CGPoint,
+            pageIndex: Int
+        ) -> PDFPageObjectSnapshot? {
+            objects
+                .filter {
+                    $0.pageIndex == pageIndex &&
+                    $0.bounds.insetBy(dx: -2, dy: -2).contains(pagePoint)
+                }
+                .min { lhs, rhs in
+                    let leftPriority = objectPriority(lhs)
+                    let rightPriority = objectPriority(rhs)
+                    if leftPriority != rightPriority { return leftPriority < rightPriority }
+                    return lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
+                }
+        }
+
+        private func object(
+            at viewPoint: CGPoint,
+            on page: PDFPage,
+            pageIndex: Int
+        ) -> PDFPageObjectSnapshot? {
+            guard let pdfView else { return nil }
+            let hitTolerance: CGFloat = 6
+            return objects
+                .filter { object in
+                    guard object.pageIndex == pageIndex else { return false }
+                    return pdfView.convert(object.bounds, from: page)
+                        .standardized
+                        .insetBy(dx: -hitTolerance, dy: -hitTolerance)
+                        .contains(viewPoint)
+                }
+                .min { lhs, rhs in
+                    let leftPriority = objectPriority(lhs)
+                    let rightPriority = objectPriority(rhs)
+                    if leftPriority != rightPriority { return leftPriority < rightPriority }
+                    let leftBounds = pdfView.convert(lhs.bounds, from: page).standardized
+                    let rightBounds = pdfView.convert(rhs.bounds, from: page).standardized
+                    return leftBounds.width * leftBounds.height <
+                        rightBounds.width * rightBounds.height
+                }
+        }
+
+        private func editableObject(
+            at viewPoint: CGPoint,
+            on page: PDFPage,
+            pageIndex: Int
+        ) -> PDFPageObjectSnapshot? {
+            let exactObject = object(
+                at: viewPoint,
+                on: page,
+                pageIndex: pageIndex
+            )
+            if exactObject?.kind == .text { return exactObject }
+            guard let pdfView,
+                  let selection = copyableWordSelection(
+                      at: pdfView.convert(viewPoint, to: page),
+                      on: page
+                  ) else { return exactObject }
+            let selectionBounds = selection.bounds(for: page)
+                .standardized
+                .insetBy(dx: -3, dy: -3)
+            let matchingTextObject = objects
+                .filter {
+                    $0.pageIndex == pageIndex &&
+                    $0.kind == .text &&
+                    $0.bounds.standardized.intersects(selectionBounds)
+                }
+                .min { lhs, rhs in
+                    let left = lhs.bounds.standardized
+                    let right = rhs.bounds.standardized
+                    let leftDistance = hypot(
+                        left.midX - selectionBounds.midX,
+                        left.midY - selectionBounds.midY
+                    )
+                    let rightDistance = hypot(
+                        right.midX - selectionBounds.midX,
+                        right.midY - selectionBounds.midY
+                    )
+                    return leftDistance < rightDistance
+                }
+            return matchingTextObject ?? exactObject
+        }
+
+        private func prepareForCanvasInteraction(at viewPoint: CGPoint) -> Bool {
+            guard let inlineTextField else { return true }
+            if inlineTextField.frame.contains(viewPoint) { return false }
+            finishInlineTextEditing(commit: true)
+            return true
+        }
+
+        private func beginInlineTextEditing(_ object: PDFPageObjectSnapshot) {
+            guard object.kind == .text,
+                  let frame = inlineTextEditorFrame(for: object) else { return }
+#if os(macOS)
+            let editableText = stagedTextByObjectID[object.id] ?? object.text ?? ""
+#else
+            let editableText = object.text ?? ""
+#endif
+            beginInlineTextEditing(
+                text: editableText,
+                color: object.fillColor,
+                fontName: object.fontName,
+                fontSize: object.fontSize,
+                frame: frame,
+                object: object,
+                annotation: nil
+            )
+        }
+
+        private func beginInlineTextEditing(_ annotation: PDFAnnotationSnapshot) {
+            guard annotation.kind == .freeText,
+                  let frame = inlineTextEditorFrame(
+                      pageIndex: annotation.reference.pageIndex,
+                      bounds: annotation.bounds
+                  ) else { return }
+            let fontColor = annotation.fontColor ?? annotation.color
+            beginInlineTextEditing(
+                text: annotation.contents,
+                color: PDFObjectColor(
+                    red: UInt32((fontColor.red * 255).rounded()),
+                    green: UInt32((fontColor.green * 255).rounded()),
+                    blue: UInt32((fontColor.blue * 255).rounded()),
+                    alpha: UInt32((fontColor.alpha * 255).rounded())
+                ),
+                fontName: nil,
+                fontSize: annotation.fontSize,
+                frame: frame,
+                object: nil,
+                annotation: annotation
+            )
+        }
+
+        private func beginInlineTextEditing(
+            text: String,
+            color: PDFObjectColor,
+            fontName: String?,
+            fontSize: CGFloat?,
+            frame: CGRect,
+            object: PDFPageObjectSnapshot?,
+            annotation: PDFAnnotationSnapshot?
+        ) {
+            guard let pdfView else { return }
+            finishInlineTextEditing(commit: false)
+            inlineEditingObject = object
+            inlineEditingAnnotation = annotation
+
+#if os(macOS)
+            stagedTextViews[object?.id ?? ""]?.isHidden = true
+            let field = NSTextView(frame: frame)
+            field.string = text
+            field.drawsBackground = true
+            field.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.98)
+            field.textColor = objectTextColor(color)
+            field.font = objectFont(
+                named: fontName,
+                pointSize: fontSize,
+                viewHeight: frame.height,
+                viewScale: pdfView.scaleFactor
+            )
+            field.isEditable = true
+            field.isSelectable = true
+            field.isRichText = false
+            field.importsGraphics = false
+            field.allowsUndo = true
+            field.textContainerInset = .zero
+            field.textContainer?.lineFragmentPadding = 0
+            field.isHorizontallyResizable = true
+            field.textContainer?.widthTracksTextView = false
+            field.textContainer?.containerSize = NSSize(
+                width: .greatestFiniteMagnitude,
+                height: frame.height
+            )
+            field.delegate = self
+            inlineEditorDidGainFocus = false
+            inlineTextField = field
+            pdfView.addSubview(field, positioned: .above, relativeTo: nil)
+            adjustInlineEditorWidth(field)
+            focusInlineTextField(field, in: pdfView, attempt: 0)
+#elseif os(iOS)
+            let field = UITextField(frame: frame)
+            field.text = text
+            field.borderStyle = .none
+            field.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.96)
+            field.textColor = objectTextColor(color)
+            field.font = objectFont(
+                named: fontName,
+                pointSize: fontSize,
+                viewHeight: frame.height,
+                viewScale: pdfView.scaleFactor
+            )
+            field.returnKeyType = .done
+            field.clearButtonMode = .whileEditing
+            field.delegate = self
+            inlineTextField = field
+            pdfView.addSubview(field)
+            field.becomeFirstResponder()
+            if let range = field.textRange(
+                from: field.beginningOfDocument,
+                to: field.endOfDocument
+            ) {
+                field.selectedTextRange = range
+            }
+#endif
+            refreshOverlay()
+        }
+
+        private func finishInlineTextEditing(commit: Bool) {
+            guard !isFinishingInlineTextEditing,
+                  let field = inlineTextField else { return }
+            let object = inlineEditingObject
+            let annotation = inlineEditingAnnotation
+            guard object != nil || annotation != nil else { return }
+            isFinishingInlineTextEditing = true
+#if os(macOS)
+            let text = field.string
+            field.delegate = nil
+            field.removeFromSuperview()
+            inlineEditorDidGainFocus = false
+#elseif os(iOS)
+            let text = field.text ?? ""
+            field.delegate = nil
+            field.resignFirstResponder()
+            field.removeFromSuperview()
+#endif
+            inlineTextField = nil
+            inlineEditingObject = nil
+            inlineEditingAnnotation = nil
+            isFinishingInlineTextEditing = false
+#if os(macOS)
+            if let object {
+                if commit, text != object.text {
+                    stagedTextByObjectID[object.id] = text
+                } else if commit {
+                    stagedTextByObjectID.removeValue(forKey: object.id)
+                }
+                updateStagedTextOverlays()
+            }
+#endif
+            refreshOverlay()
+#if os(iOS)
+            if commit, let object, text != object.text {
+                onReplaceTextObject(object, text)
+            }
+#endif
+            if commit, let annotation, text != annotation.contents {
+                onReplaceAnnotationText(annotation, text)
+            }
+        }
+
+        private func updateInlineTextEditorFrame() {
+            let frame: CGRect?
+            if let object = inlineEditingObject {
+                frame = inlineTextEditorFrame(for: object)
+            } else if let annotation = inlineEditingAnnotation {
+                frame = inlineTextEditorFrame(
+                    pageIndex: annotation.reference.pageIndex,
+                    bounds: annotation.bounds
+                )
+            } else {
+                frame = nil
+            }
+            guard let frame, let inlineTextField else { return }
+            let current = inlineTextField.frame
+            guard abs(current.minX - frame.minX) > 0.5 ||
+                    abs(current.minY - frame.minY) > 0.5 ||
+                    abs(current.width - frame.width) > 0.5 ||
+                    abs(current.height - frame.height) > 0.5 else { return }
+            inlineTextField.frame = frame
+        }
+
+        private func inlineTextEditorFrame(
+            for object: PDFPageObjectSnapshot
+        ) -> CGRect? {
+            inlineTextEditorFrame(pageIndex: object.pageIndex, bounds: object.bounds)
+        }
+
+        private func inlineTextEditorFrame(
+            pageIndex: Int,
+            bounds: CGRect
+        ) -> CGRect? {
+            guard let pdfView,
+                  let page = pdfView.document?.page(at: pageIndex) else { return nil }
+            let converted = pdfView.convert(bounds, from: page).standardized
+            guard converted.width.isFinite, converted.height.isFinite else { return nil }
+            let width = max(converted.width, 24)
+            let height = max(converted.height, 14)
+            return CGRect(
+                x: converted.minX,
+                y: converted.minY,
+                width: width,
+                height: height
+            )
+        }
+
+#if os(macOS)
+        private func focusInlineTextField(
+            _ field: NSTextView,
+            in pdfView: PDFView,
+            attempt: Int
+        ) {
+            let delay = attempt == 0 ? 0 : 0.05
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak pdfView, weak field] in
+                guard let self, let pdfView, let field,
+                      inlineTextField === field else { return }
+                let accepted = pdfView.window?.makeFirstResponder(field) == true
+                if accepted {
+                    inlineEditorDidGainFocus = true
+                    field.selectedRange = NSRange(
+                        location: 0,
+                        length: field.string.utf16.count
+                    )
+                } else if attempt < 3 {
+                    focusInlineTextField(field, in: pdfView, attempt: attempt + 1)
+                }
+            }
+        }
+
+        private func objectTextColor(_ color: PDFObjectColor) -> NSColor {
+            NSColor(
+                calibratedRed: CGFloat(color.red) / 255,
+                green: CGFloat(color.green) / 255,
+                blue: CGFloat(color.blue) / 255,
+                alpha: max(CGFloat(color.alpha) / 255, 0.15)
+            )
+        }
+
+        private func objectFont(
+            named fontName: String?,
+            pointSize: CGFloat?,
+            viewHeight: CGFloat,
+            viewScale: CGFloat
+        ) -> NSFont {
+            let sourceSize = pointSize.map { $0 * viewScale } ?? 0
+            let size = max(min(max(sourceSize, viewHeight * 0.9), 96), 6)
+            let name = fontName?.split(separator: "+").last.map(String.init)
+            return name.flatMap { NSFont(name: $0, size: size) } ??
+                NSFont.systemFont(ofSize: size)
+        }
+
+        private func adjustInlineEditorWidth(_ textView: NSTextView) {
+            guard let pdfView,
+                  let object = inlineEditingObject,
+                  let baseFrame = inlineTextEditorFrame(for: object),
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+            let measuredWidth = layoutManager.usedRect(for: textContainer).width + 4
+            let availableWidth = max(pdfView.bounds.maxX - baseFrame.minX - 8, baseFrame.width)
+            textView.frame.size.width = min(max(baseFrame.width, measuredWidth), availableWidth)
+        }
+
+        private func updateStagedTextOverlays() {
+            guard let pdfView else { return }
+            let liveObjects = Dictionary(uniqueKeysWithValues: objects.map { ($0.id, $0) })
+            let obsoleteIDs = stagedTextViews.keys.filter {
+                stagedTextByObjectID[$0] == nil || liveObjects[$0] == nil
+            }
+            for objectID in obsoleteIDs {
+                stagedTextViews.removeValue(forKey: objectID)?.removeFromSuperview()
+            }
+
+            for (objectID, text) in stagedTextByObjectID {
+                guard let object = liveObjects[objectID],
+                      let frame = inlineTextEditorFrame(for: object) else { continue }
+                let view = stagedTextViews[objectID] ?? PDFPassiveTextView(frame: frame)
+                if stagedTextViews[objectID] == nil {
+                    view.isEditable = false
+                    view.isSelectable = false
+                    view.isRichText = false
+                    view.drawsBackground = true
+                    view.textContainerInset = .zero
+                    view.textContainer?.lineFragmentPadding = 0
+                    view.textContainer?.widthTracksTextView = true
+                    stagedTextViews[objectID] = view
+                    pdfView.addSubview(view, positioned: .above, relativeTo: nil)
+                }
+                view.frame = frame
+                view.string = text
+                view.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.98)
+                view.textColor = objectTextColor(object.fillColor)
+                view.font = objectFont(
+                    named: object.fontName,
+                    pointSize: object.fontSize,
+                    viewHeight: frame.height,
+                    viewScale: pdfView.scaleFactor
+                )
+                if let font = view.font {
+                    let measuredWidth = (text as NSString).size(withAttributes: [.font: font]).width + 4
+                    let availableWidth = max(pdfView.bounds.maxX - frame.minX - 8, frame.width)
+                    view.frame.size.width = min(max(frame.width, measuredWidth), availableWidth)
+                }
+                view.isHidden = inlineEditingObject?.id == objectID
+            }
+        }
+#elseif os(iOS)
+        private func objectTextColor(_ color: PDFObjectColor) -> UIColor {
+            UIColor(
+                red: CGFloat(color.red) / 255,
+                green: CGFloat(color.green) / 255,
+                blue: CGFloat(color.blue) / 255,
+                alpha: max(CGFloat(color.alpha) / 255, 0.15)
+            )
+        }
+
+        private func objectFont(
+            named fontName: String?,
+            pointSize: CGFloat?,
+            viewHeight: CGFloat,
+            viewScale: CGFloat
+        ) -> UIFont {
+            let sourceSize = pointSize.map { $0 * viewScale } ?? 0
+            let scaledSize = max(sourceSize, viewHeight * 0.72)
+            let size = max(min(scaledSize, 96), 10)
+            let name = fontName?.split(separator: "+").last.map(String.init)
+            return name.flatMap { UIFont(name: $0, size: size) } ??
+                UIFont.systemFont(ofSize: size)
+        }
+#endif
 
         private func annotation(
             at pagePoint: CGPoint,
@@ -531,7 +1253,8 @@ extension PDFKitView {
         }
 
         private func beginPan(at viewPoint: CGPoint) {
-            guard let pdfView,
+            guard inlineTextField == nil,
+                  let pdfView,
                   let page = pdfView.page(for: viewPoint, nearest: false),
                   let document = pdfView.document else { return }
             let touchedPageIndex = document.index(for: page)
@@ -552,7 +1275,10 @@ extension PDFKitView {
                 interactionStartTransform = object.transform
             } else { return }
             guard pageIndex == touchedPageIndex else { return }
-            let selectionRect = pdfView.convert(bounds, from: page).standardized
+            let convertedSelectionRect = pdfView.convert(bounds, from: page).standardized
+            let selectionRect = interactionObject?.kind == .text
+                ? minimumVisibleSelectionRect(convertedSelectionRect)
+                : convertedSelectionRect
             guard selectionRect.insetBy(dx: -18, dy: -18).contains(viewPoint) else { return }
             interactionPage = page
             interactionStartPoint = pdfView.convert(viewPoint, to: page)
@@ -616,7 +1342,7 @@ extension PDFKitView {
         }
 
         private func beginTransformGesture() {
-            guard let pdfView else { return }
+            guard inlineTextField == nil, let pdfView else { return }
             let pageIndex: Int
             if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
                 interactionAnnotation = annotation
@@ -647,7 +1373,7 @@ extension PDFKitView {
         }
 
         private func updateRotationGesture(radians: CGFloat, finished: Bool) {
-            guard !annotationEditingEnabled else {
+            guard interactionAnnotation == nil else {
                 if finished { clearInteraction() }
                 return
             }
@@ -698,20 +1424,15 @@ extension PDFKitView {
 
 #if os(macOS)
         private func installGestures(on pdfView: PDFView) {
-            let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
             let pan = NSPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             let magnify = NSMagnificationGestureRecognizer(
                 target: self,
                 action: #selector(handleMagnification(_:))
             )
             let rotate = NSRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
-            gestures = [click, pan, magnify, rotate]
+            gestures = [pan, magnify, rotate]
+            gestures.forEach { $0.delegate = self }
             gestures.forEach(pdfView.addGestureRecognizer)
-        }
-
-        @objc private func handleClick(_ recognizer: NSClickGestureRecognizer) {
-            guard let pdfView else { return }
-            selectTarget(at: recognizer.location(in: pdfView))
         }
 
         @objc private func handlePan(_ recognizer: NSPanGestureRecognizer) {
@@ -753,10 +1474,16 @@ extension PDFKitView {
 #elseif os(iOS)
         private func installGestures(on pdfView: PDFView) {
             let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+            let doubleTap = UITapGestureRecognizer(
+                target: self,
+                action: #selector(handleDoubleTap(_:))
+            )
+            doubleTap.numberOfTapsRequired = 2
+            tap.require(toFail: doubleTap)
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
             let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
-            gestures = [tap, pan, pinch, rotate]
+            gestures = [tap, doubleTap, pan, pinch, rotate]
             gestures.forEach {
                 $0.delegate = self
                 pdfView.addGestureRecognizer($0)
@@ -766,6 +1493,11 @@ extension PDFKitView {
         @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let pdfView else { return }
             selectTarget(at: recognizer.location(in: pdfView))
+        }
+
+        @objc private func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            guard let pdfView else { return }
+            activateTarget(at: recognizer.location(in: pdfView))
         }
 
         @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
@@ -810,13 +1542,217 @@ extension PDFKitView {
     }
 }
 
+#if os(macOS)
+extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
+    func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
+        if let inlineTextField {
+            return !inlineTextField.frame.contains(viewPoint)
+        }
+        if pdfView.currentSelection != nil ||
+            selection.wrappedValue != nil ||
+            selectedObject.wrappedValue != nil ||
+            selectedAnnotation.wrappedValue != nil {
+            return true
+        }
+        guard let page = pdfView.page(for: viewPoint, nearest: false),
+              let document = pdfView.document else { return false }
+        let pageIndex = document.index(for: page)
+        let pagePoint = pdfView.convert(viewPoint, to: page)
+        if commentPlacementEnabled {
+            return true
+        }
+        if annotationEditingEnabled,
+           annotation(at: pagePoint, pageIndex: pageIndex) != nil {
+            return true
+        }
+        if objectEditingEnabled,
+           editableObject(at: viewPoint, on: page, pageIndex: pageIndex) != nil ||
+            copyableWordSelection(at: pagePoint, on: page) != nil {
+            return true
+        }
+        return false
+    }
+
+    func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool {
+        let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
+        if let inlineTextField, inlineTextField.frame.contains(viewPoint) {
+            return false
+        }
+
+        guard let page = pdfView.page(for: viewPoint, nearest: false),
+              let document = pdfView.document else {
+            finishInlineTextEditing(commit: true)
+            return false
+        }
+        let pageIndex = document.index(for: page)
+        let pagePoint = pdfView.convert(viewPoint, to: page)
+
+        if event.clickCount >= 2, !commentPlacementEnabled {
+            let hasEditableAnnotation = annotationEditingEnabled &&
+                annotation(at: pagePoint, pageIndex: pageIndex) != nil
+            let hasEditableObject = objectEditingEnabled &&
+                editableObject(at: viewPoint, on: page, pageIndex: pageIndex) != nil
+            if hasEditableAnnotation || hasEditableObject {
+                activateTarget(at: viewPoint)
+                return true
+            }
+        }
+
+        if commentPlacementEnabled {
+            selectTarget(at: viewPoint)
+            return true
+        }
+        if annotationEditingEnabled,
+           annotation(at: pagePoint, pageIndex: pageIndex) != nil {
+            selectTarget(at: viewPoint)
+            return true
+        }
+        if objectEditingEnabled {
+            let touchedObject = editableObject(
+                at: viewPoint,
+                on: page,
+                pageIndex: pageIndex
+            )
+            let touchesText = touchedObject?.kind == .text ||
+                copyableWordSelection(at: pagePoint, on: page) != nil
+            if touchedObject != nil || touchesText {
+                selectTarget(at: viewPoint)
+                return true
+            }
+        }
+
+        finishInlineTextEditing(commit: true)
+        selectedObject.wrappedValue = nil
+        selectedAnnotation.wrappedValue = nil
+        pdfView.clearSelection()
+        selection.wrappedValue = nil
+        updateGestureAvailability()
+        refreshOverlay()
+        return false
+    }
+}
+
+extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegate {
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+        guard inlineTextField == nil, let pdfView else { return false }
+        return shouldBeginInteractionGesture(
+            gestureRecognizer,
+            at: gestureRecognizer.location(in: pdfView),
+            in: pdfView
+        )
+    }
+
+    private func shouldBeginInteractionGesture(
+        _ gestureRecognizer: NSGestureRecognizer,
+        at viewPoint: CGPoint,
+        in pdfView: PDFView
+    ) -> Bool {
+        if gestureRecognizer is NSRotationGestureRecognizer {
+            return objectEditingEnabled &&
+                selectedObject.wrappedValue != nil &&
+                selectedAnnotation.wrappedValue == nil
+        }
+        if gestureRecognizer is NSMagnificationGestureRecognizer {
+            return (objectEditingEnabled && selectedObject.wrappedValue != nil) ||
+                (annotationEditingEnabled && selectedAnnotation.wrappedValue != nil)
+        }
+        guard gestureRecognizer is NSPanGestureRecognizer else { return false }
+
+        guard let page = pdfView.page(for: viewPoint, nearest: false),
+              let document = pdfView.document else { return false }
+        let touchedPageIndex = document.index(for: page)
+        let pagePoint = pdfView.convert(viewPoint, to: page)
+        let pageIndex: Int
+        let bounds: CGRect
+        let isTextObject: Bool
+        if annotationEditingEnabled,
+           let annotation = annotation(at: pagePoint, pageIndex: touchedPageIndex) {
+            pageIndex = annotation.reference.pageIndex
+            bounds = annotation.bounds
+            isTextObject = false
+        } else if objectEditingEnabled, let object = selectedObject.wrappedValue {
+            pageIndex = object.pageIndex
+            bounds = object.bounds
+            isTextObject = object.kind == .text
+        } else {
+            return false
+        }
+        guard pageIndex == touchedPageIndex else { return false }
+        let convertedBounds = pdfView.convert(bounds, from: page).standardized
+        let interactionBounds = isTextObject
+            ? minimumVisibleSelectionRect(convertedBounds)
+            : convertedBounds
+        return interactionBounds.insetBy(dx: -18, dy: -18).contains(viewPoint)
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: NSGestureRecognizer,
+        shouldAttemptToRecognizeWith event: NSEvent
+    ) -> Bool {
+        guard let pdfView else { return false }
+        let point = pdfView.convert(event.locationInWindow, from: nil)
+        if let inlineTextField, inlineTextField.frame.contains(point) {
+            return false
+        }
+        return shouldBeginInteractionGesture(
+            gestureRecognizer,
+            at: point,
+            in: pdfView
+        )
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: NSGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer
+    ) -> Bool {
+        false
+    }
+
+    func textDidBeginEditing(_ notification: Notification) {
+        inlineEditorDidGainFocus = true
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard let textView = notification.object as? NSTextView,
+              inlineTextField === textView else { return }
+        adjustInlineEditorWidth(textView)
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        guard inlineEditorDidGainFocus else { return }
+        finishInlineTextEditing(commit: true)
+    }
+
+    func textView(
+        _ textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            finishInlineTextEditing(commit: false)
+            return true
+        }
+        return false
+    }
+}
+#endif
+
 #if os(iOS)
-extension PDFKitView.Coordinator: UIGestureRecognizerDelegate {
+extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelegate {
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldReceive touch: UITouch
+    ) -> Bool {
+        guard let inlineTextField, let touchedView = touch.view else { return true }
+        return touchedView !== inlineTextField && !touchedView.isDescendant(of: inlineTextField)
+    }
+
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer is UITapGestureRecognizer {
             return commentPlacementEnabled || objectEditingEnabled || annotationEditingEnabled
         }
-        if gestureRecognizer is UIRotationGestureRecognizer, annotationEditingEnabled {
+        if gestureRecognizer is UIRotationGestureRecognizer,
+           selectedAnnotation.wrappedValue != nil {
             return false
         }
         guard let pdfView else { return false }
@@ -855,7 +1791,17 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        false
+        gestureRecognizer is UITapGestureRecognizer ||
+            otherGestureRecognizer is UITapGestureRecognizer
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        finishInlineTextEditing(commit: true)
+        return true
+    }
+
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        finishInlineTextEditing(commit: true)
     }
 }
 #endif
