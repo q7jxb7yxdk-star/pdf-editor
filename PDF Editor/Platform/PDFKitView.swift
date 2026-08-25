@@ -2891,10 +2891,23 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
            annotation(at: pagePoint, pageIndex: pageIndex) != nil {
             return true
         }
-        if objectEditingEnabled,
-           editableObject(at: viewPoint, on: page, pageIndex: pageIndex) != nil ||
-            copyableWordSelection(at: pagePoint, on: page) != nil {
-            return true
+        if objectEditingEnabled {
+            if stagedTextTarget(at: viewPoint, pageIndex: pageIndex) != nil {
+                return true
+            }
+            let editableObject = editableObject(
+                at: viewPoint,
+                on: page,
+                pageIndex: pageIndex
+            )
+            let touchesCopyableText = editableObject?.kind == .text ||
+                copyableWordSelection(at: pagePoint, on: page) != nil
+            if (NSApp.currentEvent?.clickCount ?? 0) >= 2, touchesCopyableText {
+                return true
+            }
+            if let editableObject, editableObject.kind != .text {
+                return true
+            }
         }
         return false
     }
@@ -2936,6 +2949,10 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
             return true
         }
         if objectEditingEnabled {
+            if stagedTextTarget(at: viewPoint, pageIndex: pageIndex) != nil {
+                selectTarget(at: viewPoint)
+                return true
+            }
             let touchedObject = editableObject(
                 at: viewPoint,
                 on: page,
@@ -2943,7 +2960,16 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
             )
             let touchesText = touchedObject?.kind == .text ||
                 copyableWordSelection(at: pagePoint, on: page) != nil
-            if touchedObject != nil || touchesText {
+            if touchesText {
+                finishInlineTextEditing(commit: true)
+                clearStagedTextSelection()
+                selectedObject.wrappedValue = nil
+                selectedAnnotation.wrappedValue = nil
+                updateGestureAvailability()
+                refreshOverlay()
+                return false
+            }
+            if touchedObject != nil {
                 selectTarget(at: viewPoint)
                 return true
             }
