@@ -56,7 +56,7 @@ flowchart TD
 ### Layers and dependency direction
 
 1. **Application composition**: `PDF_EditorApp.swift` creates a `DocumentGroup` and injects each `PDFEditorDocument` into `ContentView`.
-2. **Presentation**: `ContentView.swift` and `FeatureViews.swift` own transient UI state, the hidden-by-default Tools panel, toggleable Pages panel, narrow right-side viewing rail, Comment List, explicit Save action, and document operations. Save, Tools, and OCR use separate leading toolbar items with hidden shared backgrounds; `DocumentGroup` continues to own the native document title. `PDFKitView.swift` bridges SwiftUI to `PDFView` on AppKit and UIKit.
+2. **Presentation**: `ContentView.swift` and `FeatureViews.swift` own transient UI state, the hidden-by-default Tools panel, toggleable Pages panel, narrow right-side viewing rail, Comment List, explicit Save action, and document operations. The viewing rail places direct page-number input, a total-page display, and separate previous/next navigation controls after Zoom out. Save, Tools, and OCR use separate leading toolbar items with hidden shared backgrounds; `DocumentGroup` continues to own the native document title. `PDFKitView.swift` bridges SwiftUI to `PDFView` on AppKit and UIKit.
 3. **Document coordination**: `PDFEditorDocument.swift` owns source bytes, the last explicitly persisted bytes, the PDFium session, the PDFKit display document, password authorization, save policy, signature consent, and Undo registration.
 4. **Core abstraction**: `PDFEditingEngine.swift` defines platform-neutral metadata, page commands, results, errors, and the engine/session protocols.
 5. **Concrete engines**: `PDFiumEditingEngine.swift` is primary. `PDFKitEditingEngine.swift` is a limited alternate implementation and a metadata helper.
@@ -84,7 +84,7 @@ There is protocol-based engine separation, but no application-level dependency-i
 | --- | --- |
 | `PDF Editor/PDF_EditorApp.swift` | Application entry point and document scene. |
 | `PDF Editor/ContentView.swift` | Main editor UI, hidden/toggleable Tools and Pages panels, narrow right-side viewing rail composition, Comment List integration, separate Save/Tools/OCR toolbar items, imports/exports, OCR workflow, protected merge flow, and transient view state. |
-| `PDF Editor/FeatureViews.swift` | Pages panel and icon-only viewing rail, English tool panels, Comment List, protected-PDF password sheet, OCR result views, object inspector, signature pad, and annotation inspector. |
+| `PDF Editor/FeatureViews.swift` | Pages panel and narrow viewing rail with display, zoom, direct page-number, total-page, and separate previous/next controls; English tool panels; Comment List; protected-PDF password sheet; OCR result views; object inspector; signature pad; and annotation inspector. |
 | `PDF Editor/Core/PDFEditingEngine.swift` | Engine/session protocols, page command model, metadata model, export policy, and shared errors. |
 | `PDF Editor/Core/PDFiumEditingEngine.swift` | Primary page and page-object engine, native handle management, verification, rollback, permissions, text fallback, images, and annotation-color bridge. |
 | `PDF Editor/Core/PDFKitEditingEngine.swift` | Page-level PDFKit implementation and metadata mutation helper. |
@@ -281,7 +281,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
+`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. `PDFRightPanel` binds to `selectedPageIndex`, derives one-based display values, and keeps a local numeric text-field draft. Valid input selects the matching page immediately, submit or focus loss clamps an invalid range to the document bounds, and PDFKit-originated page changes refresh the field while it is not focused. The page-number field and total-page display each occupy a 44-point-high rail slot; Previous page and Next page are separate 44-point buttons and disable at their respective boundaries. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
 
 ### Persistence and storage boundaries
 
@@ -591,6 +591,13 @@ Additional validation completed on 2026-08-25 after adding the pending first-dou
 - Debug generic iOS Simulator build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp`.
 - `git diff --check`: passed.
 - First-launch double-click timing and the exact disappearance of the selection outline during a real trackpad or mouse scroll remain manual macOS UI checks.
+
+Additional validation completed on 2026-08-25 after adding direct page navigation to the right-side viewing rail:
+
+- Debug macOS build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/PDFEditorRightPanel-mac`.
+- Debug generic iOS Simulator build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/PDFEditorRightPanel-ios`.
+- `git diff --check`: passed.
+- Exact 44-point sizing, post-Zoom-out placement, text-field focus behavior, button appearance, and runtime synchronization with PDFKit remain manual UI checks.
 
 The builds establish compilation and bundle construction for those destinations. They do not establish successful app launch, UI behavior, sandbox enforcement, signing, installation, or document workflow correctness.
 

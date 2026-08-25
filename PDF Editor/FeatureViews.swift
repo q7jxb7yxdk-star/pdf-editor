@@ -256,10 +256,15 @@ private struct ToolRowLabel: View {
 
 struct PDFRightPanel: View {
     @Binding var viewerMode: PDFViewerMode
+    @Binding var selectedPageIndex: Int?
+    let pageCount: Int
     let isPagesPanelPresented: Bool
     let onTogglePages: () -> Void
     let onViewerCommand: (PDFViewerCommand.Action) -> Void
     let onFullScreen: () -> Void
+
+    @State private var pageNumberText = ""
+    @FocusState private var isPageNumberFocused: Bool
 
     var body: some View {
         ScrollView {
@@ -308,10 +313,92 @@ struct PDFRightPanel: View {
                 iconButton("Zoom out", systemImage: "minus.magnifyingglass") {
                     onViewerCommand(.zoomOut)
                 }
+                Divider()
+                    .padding(.vertical, 4)
+                pageNavigation
             }
             .padding(.vertical, 8)
         }
         .background(.background)
+    }
+
+    private var pageNavigation: some View {
+        VStack(spacing: 4) {
+            TextField("Page", text: $pageNumberText)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.center)
+                .frame(width: 44, height: 44)
+                .background(
+                    isPageNumberFocused ? Color.accentColor.opacity(0.16) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            isPageNumberFocused ? Color.accentColor : Color.secondary.opacity(0.25),
+                            lineWidth: 1
+                        )
+                }
+                .disabled(pageCount == 0)
+                .focused($isPageNumberFocused)
+                .onSubmit(commitPageNumber)
+                .accessibilityLabel("Page number")
+
+            Text("\(pageCount)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 44, height: 44)
+                .accessibilityLabel("Total pages \(pageCount)")
+
+            iconButton("Previous page", systemImage: "chevron.left") {
+                selectPage((selectedPageIndex ?? 0) - 1)
+            }
+            .disabled(selectedPageIndex == nil || selectedPageIndex == 0)
+
+            iconButton("Next page", systemImage: "chevron.right") {
+                selectPage((selectedPageIndex ?? -1) + 1)
+            }
+            .disabled(
+                selectedPageIndex == nil ||
+                selectedPageIndex == pageCount - 1
+            )
+        }
+        .onChange(of: selectedPageIndex, initial: true) { _, pageIndex in
+            guard !isPageNumberFocused else { return }
+            pageNumberText = pageIndex.map { String($0 + 1) } ?? ""
+        }
+        .onChange(of: pageNumberText) { _, newValue in
+            let digits = newValue.filter(\.isNumber)
+            guard digits == newValue else {
+                pageNumberText = digits
+                return
+            }
+            guard let pageNumber = Int(digits),
+                  (1...pageCount).contains(pageNumber) else { return }
+            selectedPageIndex = pageNumber - 1
+        }
+        .onChange(of: isPageNumberFocused) { _, isFocused in
+            if !isFocused {
+                commitPageNumber()
+            }
+        }
+    }
+
+    private func commitPageNumber() {
+        guard pageCount > 0 else {
+            pageNumberText = ""
+            return
+        }
+        let requestedPage = Int(pageNumberText) ?? ((selectedPageIndex ?? 0) + 1)
+        selectPage(min(max(requestedPage - 1, 0), pageCount - 1))
+    }
+
+    private func selectPage(_ pageIndex: Int) {
+        guard (0..<pageCount).contains(pageIndex) else { return }
+        pageNumberText = String(pageIndex + 1)
+        selectedPageIndex = pageIndex
     }
 
     private func iconButton(

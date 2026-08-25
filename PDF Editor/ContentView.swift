@@ -520,6 +520,8 @@ struct ContentView: View {
     private var rightPanel: some View {
         PDFRightPanel(
             viewerMode: $viewerMode,
+            selectedPageIndex: $selectedPageIndex,
+            pageCount: document.pageCount,
             isPagesPanelPresented: showsPagePanel,
             onTogglePages: togglePagePanel,
             onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
