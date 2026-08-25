@@ -9,6 +9,7 @@ import AppKit
 private protocol PDFInteractionMouseHandling: AnyObject {
     func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool
+    func handleScrollWillBegin(in pdfView: PDFView)
 }
 
 private final class PDFInteractionPDFView: PDFView {
@@ -34,6 +35,11 @@ private final class PDFInteractionPDFView: PDFView {
             return
         }
         super.mouseDown(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        interactionHandler?.handleScrollWillBegin(in: self)
+        super.scrollWheel(with: event)
     }
 }
 
@@ -416,6 +422,7 @@ extension PDFKitView {
             let originalText: String
             var draftText: String?
             var draftStyle: PDFTextStyle?
+            var keepsSelectionVisible = true
         }
         private var pendingTextActivation: PendingTextActivation?
 
@@ -482,6 +489,7 @@ extension PDFKitView {
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
         private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
+        private var scrollWheelEventMonitor: Any?
         private struct TransientStagedTextFallback {
             let objectID: String
             let pageIndex: Int
@@ -601,6 +609,20 @@ extension PDFKitView {
                 ) { [weak self] _ in self?.scheduleOverlayRefresh() },
             ]
 #if os(macOS)
+            if let scrollWheelEventMonitor {
+                NSEvent.removeMonitor(scrollWheelEventMonitor)
+            }
+            scrollWheelEventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .scrollWheel
+            ) { [weak self, weak pdfView] event in
+                guard let self, let pdfView,
+                      event.window === pdfView.window else { return event }
+                let point = pdfView.convert(event.locationInWindow, from: nil)
+                guard pdfView.bounds.contains(point) else { return event }
+                self.handleScrollWillBegin(in: pdfView)
+                return event
+            }
+
             if let clipView = pdfView.documentView?.enclosingScrollView?.contentView {
                 clipView.postsBoundsChangedNotifications = true
                 observers.append(center.addObserver(
@@ -608,14 +630,8 @@ extension PDFKitView {
                     object: clipView,
                     queue: .main
                 ) { [weak self] _ in
-                    guard let self else { return }
-                    if self.inlineTextField != nil {
-                        self.finishInlineTextEditing(commit: true)
-                    } else {
-                        // This PDFView-level view is solely a one-runloop hand-off
-                        // fallback, so never let it follow scrolling content.
-                        self.removeTransientStagedTextFallback()
-                    }
+                    guard let self, let pdfView = self.pdfView else { return }
+                    self.handleScrollWillBegin(in: pdfView)
                 })
             }
 #endif
@@ -628,6 +644,12 @@ extension PDFKitView {
             pendingTextActivation = nil
             observers.forEach(NotificationCenter.default.removeObserver)
             observers.removeAll()
+#if os(macOS)
+            if let scrollWheelEventMonitor {
+                NSEvent.removeMonitor(scrollWheelEventMonitor)
+                self.scrollWheelEventMonitor = nil
+            }
+#endif
             outlineLayer.removeFromSuperlayer()
             handleLayers.forEach { $0.removeFromSuperlayer() }
             if let pdfView {
@@ -693,6 +715,15 @@ extension PDFKitView {
             } else if objectEditingEnabled, let object = selectedObject.wrappedValue {
                 pageIndex = object.pageIndex
                 pageBounds = previewBounds ?? object.bounds
+            } else if objectEditingEnabled,
+                      let pendingTextActivation,
+                      pendingTextActivation.keepsSelectionVisible,
+                      inlineTextField != nil,
+                      let page = pdfView.document?.page(
+                          at: pendingTextActivation.pageIndex
+                      ) {
+                pageIndex = pendingTextActivation.pageIndex
+                pageBounds = pendingTextActivation.selection.bounds(for: page)
             } else {
                 setOverlayHidden(true)
                 return
@@ -1020,8 +1051,9 @@ extension PDFKitView {
             )
             let draft = pendingTextActivation.draftText
             let draftStyle = pendingTextActivation.draftStyle
+            let keepsSelectionVisible = pendingTextActivation.keepsSelectionVisible
             self.pendingTextActivation = nil
-            selectedObject.wrappedValue = resolvedObject
+            selectedObject.wrappedValue = keepsSelectionVisible ? resolvedObject : nil
             selectedPageIndex.wrappedValue = resolvedObject.pageIndex
             if let field = inlineTextField {
                 inlineEditingObject = resolvedObject
@@ -1522,6 +1554,7 @@ extension PDFKitView {
                 if commit {
                     pendingTextActivation?.draftText = text
                     pendingTextActivation?.draftStyle = pdfStyle
+                    pendingTextActivation?.keepsSelectionVisible = false
                 } else {
                     pendingTextActivation = nil
                 }
@@ -1580,6 +1613,14 @@ extension PDFKitView {
                 frame = inlineTextEditorFrame(
                     pageIndex: annotation.reference.pageIndex,
                     bounds: annotation.bounds
+                )
+            } else if let pendingTextActivation,
+                      let page = pdfView?.document?.page(
+                          at: pendingTextActivation.pageIndex
+                      ) {
+                frame = inlineTextEditorFrame(
+                    pageIndex: pendingTextActivation.pageIndex,
+                    bounds: pendingTextActivation.selection.bounds(for: page)
                 )
             } else {
                 frame = nil
@@ -2870,6 +2911,22 @@ extension PDFKitView.Coordinator: PDFPageOverlayViewProvider {
 }
 
 extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
+    func handleScrollWillBegin(in pdfView: PDFView) {
+        if inlineTextField != nil {
+            finishInlineTextEditing(commit: true)
+            clearStagedTextSelection()
+            selectedObject.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            pdfView.clearSelection()
+            selection.wrappedValue = nil
+            setOverlayHidden(true)
+            updateGestureAvailability()
+        } else {
+            // A PDFView-level fallback must never follow scrolling content.
+            removeTransientStagedTextFallback()
+        }
+    }
+
     func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
         if inlineTextField != nil {
             return !inlineEditorContains(viewPoint)
