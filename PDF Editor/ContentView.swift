@@ -1,3 +1,4 @@
+import Combine
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -31,12 +32,78 @@ private struct PendingTextEdit {
     let text: String
 }
 
+@MainActor
+private final class PendingTextEditStore: ObservableObject {
+    @Published private(set) var edits: [String: PendingTextEdit] = [:]
+
+    var stagedTextByObjectID: [String: String] {
+        edits.mapValues(\.text)
+    }
+
+    func set(
+        object: PDFPageObjectSnapshot,
+        text: String,
+        undoManager: UndoManager?
+    ) {
+        let objectID = object.id
+        let previous = edits[objectID]
+        let replacement = text == object.text
+            ? nil
+            : PendingTextEdit(object: object, text: text)
+        guard previous?.text != replacement?.text else { return }
+        apply(replacement, objectID: objectID)
+        registerUndo(
+            restoring: previous,
+            replacing: replacement,
+            objectID: objectID,
+            undoManager: undoManager
+        )
+    }
+
+    func removeCommittedEdit(objectID: String) {
+        edits.removeValue(forKey: objectID)
+    }
+
+    func removeUndoActions(using undoManager: UndoManager?) {
+        undoManager?.removeAllActions(withTarget: self)
+    }
+
+    private func apply(_ edit: PendingTextEdit?, objectID: String) {
+        if let edit {
+            edits[objectID] = edit
+        } else {
+            edits.removeValue(forKey: objectID)
+        }
+    }
+
+    private func registerUndo(
+        restoring edit: PendingTextEdit?,
+        replacing inverse: PendingTextEdit?,
+        objectID: String,
+        undoManager: UndoManager?
+    ) {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { [weak undoManager] store in
+            store.apply(edit, objectID: objectID)
+            store.registerUndo(
+                restoring: inverse,
+                replacing: edit,
+                objectID: objectID,
+                undoManager: undoManager
+            )
+        }
+        undoManager.setActionName("Edit PDF Text")
+    }
+}
+
 struct ContentView: View {
     let document: PDFEditorDocument
 
     @ObservedObject private var editorState: PDFEditorDocument.EditorState
 
-    @State private var editorUndoManager = UndoManager()
+    @Environment(\.undoManager) private var environmentUndoManager
+
+    @StateObject private var pendingTextEditStore = PendingTextEditStore()
     @State private var selectedPageIndex: Int? = 0
     @State private var pdfSelection: PDFSelection?
     @State private var password = ""
@@ -46,7 +113,6 @@ struct ContentView: View {
     @State private var pageObjectCache: [Int: [PDFPageObjectSnapshot]] = [:]
     @State private var pageObjectCacheRevision = -1
     @State private var pageObjectLoadTask: Task<Void, Never>?
-    @State private var pendingTextEdits: [String: PendingTextEdit] = [:]
     @State private var selectedObject: PDFPageObjectSnapshot?
     private let objectEditingEnabled = true
     @State private var ocrResult: OCRPageResult?
@@ -101,12 +167,12 @@ struct ContentView: View {
     }
 
     private var undoManager: UndoManager? {
-        editorUndoManager
+        environmentUndoManager
     }
 
     private var canSave: Bool {
         !isSaving && (
-            editorState.hasUnsavedChanges || !pendingTextEdits.isEmpty || saveURL == nil
+            editorState.hasUnsavedChanges || !pendingTextEditStore.edits.isEmpty || saveURL == nil
         )
     }
 
@@ -391,6 +457,7 @@ struct ContentView: View {
                     selectedPageIndex: $selectedPageIndex,
                     selection: $pdfSelection,
                     objects: pageObjects,
+                    stagedTextByObjectID: pendingTextEditStore.stagedTextByObjectID,
                     selectedObject: $selectedObject,
                     objectEditingEnabled: objectEditingEnabled,
                     onTranslateObject: moveObject,
@@ -527,7 +594,7 @@ struct ContentView: View {
     }
 
     private func commitPendingTextEdits() throws {
-        let edits = pendingTextEdits.values.sorted {
+        let edits = pendingTextEditStore.edits.values.sorted {
             if $0.object.pageIndex != $1.object.pageIndex {
                 return $0.object.pageIndex < $1.object.pageIndex
             }
@@ -535,8 +602,9 @@ struct ContentView: View {
         }
         for edit in edits {
             try commitTextReplacement(edit.object, text: edit.text)
-            pendingTextEdits.removeValue(forKey: edit.object.id)
+            pendingTextEditStore.removeCommittedEdit(objectID: edit.object.id)
         }
+        pendingTextEditStore.removeUndoActions(using: undoManager)
     }
 
     private func finishManualSaveExport(_ result: Result<URL, Error>) {
@@ -939,9 +1007,16 @@ struct ContentView: View {
     }
 
     private func loadObjects() {
-        guard selectedPageIndex != nil else { return }
+        guard let index = selectedPageIndex else { return }
+        pageObjectLoadTask?.cancel()
+        do {
+            let objects = try document.pageObjects(at: index)
+            pageObjectCache[index] = objects
+            pageObjects = objects
+        } catch {
+            present(error)
+        }
         showsObjectInspector = true
-        loadCanvasObjects()
     }
 
     private func loadCanvasObjects() {
@@ -984,11 +1059,11 @@ struct ContentView: View {
     }
 
     private func replaceText(_ object: PDFPageObjectSnapshot, text: String) {
-        if text == object.text {
-            pendingTextEdits.removeValue(forKey: object.id)
-        } else {
-            pendingTextEdits[object.id] = PendingTextEdit(object: object, text: text)
-        }
+        pendingTextEditStore.set(
+            object: object,
+            text: text,
+            undoManager: undoManager
+        )
     }
 
     private func commitTextReplacement(_ object: PDFPageObjectSnapshot, text: String) throws {

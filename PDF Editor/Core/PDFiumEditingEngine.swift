@@ -141,6 +141,7 @@ nonisolated enum PDFObjectEditingError: Error, LocalizedError, Equatable, Sendab
 nonisolated protocol PDFObjectEditingSession: AnyObject {
     var hasDigitalSignatures: Bool { get }
     func objects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot]
+    func displayObjects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot]
     func fontData(pageIndex: Int, path: PDFPageObjectPath) throws -> Data?
     func replaceText(
         pageIndex: Int,
@@ -492,25 +493,23 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     func objects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
         try validatePageIndex(pageIndex)
         let count = Int(PEPDFPageObjectCountRecursive(handle, Int32(pageIndex)))
-        var fontCache: [String: Data] = [:]
-        var unavailableFonts = Set<String>()
         return try (0..<count).map { flatIndex in
-            let object = try object(
+            try object(
                 onPage: pageIndex,
                 path: copyPath(pageIndex: pageIndex, flatIndex: flatIndex)
             )
-            guard object.kind == .text else { return object }
-            let cacheKey = object.fontName ?? object.id
-            if let fontData = fontCache[cacheKey] {
-                return object.withFontData(fontData)
-            }
-            guard !unavailableFonts.contains(cacheKey),
-                  let fontData = copyFontData(pageIndex: pageIndex, path: object.path) else {
-                unavailableFonts.insert(cacheKey)
-                return object
-            }
-            fontCache[cacheKey] = fontData
-            return object.withFontData(fontData)
+        }
+    }
+
+    func displayObjects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
+        try validatePageIndex(pageIndex)
+        let count = Int(PEPDFPageObjectCountRecursive(handle, Int32(pageIndex)))
+        return try (0..<count).map { flatIndex in
+            try object(
+                onPage: pageIndex,
+                path: copyPath(pageIndex: pageIndex, flatIndex: flatIndex),
+                includesTextMetadata: false
+            )
         }
     }
 
@@ -1062,7 +1061,11 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         return ranges
     }
 
-    private func object(onPage pageIndex: Int, path: PDFPageObjectPath) throws -> PDFPageObjectSnapshot {
+    private func object(
+        onPage pageIndex: Int,
+        path: PDFPageObjectPath,
+        includesTextMetadata: Bool = true
+    ) throws -> PDFPageObjectSnapshot {
         try validatePageIndex(pageIndex)
         var info = PEPDFObjectInfo()
         let success = path.indices.withUnsafeBufferPointer {
@@ -1103,8 +1106,12 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                 blue: info.fillBlue,
                 alpha: info.fillAlpha
             ),
-            text: kind == .text ? copyText(pageIndex: pageIndex, path: path) : nil,
-            fontName: kind == .text ? copyFontName(pageIndex: pageIndex, path: path) : nil,
+            text: kind == .text && includesTextMetadata
+                ? copyText(pageIndex: pageIndex, path: path)
+                : nil,
+            fontName: kind == .text && includesTextMetadata
+                ? copyFontName(pageIndex: pageIndex, path: path)
+                : nil,
             fontSize: kind == .text ? CGFloat(info.fontSize) : nil,
             fontData: nil,
             imagePixelSize: kind == .image

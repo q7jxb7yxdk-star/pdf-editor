@@ -194,7 +194,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         guard let objectSession = session as? any PDFObjectEditingSession else {
             throw PDFObjectEditingError.objectInspectionFailed
         }
-        return try objectSession.objects(onPage: pageIndex)
+        return try objectSession.displayObjects(onPage: pageIndex)
     }
 
     func replaceText(

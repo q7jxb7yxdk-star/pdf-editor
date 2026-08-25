@@ -26,7 +26,7 @@ This repository uses the following terms:
 - Merge another PDF at the end of the open document, including a password-protected source after password entry.
 - Export the selected page or split the document into one PDF per page.
 - Inspect recursively discovered page objects, including objects nested in Form XObjects.
-- Add text and images; replace existing text and images; move, scale, rotate, reorder, and delete supported page objects. Text and image objects can be selected directly on the document without first enabling a separate object-editing mode. Single-click or tap uses a screen-space hit tolerance to select an object, while double-click on macOS or double-tap on iOS edits text in place at its page location or opens image replacement for the selected object. Leaving an inline text editor stages the replacement in memory; PDFium applies staged text only when the user selects Save.
+- Add text and images; replace existing text and images; move, scale, rotate, reorder, and delete supported page objects. Text and image objects can be selected directly on the document without first enabling a separate object-editing mode. Single-click or tap uses a screen-space hit tolerance to select an object, while double-click on macOS or double-tap on iOS edits text in place at its page location or opens image replacement for the selected object. On macOS, pending multi-line text uses its rendered layout for hit testing and copying; double-clicking a pending line reopens the editor with the insertion cursor at that line's clicked word. Leaving an inline text editor stages the replacement in memory; PDFium applies staged text only when the user selects Save.
 - Inspect the current page on a background PDFium handle, cache page-object snapshots, and prefetch the next page without making PDFKit wait before displaying or scrolling the document. Stale page requests are cancelled or discarded, and PDFium calls are serialized because the library is not treated as thread-safe.
 - Reuse embedded PDF font data for inline text display and replacement when available. When the original font covers the replacement text and does not require advanced shaping, preserve it in the existing object; otherwise, create a CoreText-rendered searchable replacement layer using the bundled Unicode font.
 - Add notes, free-text annotations, highlights, and ink-based handwritten signatures. Comment placement opens a larger multi-line editor on both macOS and iOS.
@@ -34,7 +34,7 @@ This repository uses the following terms:
 - Run on-device Vision text recognition on one page or all scanned pages. Pages that already contain selectable text are skipped, and recognized text is reviewed before an invisible searchable text layer is added.
 - Unlock encrypted PDFs and preserve encryption during ordinary saves. Password removal is an explicit save option for an already unlocked document.
 - Detect the presence of PDF signature objects and require confirmation before the first in-place mutation that may invalidate them.
-- Register document mutations with a dedicated in-memory Undo manager.
+- Register document mutations and pending text replacements with the focused document Undo manager. The temporary macOS inline text view uses an isolated Undo history that is cleared before the view is removed.
 
 ### Experimental or inactive paths
 
@@ -173,7 +173,7 @@ Verified in this documentation task through 2026-08-25:
 - Protected-PDF fixture self-validation passed.
 - Phase-six corpus acceptance passed for the 120-page, mixed selectable/scanned content, rotated, protected, and truncated cases.
 - Unsigned Debug builds succeeded for macOS, generic iOS Simulator, and generic iOS device destinations.
-- The latest pending-text Save flow, embedded-font editing preview, background page-object inspection, central PDF scrolling, explicit-save, panel, annotation-style, and no-flash Apply changes were revalidated with Debug builds for macOS and the generic iOS Simulator destination.
+- The latest pending-text Save and Undo flow, embedded-font and multi-line editing preview, background page-object inspection, central PDF scrolling, explicit-save, panel, annotation-style, and no-flash Apply changes were revalidated with Debug builds for macOS and the generic iOS Simulator destination. Exact cursor placement and visual layout remain manual UI checks.
 - A macOS UI workflow created and edited a comment, applied a blue color and approximately 36% opacity, and confirmed that the Comment Editor remained stable without resetting after Apply.
 - The four checked-in PDFium binary SHA-256 values matched `Packages/PDFiumBridge/Vendor/NOTICE.md`.
 
