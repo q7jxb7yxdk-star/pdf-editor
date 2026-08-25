@@ -455,7 +455,7 @@ struct OCRBatchResultView: View {
 
 struct PageObjectInspectorView: View {
     @Binding var objects: [PDFPageObjectSnapshot]
-    let onReplaceText: (PDFPageObjectSnapshot, String) -> Void
+    let onReplaceText: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceImage: (PDFPageObjectSnapshot) -> Void
     let onMove: (PDFPageObjectSnapshot, CGSize) -> Void
     let onMoveToIndex: (PDFPageObjectSnapshot, Int) -> Void
@@ -463,6 +463,7 @@ struct PageObjectInspectorView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var replacementText: [String: String] = [:]
+    @State private var replacementStyle: [String: PDFTextStyle] = [:]
 
     var body: some View {
         NavigationStack {
@@ -483,10 +484,19 @@ struct PageObjectInspectorView: View {
                             )
                         )
                         .textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("Bold") { toggle(.bold, for: object) }
+                                .buttonStyle(.borderedProminent)
+                                .tint(style(for: object).contains(.bold) ? .accentColor : .gray)
+                            Button("Italic") { toggle(.italic, for: object) }
+                                .buttonStyle(.borderedProminent)
+                                .tint(style(for: object).contains(.italic) ? .accentColor : .gray)
+                        }
                         Button("Apply Text Change") {
                             onReplaceText(
                                 object,
-                                replacementText[object.id] ?? object.text ?? ""
+                                replacementText[object.id] ?? object.text ?? "",
+                                style(for: object)
                             )
                         }
                     }
@@ -522,6 +532,16 @@ struct PageObjectInspectorView: View {
             }
         }
         .frame(minWidth: 420, minHeight: 420)
+    }
+
+    private func style(for object: PDFPageObjectSnapshot) -> PDFTextStyle {
+        replacementStyle[object.id] ?? PDFTextStyle.inferred(fromFontName: object.fontName)
+    }
+
+    private func toggle(_ style: PDFTextStyle, for object: PDFPageObjectSnapshot) {
+        var updatedStyle = self.style(for: object)
+        updatedStyle.formSymmetricDifference(style)
+        replacementStyle[object.id] = updatedStyle
     }
 
     private func objectTitle(_ object: PDFPageObjectSnapshot) -> String {

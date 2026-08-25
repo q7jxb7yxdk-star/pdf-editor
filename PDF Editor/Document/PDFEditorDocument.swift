@@ -201,6 +201,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         pageIndex: Int,
         path: PDFPageObjectPath,
         with text: String,
+        style: PDFTextStyle,
         undoManager: UndoManager?
     ) throws -> PDFTextReplacementResult {
         let object = try pageObjects(at: pageIndex).first { $0.path == path }
@@ -218,6 +219,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                     pageIndex: pageIndex,
                     path: path,
                     with: text,
+                    style: style,
                     fallbackFontData: try unicodeFontData()
                 )
             }
@@ -237,6 +239,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                     text: text,
                     replacing: object,
                     originalFontData: originalFontData ?? nil,
+                    style: style,
                     to: page
                 )
             }

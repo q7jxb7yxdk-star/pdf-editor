@@ -30,27 +30,32 @@ private struct PDFCommentPlacement: Equatable {
 private struct PendingTextEdit {
     let object: PDFPageObjectSnapshot
     let text: String
+    let style: PDFTextStyle
 }
 
 @MainActor
 private final class PendingTextEditStore: ObservableObject {
     @Published private(set) var edits: [String: PendingTextEdit] = [:]
 
-    var stagedTextByObjectID: [String: String] {
-        edits.mapValues(\.text)
+    var stagedTextByObjectID: [String: PDFStagedTextEdit] {
+        edits.mapValues { PDFStagedTextEdit(text: $0.text, style: $0.style) }
     }
 
     func set(
         object: PDFPageObjectSnapshot,
         text: String,
+        style: PDFTextStyle,
         undoManager: UndoManager?
     ) {
         let objectID = object.id
         let previous = edits[objectID]
-        let replacement = text == object.text
+        let originalStyle = PDFTextStyle.inferred(fromFontName: object.fontName)
+        let replacement = text == object.text && style == originalStyle
             ? nil
-            : PendingTextEdit(object: object, text: text)
-        guard previous?.text != replacement?.text else { return }
+            : PendingTextEdit(object: object, text: text, style: style)
+        guard previous?.text != replacement?.text || previous?.style != replacement?.style else {
+            return
+        }
         apply(replacement, objectID: objectID)
         registerUndo(
             restoring: previous,
@@ -601,7 +606,7 @@ struct ContentView: View {
             return $0.object.path.displayValue < $1.object.path.displayValue
         }
         for edit in edits {
-            try commitTextReplacement(edit.object, text: edit.text)
+            try commitTextReplacement(edit.object, text: edit.text, style: edit.style)
             pendingTextEditStore.removeCommittedEdit(objectID: edit.object.id)
         }
         pendingTextEditStore.removeUndoActions(using: undoManager)
@@ -1058,20 +1063,30 @@ struct ContentView: View {
         }
     }
 
-    private func replaceText(_ object: PDFPageObjectSnapshot, text: String) {
+    private func replaceText(
+        _ object: PDFPageObjectSnapshot,
+        text: String,
+        style: PDFTextStyle
+    ) {
         pendingTextEditStore.set(
             object: object,
             text: text,
+            style: style,
             undoManager: undoManager
         )
     }
 
-    private func commitTextReplacement(_ object: PDFPageObjectSnapshot, text: String) throws {
+    private func commitTextReplacement(
+        _ object: PDFPageObjectSnapshot,
+        text: String,
+        style: PDFTextStyle
+    ) throws {
         do {
             let result = try document.replaceText(
                 pageIndex: object.pageIndex,
                 path: object.path,
                 with: text,
+                style: style,
                 undoManager: undoManager
             )
             pageObjects = try document.pageObjects(at: object.pageIndex)
@@ -1083,6 +1098,8 @@ struct ContentView: View {
                 } else {
                     "The original PDF font cannot safely render this text. A searchable CoreText vector layer was used instead."
                 }
+            case .usedStyledCoreTextOverlay:
+                replacementNotice = "Bold or italic formatting was saved as searchable PDF text."
             case let .usedAppearanceSafeAnnotationFallback(originalFontName):
                 replacementNotice = if let originalFontName {
                     "This page cannot safely regenerate its color resources. An editable FreeText layer replaced the \(originalFontName) text, and the original page colors were preserved."

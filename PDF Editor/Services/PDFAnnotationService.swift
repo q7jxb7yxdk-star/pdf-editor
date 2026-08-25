@@ -190,6 +190,7 @@ final class PDFAnnotationService {
         text: String,
         replacing object: PDFPageObjectSnapshot,
         originalFontData: Data?,
+        style: PDFTextStyle,
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let text = try validated(text)
@@ -216,7 +217,8 @@ final class PDFAnnotationService {
         annotation.font = appearanceSafeReplacementFont(
             for: object,
             size: fontSize,
-            originalFontData: originalFontData
+            originalFontData: originalFontData,
+            style: style
         )
         annotation.fontColor = platformColor(PDFAnnotationColor(
             red: CGFloat(object.fillColor.red) / 255,
@@ -233,19 +235,74 @@ final class PDFAnnotationService {
     private func appearanceSafeReplacementFont(
         for object: PDFPageObjectSnapshot,
         size: CGFloat,
-        originalFontData: Data?
+        originalFontData: Data?,
+        style: PDFTextStyle
     ) -> PlatformFont {
+        let baseFont: PlatformFont
         if let originalFontData,
            let provider = CGDataProvider(data: originalFontData as CFData),
            let graphicsFont = CGFont(provider) {
             let coreTextFont = CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil)
 #if os(macOS)
-            return coreTextFont as NSFont
+            baseFont = coreTextFont as NSFont
 #else
-            return coreTextFont as UIFont
+            baseFont = coreTextFont as UIFont
 #endif
+        } else {
+            baseFont = .systemFont(ofSize: size, weight: .regular)
         }
-        return .systemFont(ofSize: size, weight: .regular)
+#if os(macOS)
+        var traits = baseFont.fontDescriptor.symbolicTraits
+        if style.contains(.bold) {
+            traits.insert(.bold)
+        } else {
+            traits.remove(.bold)
+        }
+        if style.contains(.italic) {
+            traits.insert(.italic)
+        } else {
+            traits.remove(.italic)
+        }
+        let descriptor = baseFont.fontDescriptor.withSymbolicTraits(traits)
+        if let styledFont = NSFont(descriptor: descriptor, size: size) {
+            return styledFont
+        }
+        var fallbackFont = style.contains(.bold)
+            ? NSFont.boldSystemFont(ofSize: size)
+            : NSFont.systemFont(ofSize: size)
+        if style.contains(.italic) {
+            fallbackFont = NSFontManager.shared.convert(
+                fallbackFont,
+                toHaveTrait: .italicFontMask
+            )
+        }
+        return fallbackFont
+#else
+        var traits = baseFont.fontDescriptor.symbolicTraits
+        if style.contains(.bold) {
+            traits.insert(.traitBold)
+        } else {
+            traits.remove(.traitBold)
+        }
+        if style.contains(.italic) {
+            traits.insert(.traitItalic)
+        } else {
+            traits.remove(.traitItalic)
+        }
+        guard let descriptor = baseFont.fontDescriptor.withSymbolicTraits(traits) else {
+            var fallbackTraits: UIFontDescriptor.SymbolicTraits = []
+            if style.contains(.bold) { fallbackTraits.insert(.traitBold) }
+            if style.contains(.italic) { fallbackTraits.insert(.traitItalic) }
+            let systemFont = UIFont.systemFont(
+                ofSize: size,
+                weight: style.contains(.bold) ? .bold : .regular
+            )
+            guard let fallbackDescriptor = systemFont.fontDescriptor
+                .withSymbolicTraits(fallbackTraits) else { return systemFont }
+            return UIFont(descriptor: fallbackDescriptor, size: size)
+        }
+        return UIFont(descriptor: descriptor, size: size)
+#endif
     }
 
     func addHighlight(

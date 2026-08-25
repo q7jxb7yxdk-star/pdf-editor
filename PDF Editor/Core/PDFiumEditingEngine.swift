@@ -81,6 +81,7 @@ private extension CGAffineTransform {
 nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
     case preservedOriginalFont
     case usedCoreTextFallback(originalFontName: String?)
+    case usedStyledCoreTextOverlay(originalFontName: String?)
     case usedAppearanceSafeAnnotationFallback(originalFontName: String?)
 
     var userMessage: String? {
@@ -89,10 +90,12 @@ nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
             nil
         case let .usedCoreTextFallback(originalFontName):
             if let originalFontName {
-                "原字型 \(originalFontName) 缺少字形或文字需要複雜 shaping；已使用 CoreText 產生可搜尋的向量文字替代層。"
+                "The original font \(originalFontName) lacks required glyphs or the text needs complex shaping. A searchable CoreText vector layer was used."
             } else {
-                "原 PDF 字型無法安全處理這段文字；已使用 CoreText 產生可搜尋的向量文字替代層。"
+                "The original PDF font cannot safely render this text. A searchable CoreText vector layer was used."
             }
+        case .usedStyledCoreTextOverlay:
+            "Bold or italic formatting was saved as a searchable CoreText vector layer."
         case let .usedAppearanceSafeAnnotationFallback(originalFontName):
             if let originalFontName {
                 "The page's color resources cannot be regenerated safely. An editable FreeText layer replaces the \(originalFontName) text."
@@ -147,6 +150,7 @@ nonisolated protocol PDFObjectEditingSession: AnyObject {
         pageIndex: Int,
         path: PDFPageObjectPath,
         with text: String,
+        style: PDFTextStyle,
         fallbackFontData: Data
     ) throws -> PDFTextReplacementResult
     func translateObject(pageIndex: Int, path: PDFPageObjectPath, by offset: CGSize) throws
@@ -526,6 +530,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         pageIndex: Int,
         path: PDFPageObjectPath,
         with text: String,
+        style: PDFTextStyle,
         fallbackFontData: Data
     ) throws -> PDFTextReplacementResult {
         let object = try object(onPage: pageIndex, path: path)
@@ -536,8 +541,10 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         let originalFontData = copyFontData(pageIndex: pageIndex, path: path)
         let shapingService = CoreTextShapingService()
         let analysis = shapingService.analyze(text: text, fontData: originalFontData)
+        let originalStyle = PDFTextStyle.inferred(fromFontName: object.fontName)
+        let styleChanged = style != originalStyle
 
-        if analysis.coversAllCharacters && !analysis.requiresAdvancedShaping {
+        if !styleChanged && analysis.coversAllCharacters && !analysis.requiresAdvancedShaping {
             do {
                 guard try replaceTextDirectly(pageIndex: pageIndex, path: path, text: text) else {
                     throw PDFObjectEditingError.replacementVerificationFailed
@@ -566,6 +573,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                 textTransform: object.transform,
                 fontSize: object.fontSize ?? max(object.bounds.height, 12),
                 color: object.fillColor,
+                style: style,
                 preferredFontData: analysis.coversAllCharacters ? originalFontData : nil,
                 fallbackFontData: fallbackFontData
             )
@@ -596,7 +604,9 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             ) else {
                 throw PDFObjectEditingError.replacementVerificationFailed
             }
-            return .usedCoreTextFallback(originalFontName: object.fontName)
+            return styleChanged
+                ? .usedStyledCoreTextOverlay(originalFontName: object.fontName)
+                : .usedCoreTextFallback(originalFontName: object.fontName)
         } catch {
             try? replaceHandle(with: beforeData, password: authorizedPassword)
             throw error

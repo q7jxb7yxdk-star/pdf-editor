@@ -155,14 +155,17 @@ The locally patched PDFium path clones Form ancestors before editing nested desc
 
 1. Background page inspection copies each distinct embedded font once for inline display. Save-time replacement also retrieves the selected object's original font data directly from the editing session.
 2. `CoreTextShapingService.analyze` checks whether that font maps all UTF-16 code units to nonzero glyphs and whether the text contains combining marks or script ranges treated as requiring advanced shaping.
-3. When the font covers the text and advanced shaping is not required, replace the text in the existing object, serialize/reopen, and verify the normalized copied text.
-4. Otherwise:
+3. Infer the original bold/italic state from the PDF font name. When that state is unchanged, the font covers the text, and advanced shaping is not required, replace the text in the existing object, serialize/reopen, and verify the normalized copied text.
+4. When bold/italic state changes, or the normal font/shaping checks require fallback:
    - generate a one-page CoreText PDF overlay using the original embedded font when it covers the replacement but requires advanced shaping, or the bundled Noto font when original glyph coverage is insufficient;
+   - synthesize bold with Core Graphics fill-and-stroke text drawing and italic with a text-matrix shear because the bundled fallback currently contains only a regular font face;
    - replace the original object's visible text with a space;
    - import the overlay as a Form object with ActualText metadata;
    - serialize/reopen and verify that PDFKit search, page text, or page-object inspection can find the semantic replacement text.
-5. If page regeneration would materially change ICC or pattern color, create an opaque PDFKit FreeText replacement. Its visual size is capped to the original object's page-space height; it uses the embedded font when available and a regular-weight system fallback otherwise.
+5. If page regeneration would materially change ICC or pattern color, create an opaque PDFKit FreeText replacement. Its visual size is capped to the original object's page-space height; it uses the embedded font when available and applies the requested platform bold/italic traits where supported.
 6. Any failure restores the original bytes.
+
+On macOS, committing an existing-text inline edit keeps the first staged edit visible through an atomic live-editor-to-page-overlay handoff. If that page's overlay has not mounted yet, the live editor and its mask are retained only as a short-lived, noninteractive fallback; the fallback is removed when the mounted overlay takes over and is also removed on scrolling or document replacement. The original-text mask is aligned outward to complete backing-pixel boundaries without fixed point padding, so its coverage avoids a vertical seam. This presentation-only handoff does not mutate the PDF or persist bytes. On iOS, committing inline text likewise stages the change only; it does not auto-save.
 
 The fallback is a new searchable vector layer, not preservation of the original PDF text object's font and internal encoding.
 
@@ -464,7 +467,7 @@ The app opens encrypted PDFs and can remove their encryption dictionary. Export-
 - annotation color and opacity round trips;
 - existing-text rewrite and style/geometry preservation;
 - object movement, addition, deletion, transformation, and z-order;
-- Unicode searchable layers and multilingual CoreText overlays;
+- Unicode searchable layers and multilingual regular/bold/italic CoreText overlays;
 - bitmap insertion/replacement and alpha handling;
 - shared image and nested/shared Form isolation;
 - clipping and marked-content preservation;
@@ -557,6 +560,17 @@ Additional validation completed on 2026-08-25 after the pending-text, Undo, embe
 
 The multi-line staged-text builds cover compilation of rendered-height hit testing, UTF-16 cursor placement, isolated inline Undo, and bounded background masks. Their exact pointer targeting, cursor display, Delete-key behavior, and line coverage still require manual macOS UI verification.
 
+Additional validation completed on 2026-08-25 after adding Bold and Italic existing-text formatting:
+
+- `swift test --package-path Packages/PDFiumBridge`: 26 XCTest cases passed with 0 failures, including searchable Bold, Italic, and combined CoreText overlays after PDFium import and reopen.
+- Debug macOS build: succeeded with isolated DerivedData under `/tmp/PDFEditorStyledTextMac`.
+- Debug generic iOS Simulator build: succeeded for arm64 and x86_64 with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/PDFEditorStyledTextIOS`.
+- UI interaction, visual weight/slant, exact baseline placement, and Save/reopen appearance still require manual validation on macOS and iOS.
+
+Additional user-validated macOS runtime evidence on 2026-08-25:
+
+- The first committed inline text edit stayed visibly continuous through the live-editor-to-page-overlay handoff, and the backing-pixel-aligned mask showed no vertical seam. This is user-validated visual runtime evidence only; it is distinct from the build results above and does not establish persistence, which remains explicit Save only.
+
 The builds establish compilation and bundle construction for those destinations. They do not establish successful app launch, UI behavior, sandbox enforcement, signing, installation, or document workflow correctness.
 
 ### Externally or manually unverified
@@ -610,7 +624,7 @@ Local PDFium patches clone Form ancestry before descendant mutations to isolate 
 
 ### Preserve-font then fallback text strategy
 
-The app first attempts an in-place rewrite only when font coverage and shaping policy permit it. The CoreText overlay path favors visible correctness and searchability when the original font cannot safely represent the requested text. If serialized color metrics show that PDFium regeneration is unsafe, an opaque FreeText annotation replaces the text visually while preserving the original page resources. These fallbacks change the internal object structure, and the color-safety fallback intentionally retains the original underlying text.
+The app first attempts an in-place rewrite only when font coverage, shaping policy, and the requested bold/italic state permit it. The CoreText overlay path favors visible correctness and searchability when the original font cannot safely represent the requested text or the style changes. Bold and italic are synthetic for overlay text because only a regular CJK fallback face is bundled. If serialized color metrics show that PDFium regeneration is unsafe, an opaque FreeText annotation replaces the text visually while preserving the original page resources. These fallbacks change the internal object structure, and the color-safety fallback intentionally retains the original underlying text.
 
 ### Review-before-write OCR
 

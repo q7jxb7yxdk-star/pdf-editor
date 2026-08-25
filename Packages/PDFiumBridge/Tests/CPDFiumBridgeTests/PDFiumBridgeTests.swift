@@ -786,6 +786,47 @@ final class PDFiumBridgeTests: XCTestCase {
         }
     }
 
+    func testBoldItalicCoreTextOverlayRemainsSearchableAfterPDFiumImport() throws {
+        let replacement = "Styled 文字"
+        let styles: [(bold: Bool, italic: Bool)] = [
+            (bold: true, italic: false),
+            (bold: false, italic: true),
+            (bold: true, italic: true),
+        ]
+        for style in styles {
+            let document = try open(makeTextPDF())
+            defer { PEPDFDocumentClose(document) }
+            let overlay = try makeCoreTextOverlay(
+                text: replacement,
+                bold: style.bold,
+                italic: style.italic
+            )
+            let actualText = Array(replacement.utf16)
+            XCTAssertTrue(overlay.withUnsafeBytes { overlayBytes in
+                actualText.withUnsafeBufferPointer { textBuffer in
+                    PEPDFPageImportOverlayWithActualText(
+                        document,
+                        0,
+                        overlayBytes.bindMemory(to: UInt8.self).baseAddress,
+                        overlayBytes.count,
+                        textBuffer.baseAddress,
+                        textBuffer.count
+                    )
+                }
+            })
+
+            let saved = try copyData(document)
+            let reopened = try open(saved)
+            defer { PEPDFDocumentClose(reopened) }
+            let objectTexts = try recursiveTexts(reopened).joined(separator: " ")
+            let pdfKitDocument = try XCTUnwrap(PDFDocument(data: saved))
+            XCTAssertTrue(
+                !pdfKitDocument.findString(replacement, withOptions: []).isEmpty ||
+                    objectTexts.contains(replacement)
+            )
+        }
+    }
+
     private func open(
         _ data: Data,
         password: String? = nil
@@ -1010,7 +1051,11 @@ final class PDFiumBridgeTests: XCTestCase {
             .appendingPathComponent("PDF Editor/NotoSansCJKtc-Regular.otf")
     }
 
-    private func makeCoreTextOverlay(text: String) throws -> Data {
+    private func makeCoreTextOverlay(
+        text: String,
+        bold: Bool = false,
+        italic: Bool = false
+    ) throws -> Data {
         let fontData = try Data(contentsOf: notoFontURL())
         let provider = try XCTUnwrap(CGDataProvider(data: fontData as CFData))
         let graphicsFont = try XCTUnwrap(CGFont(provider))
@@ -1028,6 +1073,13 @@ final class PDFiumBridgeTests: XCTestCase {
         let consumer = try XCTUnwrap(CGDataConsumer(data: data as CFMutableData))
         let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &mediaBox, nil))
         context.beginPDFPage(nil)
+        context.setFillColor(CGColor.black)
+        context.setStrokeColor(CGColor.black)
+        context.setLineWidth(0.84)
+        context.setTextDrawingMode(bold ? .fillStroke : .fill)
+        context.textMatrix = italic
+            ? CGAffineTransform(a: 1, b: 0, c: 0.22, d: 1, tx: 0, ty: 0)
+            : .identity
         context.textPosition = CGPoint(x: 72, y: 700)
         CTLineDraw(line, context)
         context.endPDFPage()

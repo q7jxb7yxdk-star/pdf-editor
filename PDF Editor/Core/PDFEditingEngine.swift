@@ -1,5 +1,30 @@
 import Foundation
 
+nonisolated struct PDFTextStyle: OptionSet, Equatable, Sendable {
+    let rawValue: UInt8
+
+    static let bold = PDFTextStyle(rawValue: 1 << 0)
+    static let italic = PDFTextStyle(rawValue: 1 << 1)
+
+    static func inferred(fromFontName fontName: String?) -> PDFTextStyle {
+        guard let fontName else { return [] }
+        let normalizedName = fontName.lowercased()
+        var style: PDFTextStyle = []
+        if normalizedName.contains("bold") || normalizedName.contains("black") {
+            style.insert(.bold)
+        }
+        if normalizedName.contains("italic") || normalizedName.contains("oblique") {
+            style.insert(.italic)
+        }
+        return style
+    }
+}
+
+nonisolated struct PDFStagedTextEdit: Equatable, Sendable {
+    let text: String
+    let style: PDFTextStyle
+}
+
 /// A platform-neutral snapshot of the document information that the editor can read and write.
 nonisolated struct PDFDocumentInfo: Equatable, Sendable {
     var title: String?

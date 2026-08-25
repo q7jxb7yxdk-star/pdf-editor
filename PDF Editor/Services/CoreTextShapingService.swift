@@ -37,6 +37,7 @@ nonisolated final class CoreTextShapingService {
         textTransform: CGAffineTransform,
         fontSize: CGFloat,
         color: PDFObjectColor,
+        style: PDFTextStyle,
         preferredFontData: Data?,
         fallbackFontData: Data
     ) throws -> Data {
@@ -74,7 +75,19 @@ nonisolated final class CoreTextShapingService {
         context.beginPDFPage(nil)
         context.saveGState()
         context.concatenate(textTransform)
-        context.textMatrix = .identity
+        let textColor = CGColor(
+            red: CGFloat(color.red) / 255,
+            green: CGFloat(color.green) / 255,
+            blue: CGFloat(color.blue) / 255,
+            alpha: CGFloat(color.alpha) / 255
+        )
+        context.setFillColor(textColor)
+        context.setStrokeColor(textColor)
+        context.setLineWidth(max(fontSize * 0.035, 0.25))
+        context.setTextDrawingMode(style.contains(.bold) ? .fillStroke : .fill)
+        context.textMatrix = style.contains(.italic)
+            ? CGAffineTransform(a: 1, b: 0, c: 0.22, d: 1, tx: 0, ty: 0)
+            : .identity
         context.textPosition = .zero
         CTLineDraw(line, context)
         context.restoreGState()

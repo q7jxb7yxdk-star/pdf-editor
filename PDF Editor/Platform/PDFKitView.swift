@@ -38,13 +38,42 @@ private final class PDFInteractionPDFView: PDFView {
 }
 
 private final class PDFPassiveTextView: NSTextView {
+    override var shouldDrawInsertionPoint: Bool { false }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private final class PDFPageOverlayContainer: NSView {
+    let pageIndex: Int
+
+    init(pageIndex: Int) {
+        self.pageIndex = pageIndex
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        pageIndex = NSNotFound
+        super.init(coder: coder)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let target = super.hitTest(point)
+        return target === self ? nil : target
+    }
 }
 
 private final class PDFInlineTextView: NSTextView {
     private let editingUndoManager = UndoManager()
 
     override var undoManager: UndoManager? { editingUndoManager }
+
+    override var shouldDrawInsertionPoint: Bool {
+        isEditable && super.shouldDrawInsertionPoint
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isEditable ? super.hitTest(point) : nil
+    }
 
     func discardUndoHistory() {
         editingUndoManager.removeAllActions()
@@ -55,17 +84,13 @@ private final class PDFTextMaskView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.textBackgroundColor
-            .withAlphaComponent(0.98)
-            .cgColor
+        layer?.backgroundColor = NSColor.white.cgColor
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.textBackgroundColor
-            .withAlphaComponent(0.98)
-            .cgColor
+        layer?.backgroundColor = NSColor.white.cgColor
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -94,7 +119,7 @@ struct PDFKitView: NSViewRepresentable {
     @Binding var selectedPageIndex: Int?
     @Binding var selection: PDFSelection?
     let objects: [PDFPageObjectSnapshot]
-    let stagedTextByObjectID: [String: String]
+    let stagedTextByObjectID: [String: PDFStagedTextEdit]
     @Binding var selectedObject: PDFPageObjectSnapshot?
     let objectEditingEnabled: Bool
     let onTranslateObject: (PDFPageObjectSnapshot, CGSize) -> Void
@@ -105,7 +130,7 @@ struct PDFKitView: NSViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
-    let onReplaceTextObject: (PDFPageObjectSnapshot, String) -> Void
+    let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
@@ -117,6 +142,7 @@ struct PDFKitView: NSViewRepresentable {
     func makeNSView(context: Context) -> PDFView {
         let pdfView = makePDFView()
         context.coordinator.observe(pdfView)
+        loadDocument(into: pdfView)
         return pdfView
     }
 
@@ -155,7 +181,7 @@ struct PDFKitView: UIViewRepresentable {
     @Binding var selectedPageIndex: Int?
     @Binding var selection: PDFSelection?
     let objects: [PDFPageObjectSnapshot]
-    let stagedTextByObjectID: [String: String]
+    let stagedTextByObjectID: [String: PDFStagedTextEdit]
     @Binding var selectedObject: PDFPageObjectSnapshot?
     let objectEditingEnabled: Bool
     let onTranslateObject: (PDFPageObjectSnapshot, CGSize) -> Void
@@ -166,7 +192,7 @@ struct PDFKitView: UIViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
-    let onReplaceTextObject: (PDFPageObjectSnapshot, String) -> Void
+    let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
@@ -178,6 +204,7 @@ struct PDFKitView: UIViewRepresentable {
     func makeUIView(context: Context) -> PDFView {
         let pdfView = makePDFView()
         context.coordinator.observe(pdfView)
+        loadDocument(into: pdfView)
         return pdfView
     }
 
@@ -225,10 +252,13 @@ private extension PDFKitView {
         pdfView.autoScales = true
         pdfView.displayDirection = .vertical
         pdfView.displaysPageBreaks = true
+        return pdfView
+    }
+
+    func loadDocument(into pdfView: PDFView) {
         pdfView.document = document
         applyViewerMode(to: pdfView)
         goToSelectedPage(in: pdfView)
-        return pdfView
     }
 
     func update(_ pdfView: PDFView, coordinator: Coordinator) {
@@ -321,7 +351,7 @@ extension PDFKitView {
 
         var selectedPageIndex: Binding<Int?>
         var selection: Binding<PDFSelection?>
-        var pendingStagedTextByObjectID: [String: String] {
+        var pendingStagedTextByObjectID: [String: PDFStagedTextEdit] {
             didSet {
                 guard oldValue != pendingStagedTextByObjectID else { return }
 #if os(macOS)
@@ -362,7 +392,7 @@ extension PDFKitView {
             }
         }
         var onPlaceComment: (Int, CGPoint) -> Void
-        var onReplaceTextObject: (PDFPageObjectSnapshot, String) -> Void
+        var onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
         var onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
         var onOpenObject: (PDFPageObjectSnapshot) -> Void
         var onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
@@ -385,6 +415,7 @@ extension PDFKitView {
             let selection: PDFSelection
             let originalText: String
             var draftText: String?
+            var draftStyle: PDFTextStyle?
         }
         private var pendingTextActivation: PendingTextActivation?
 
@@ -402,16 +433,40 @@ extension PDFKitView {
                 self.color = color
             }
 
-            func font(at scaleFactor: CGFloat) -> NSFont {
+            func font(at scaleFactor: CGFloat, pdfStyle: PDFTextStyle) -> NSFont {
                 let scaledSize = pointSize * max(scaleFactor, 0.001) / self.scaleFactor
-                return NSFont(descriptor: fontDescriptor, size: scaledSize) ??
-                    NSFont.systemFont(ofSize: scaledSize)
+                var traits = fontDescriptor.symbolicTraits
+                if pdfStyle.contains(.bold) {
+                    traits.insert(.bold)
+                } else {
+                    traits.remove(.bold)
+                }
+                if pdfStyle.contains(.italic) {
+                    traits.insert(.italic)
+                } else {
+                    traits.remove(.italic)
+                }
+                let styledDescriptor = fontDescriptor.withSymbolicTraits(traits)
+                if let styledFont = NSFont(descriptor: styledDescriptor, size: scaledSize) {
+                    return styledFont
+                }
+                var fallbackFont = pdfStyle.contains(.bold)
+                    ? NSFont.boldSystemFont(ofSize: scaledSize)
+                    : NSFont.systemFont(ofSize: scaledSize)
+                if pdfStyle.contains(.italic) {
+                    fallbackFont = NSFontManager.shared.convert(
+                        fallbackFont,
+                        toHaveTrait: .italicFontMask
+                    )
+                }
+                return fallbackFont
             }
         }
 
         private struct StagedTextEdit {
             let text: String
             let style: InlineTextStyle
+            let pdfStyle: PDFTextStyle
         }
 
         private var gestures: [NSGestureRecognizer] = []
@@ -420,13 +475,27 @@ extension PDFKitView {
         private var inlineEditorDidGainFocus = false
         private var pendingInlineCaretLocation: Int?
         private var inlineEditingTextStyle: InlineTextStyle?
+        private var inlineEditingPDFStyle: PDFTextStyle = []
+        private var inlineStyleBar: NSStackView?
         private var stagedTextByObjectID: [String: StagedTextEdit] = [:]
         private var stagedTextStylesByObjectID: [String: InlineTextStyle] = [:]
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
+        private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
+        private struct TransientStagedTextFallback {
+            let objectID: String
+            let pageIndex: Int
+            let editor: PDFInlineTextView
+            let mask: PDFTextMaskView?
+        }
+        private var transientStagedTextFallback: TransientStagedTextFallback?
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
         private var inlineTextField: UITextField?
+        private var inlineEditingBaseFont: UIFont?
+        private var inlineEditingPDFStyle: PDFTextStyle = []
+        private var inlineBoldButton: UIBarButtonItem?
+        private var inlineItalicButton: UIBarButtonItem?
 #endif
         private var inlineEditingObject: PDFPageObjectSnapshot?
         private var inlineEditingAnnotation: PDFAnnotationSnapshot?
@@ -437,7 +506,7 @@ extension PDFKitView {
             selectedPageIndex: Binding<Int?>,
             selection: Binding<PDFSelection?>,
             objects: [PDFPageObjectSnapshot],
-            pendingStagedTextByObjectID: [String: String],
+            pendingStagedTextByObjectID: [String: PDFStagedTextEdit],
             selectedObject: Binding<PDFPageObjectSnapshot?>,
             objectEditingEnabled: Bool,
             onTranslateObject: @escaping (PDFPageObjectSnapshot, CGSize) -> Void,
@@ -448,7 +517,7 @@ extension PDFKitView {
             onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
-            onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String) -> Void,
+            onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void,
             onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String) -> Void,
             onOpenObject: @escaping (PDFPageObjectSnapshot) -> Void,
             onOpenAnnotation: @escaping (PDFAnnotationSnapshot) -> Void
@@ -479,6 +548,7 @@ extension PDFKitView {
             self.pdfView = pdfView
 #if os(macOS)
             (pdfView as? PDFInteractionPDFView)?.interactionHandler = self
+            pdfView.pageOverlayViewProvider = self
             pdfView.wantsLayer = true
             pdfView.layer?.addSublayer(outlineLayer)
             handleLayers.forEach { pdfView.layer?.addSublayer($0) }
@@ -530,6 +600,25 @@ extension PDFKitView {
                     queue: .main
                 ) { [weak self] _ in self?.scheduleOverlayRefresh() },
             ]
+#if os(macOS)
+            if let clipView = pdfView.documentView?.enclosingScrollView?.contentView {
+                clipView.postsBoundsChangedNotifications = true
+                observers.append(center.addObserver(
+                    forName: NSView.boundsDidChangeNotification,
+                    object: clipView,
+                    queue: .main
+                ) { [weak self] _ in
+                    guard let self else { return }
+                    if self.inlineTextField != nil {
+                        self.finishInlineTextEditing(commit: true)
+                    } else {
+                        // This PDFView-level view is solely a one-runloop hand-off
+                        // fallback, so never let it follow scrolling content.
+                        self.removeTransientStagedTextFallback()
+                    }
+                })
+            }
+#endif
             updateGestureAvailability()
             scheduleOverlayRefresh()
         }
@@ -544,10 +633,13 @@ extension PDFKitView {
             if let pdfView {
 #if os(macOS)
                 (pdfView as? PDFInteractionPDFView)?.interactionHandler = nil
+                pdfView.pageOverlayViewProvider = nil
+                removeTransientStagedTextFallback()
                 stagedTextViews.values.forEach { $0.removeFromSuperview() }
                 stagedTextViews.removeAll()
                 stagedTextMaskViews.values.forEach { $0.removeFromSuperview() }
                 stagedTextMaskViews.removeAll()
+                pageOverlayViews.removeAll()
 #endif
                 gestures.forEach(pdfView.removeGestureRecognizer)
             }
@@ -560,12 +652,14 @@ extension PDFKitView {
             finishInlineTextEditing(commit: false)
             pendingTextActivation = nil
 #if os(macOS)
+            removeTransientStagedTextFallback()
             stagedTextByObjectID.removeAll()
             stagedTextStylesByObjectID.removeAll()
             stagedTextViews.values.forEach { $0.removeFromSuperview() }
             stagedTextViews.removeAll()
             stagedTextMaskViews.values.forEach { $0.removeFromSuperview() }
             stagedTextMaskViews.removeAll()
+            pageOverlayViews.removeAll()
 #endif
             clearInteraction()
             setOverlayHidden(true)
@@ -851,7 +945,8 @@ extension PDFKitView {
                 pageIndex: pageIndex,
                 selection: wordSelection,
                 originalText: text,
-                draftText: nil
+                draftText: nil,
+                draftStyle: nil
             )
             selectedObject.wrappedValue = nil
             selectedAnnotation.wrappedValue = nil
@@ -862,10 +957,14 @@ extension PDFKitView {
                 text: text,
                 color: PDFObjectColor(red: 0, green: 0, blue: 0, alpha: 255),
                 fontName: fontName(from: wordSelection),
-                displayFontSize: max(frame.height * 0.82, 6),
+                displayFontSize: displayFontSize(from: wordSelection) ??
+                    max(frame.height * 0.82, 6),
                 fontData: nil,
                 frame: frame,
                 maskFrame: textMaskFrame(pageIndex: pageIndex, bounds: selectionBounds),
+                initialStyle: PDFTextStyle.inferred(
+                    fromFontName: fontName(from: wordSelection)
+                ),
                 object: nil,
                 annotation: nil
             )
@@ -920,6 +1019,7 @@ extension PDFKitView {
                 selection: pendingTextActivation.selection
             )
             let draft = pendingTextActivation.draftText
+            let draftStyle = pendingTextActivation.draftStyle
             self.pendingTextActivation = nil
             selectedObject.wrappedValue = resolvedObject
             selectedPageIndex.wrappedValue = resolvedObject.pageIndex
@@ -936,9 +1036,28 @@ extension PDFKitView {
                     field.text = resolvedText
                 }
 #endif
-                applyResolvedTextStyle(resolvedObject, to: field)
-            } else if let draft, draft != pendingTextActivation.originalText {
-                onReplaceTextObject(resolvedObject, draft)
+                applyResolvedTextStyle(
+                    resolvedObject,
+                    to: field,
+                    preservingCurrentPDFStyle: true
+                )
+            } else if let draft {
+                let resolvedStyle = draftStyle ??
+                    PDFTextStyle.inferred(fromFontName: resolvedObject.fontName)
+                let originalStyle = PDFTextStyle.inferred(
+                    fromFontName: resolvedObject.fontName
+                )
+                guard draft != pendingTextActivation.originalText ||
+                        resolvedStyle != originalStyle else {
+                    updateGestureAvailability()
+                    refreshOverlay()
+                    return
+                }
+                onReplaceTextObject(
+                    resolvedObject,
+                    draft,
+                    resolvedStyle
+                )
             }
             updateGestureAvailability()
             refreshOverlay()
@@ -1169,10 +1288,25 @@ extension PDFKitView {
         }
 
         private func prepareForCanvasInteraction(at viewPoint: CGPoint) -> Bool {
-            guard let inlineTextField else { return true }
-            if inlineTextField.frame.contains(viewPoint) { return false }
+            guard inlineTextField != nil else { return true }
+            if inlineEditorContains(viewPoint) { return false }
             finishInlineTextEditing(commit: true)
             return true
+        }
+
+        private func inlineEditorContains(_ viewPoint: CGPoint) -> Bool {
+            guard let pdfView, let inlineTextField else { return false }
+            if let superview = inlineTextField.superview,
+               pdfView.convert(inlineTextField.frame, from: superview).contains(viewPoint) {
+                return true
+            }
+#if os(macOS)
+            if let inlineStyleBar, let superview = inlineStyleBar.superview,
+               pdfView.convert(inlineStyleBar.frame, from: superview).contains(viewPoint) {
+                return true
+            }
+#endif
+            return false
         }
 
         private func beginInlineTextEditing(_ object: PDFPageObjectSnapshot) {
@@ -1180,8 +1314,11 @@ extension PDFKitView {
                   let frame = inlineTextEditorFrame(for: object) else { return }
 #if os(macOS)
             let editableText = stagedTextByObjectID[object.id]?.text ?? object.text ?? ""
+            let initialStyle = stagedTextByObjectID[object.id]?.pdfStyle ??
+                PDFTextStyle.inferred(fromFontName: object.fontName)
 #else
             let editableText = object.text ?? ""
+            let initialStyle = PDFTextStyle.inferred(fromFontName: object.fontName)
 #endif
             beginInlineTextEditing(
                 text: editableText,
@@ -1191,6 +1328,7 @@ extension PDFKitView {
                 fontData: object.fontData,
                 frame: frame,
                 maskFrame: textMaskFrame(for: object),
+                initialStyle: initialStyle,
                 object: object,
                 annotation: nil
             )
@@ -1218,6 +1356,7 @@ extension PDFKitView {
                 fontData: nil,
                 frame: frame,
                 maskFrame: nil,
+                initialStyle: [],
                 object: nil,
                 annotation: annotation
             )
@@ -1231,13 +1370,18 @@ extension PDFKitView {
             fontData: Data?,
             frame: CGRect,
             maskFrame: CGRect?,
+            initialStyle: PDFTextStyle,
             object: PDFPageObjectSnapshot?,
             annotation: PDFAnnotationSnapshot?
         ) {
             guard let pdfView else { return }
+#if os(macOS)
+            removeTransientStagedTextFallback()
+#endif
             finishInlineTextEditing(commit: false)
             inlineEditingObject = object
             inlineEditingAnnotation = annotation
+            inlineEditingPDFStyle = initialStyle
 
 #if os(macOS)
             stagedTextViews[object?.id ?? ""]?.isHidden = true
@@ -1251,7 +1395,7 @@ extension PDFKitView {
             field.string = text
             field.drawsBackground = maskFrame == nil
             field.backgroundColor = maskFrame == nil
-                ? NSColor.textBackgroundColor.withAlphaComponent(0.98)
+                ? NSColor.white.withAlphaComponent(0.98)
                 : .clear
             let resolvedColor = objectTextColor(color)
             let resolvedStyle: InlineTextStyle
@@ -1272,7 +1416,10 @@ extension PDFKitView {
             }
             inlineEditingTextStyle = resolvedStyle
             field.textColor = resolvedStyle.color
-            field.font = resolvedStyle.font(at: pdfView.scaleFactor)
+            field.font = resolvedStyle.font(
+                at: pdfView.scaleFactor,
+                pdfStyle: inlineEditingPDFStyle
+            )
             field.isEditable = true
             field.isSelectable = true
             field.isRichText = false
@@ -1292,6 +1439,9 @@ extension PDFKitView {
             inlineEditorDidGainFocus = false
             inlineTextField = field
             pdfView.addSubview(field, positioned: .above, relativeTo: inlineTextMaskView)
+            if object != nil || pendingTextActivation != nil {
+                installInlineStyleBar(above: field.frame, in: pdfView)
+            }
             adjustInlineEditorWidth(field)
             adjustInlineEditorHeight(field)
             alignInlineTextBaseline(field, object: object, annotation: annotation)
@@ -1302,15 +1452,20 @@ extension PDFKitView {
             field.borderStyle = .none
             field.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.96)
             field.textColor = objectTextColor(color)
-            field.font = objectFont(
+            let baseFont = objectFont(
                 named: fontName,
                 displayPointSize: displayFontSize,
                 fontData: fontData,
                 viewHeight: frame.height
             )
+            inlineEditingBaseFont = baseFont
+            field.font = styledFont(baseFont, style: inlineEditingPDFStyle)
             field.returnKeyType = .done
             field.clearButtonMode = .whileEditing
             field.delegate = self
+            if object != nil || pendingTextActivation != nil {
+                field.inputAccessoryView = makeInlineStyleToolbar()
+            }
             inlineTextField = field
             pdfView.addSubview(field)
             field.becomeFirstResponder()
@@ -1334,27 +1489,39 @@ extension PDFKitView {
 #if os(macOS)
             let text = field.string
             let textStyle = inlineEditingTextStyle
+            let pdfStyle = inlineEditingPDFStyle
             field.delegate = nil
             field.discardUndoHistory()
             pdfView?.window?.makeFirstResponder(pdfView)
-            field.removeFromSuperview()
-            inlineTextMaskView?.removeFromSuperview()
+            let mask = inlineTextMaskView
             inlineTextMaskView = nil
+            inlineStyleBar?.removeFromSuperview()
+            inlineStyleBar = nil
             inlineEditorDidGainFocus = false
             inlineEditingTextStyle = nil
+            pdfView?.needsDisplay = true
 #elseif os(iOS)
             let text = field.text ?? ""
+            let pdfStyle = inlineEditingPDFStyle
             field.delegate = nil
             field.resignFirstResponder()
             field.removeFromSuperview()
+            inlineEditingBaseFont = nil
+            inlineBoldButton = nil
+            inlineItalicButton = nil
 #endif
             inlineTextField = nil
             inlineEditingObject = nil
             inlineEditingAnnotation = nil
+            inlineEditingPDFStyle = []
             isFinishingInlineTextEditing = false
             if object == nil, annotation == nil {
+#if os(macOS)
+                removeInlineTextEditingViews(field, mask: mask)
+#endif
                 if commit {
                     pendingTextActivation?.draftText = text
+                    pendingTextActivation?.draftStyle = pdfStyle
                 } else {
                     pendingTextActivation = nil
                 }
@@ -1363,26 +1530,41 @@ extension PDFKitView {
             }
 #if os(macOS)
             if let object {
-                if commit, text != object.text, let textStyle {
+                let originalStyle = PDFTextStyle.inferred(fromFontName: object.fontName)
+                if commit, (text != object.text || pdfStyle != originalStyle), let textStyle {
                     stagedTextStylesByObjectID[object.id] = textStyle
                     stagedTextByObjectID[object.id] = StagedTextEdit(
                         text: text,
-                        style: textStyle
+                        style: textStyle,
+                        pdfStyle: pdfStyle
                     )
                 } else if commit {
                     stagedTextByObjectID.removeValue(forKey: object.id)
                 }
+                if commit,
+                   stagedTextByObjectID[object.id] != nil,
+                   !hasMountedPageOverlay(for: object.pageIndex) {
+                    freezeInlineTextEditor(
+                        field,
+                        mask: mask,
+                        for: object
+                    )
+                } else {
+                    removeInlineTextEditingViews(field, mask: mask)
+                }
                 updateStagedTextOverlays()
+            } else {
+                removeInlineTextEditingViews(field, mask: mask)
             }
 #endif
             refreshOverlay()
             if commit, let object {
 #if os(macOS)
                 DispatchQueue.main.async { [weak self] in
-                    self?.onReplaceTextObject(object, text)
+                    self?.onReplaceTextObject(object, text, pdfStyle)
                 }
 #else
-                onReplaceTextObject(object, text)
+                onReplaceTextObject(object, text, pdfStyle)
 #endif
             }
             if commit, let annotation, text != annotation.contents {
@@ -1402,18 +1584,24 @@ extension PDFKitView {
             } else {
                 frame = nil
             }
-            guard var frame, let inlineTextField else { return }
+            guard let frame, let inlineTextField else { return }
 #if os(macOS)
-            if let object = inlineEditingObject {
-                inlineTextMaskView?.frame = textMaskFrame(for: object) ?? .zero
-                inlineTextField.frame = frame
+            if let pdfView, let superview = inlineTextField.superview {
+                let localFrame = superview.convert(frame, from: pdfView)
+                if let object = inlineEditingObject {
+                    inlineTextMaskView?.frame = textMaskFrame(for: object).map {
+                        superview.convert($0, from: pdfView)
+                    } ?? .zero
+                }
+                inlineTextField.frame = localFrame
                 adjustInlineEditorWidth(inlineTextField)
                 adjustInlineEditorHeight(inlineTextField)
                 alignInlineTextBaseline(
                     inlineTextField,
-                    object: object,
-                    annotation: nil
+                    object: inlineEditingObject,
+                    annotation: inlineEditingAnnotation
                 )
+                positionInlineStyleBar(above: inlineTextField.frame)
                 return
             }
 #endif
@@ -1448,8 +1636,74 @@ extension PDFKitView {
                   converted.height.isFinite,
                   converted.width > 0,
                   converted.height > 0 else { return nil }
+#if os(macOS)
+            return backingAlignedMaskFrame(converted, in: pdfView)
+#else
             return converted
+#endif
         }
+
+#if os(macOS)
+        private func backingAlignedMaskFrame(
+            _ frame: CGRect,
+            in pdfView: PDFView
+        ) -> CGRect {
+            let backingFrame = pdfView.convertToBacking(frame)
+            let minX = floor(backingFrame.minX)
+            let minY = floor(backingFrame.minY)
+            let maxX = ceil(backingFrame.maxX)
+            let maxY = ceil(backingFrame.maxY)
+            guard maxX > minX, maxY > minY else { return frame }
+            return pdfView.convertFromBacking(CGRect(
+                x: minX,
+                y: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            )).standardized
+        }
+
+        private func hasMountedPageOverlay(for pageIndex: Int) -> Bool {
+            guard let pageOverlay = pageOverlayViews[pageIndex] else { return false }
+            return pageOverlay.superview != nil && pageOverlay.window != nil
+        }
+
+        private func freezeInlineTextEditor(
+            _ editor: PDFInlineTextView,
+            mask: PDFTextMaskView?,
+            for object: PDFPageObjectSnapshot
+        ) {
+            removeTransientStagedTextFallback()
+            editor.isEditable = false
+            editor.isSelectable = false
+            editor.selectedRange = NSRange(location: 0, length: 0)
+            editor.insertionPointColor = .clear
+            transientStagedTextFallback = TransientStagedTextFallback(
+                objectID: object.id,
+                pageIndex: object.pageIndex,
+                editor: editor,
+                mask: mask
+            )
+        }
+
+        private func removeInlineTextEditingViews(
+            _ editor: PDFInlineTextView,
+            mask: PDFTextMaskView?
+        ) {
+            editor.removeFromSuperview()
+            mask?.removeFromSuperview()
+        }
+
+        private func removeTransientStagedTextFallback() {
+            transientStagedTextFallback?.editor.removeFromSuperview()
+            transientStagedTextFallback?.mask?.removeFromSuperview()
+            transientStagedTextFallback = nil
+        }
+
+        private func removeTransientStagedTextFallback(for objectID: String) {
+            guard transientStagedTextFallback?.objectID == objectID else { return }
+            removeTransientStagedTextFallback()
+        }
+#endif
 
         private func inlineTextEditorFrame(
             pageIndex: Int,
@@ -1489,6 +1743,111 @@ extension PDFKitView {
         }
 
 #if os(macOS)
+        private func installInlineStyleBar(above frame: CGRect, in container: NSView) {
+            let boldButton = NSButton(
+                title: "B",
+                target: self,
+                action: #selector(toggleInlineBold(_:))
+            )
+            boldButton.tag = 1
+            boldButton.toolTip = "Bold"
+            boldButton.setAccessibilityLabel("Bold")
+            boldButton.setButtonType(.toggle)
+            boldButton.refusesFirstResponder = true
+            boldButton.bezelStyle = .texturedRounded
+            boldButton.font = .boldSystemFont(ofSize: 13)
+
+            let italicButton = NSButton(
+                title: "I",
+                target: self,
+                action: #selector(toggleInlineItalic(_:))
+            )
+            italicButton.tag = 2
+            italicButton.toolTip = "Italic"
+            italicButton.setAccessibilityLabel("Italic")
+            italicButton.setButtonType(.toggle)
+            italicButton.refusesFirstResponder = true
+            italicButton.bezelStyle = .texturedRounded
+            italicButton.font = NSFontManager.shared.convert(
+                .systemFont(ofSize: 13),
+                toHaveTrait: .italicFontMask
+            )
+
+            let stack = NSStackView(views: [boldButton, italicButton])
+            stack.orientation = .horizontal
+            stack.spacing = 4
+            stack.edgeInsets = NSEdgeInsets(top: 3, left: 3, bottom: 3, right: 3)
+            stack.wantsLayer = true
+            stack.layer?.backgroundColor = NSColor.windowBackgroundColor
+                .withAlphaComponent(0.96).cgColor
+            stack.layer?.cornerRadius = 6
+            stack.frame.size = stack.fittingSize
+            inlineStyleBar = stack
+            container.addSubview(stack, positioned: .above, relativeTo: inlineTextField)
+            positionInlineStyleBar(above: frame)
+            updateInlineStyleButtonStates()
+        }
+
+        private func positionInlineStyleBar(above frame: CGRect) {
+            guard let inlineStyleBar, let container = inlineStyleBar.superview else { return }
+            let size = inlineStyleBar.fittingSize
+            let y: CGFloat
+            if container.isFlipped {
+                y = max(frame.minY - size.height - 4, 4)
+            } else {
+                y = min(
+                    frame.maxY + 4,
+                    max(container.bounds.maxY - size.height - 4, 4)
+                )
+            }
+            inlineStyleBar.frame = CGRect(
+                x: min(max(frame.minX, 4), max(container.bounds.maxX - size.width - 4, 4)),
+                y: y,
+                width: size.width,
+                height: size.height
+            )
+        }
+
+        @objc private func toggleInlineBold(_ sender: NSButton) {
+            inlineEditingPDFStyle.formSymmetricDifference(.bold)
+            updateInlineTextStylePreview()
+        }
+
+        @objc private func toggleInlineItalic(_ sender: NSButton) {
+            inlineEditingPDFStyle.formSymmetricDifference(.italic)
+            updateInlineTextStylePreview()
+        }
+
+        private func updateInlineStyleButtonStates() {
+            guard let buttons = inlineStyleBar?.views as? [NSButton] else { return }
+            for button in buttons {
+                if button.tag == 1 {
+                    button.state = inlineEditingPDFStyle.contains(.bold) ? .on : .off
+                } else if button.tag == 2 {
+                    button.state = inlineEditingPDFStyle.contains(.italic) ? .on : .off
+                }
+            }
+        }
+
+        private func updateInlineTextStylePreview() {
+            guard let pdfView,
+                  let field = inlineTextField,
+                  let style = inlineEditingTextStyle else { return }
+            field.font = style.font(
+                at: field.superview is PDFPageOverlayContainer ? 1 : pdfView.scaleFactor,
+                pdfStyle: inlineEditingPDFStyle
+            )
+            updateInlineStyleButtonStates()
+            adjustInlineEditorWidth(field)
+            adjustInlineEditorHeight(field)
+            alignInlineTextBaseline(
+                field,
+                object: inlineEditingObject,
+                annotation: inlineEditingAnnotation
+            )
+            positionInlineStyleBar(above: field.frame)
+        }
+
         private func focusInlineTextField(
             _ field: NSTextView,
             in pdfView: PDFView,
@@ -1541,9 +1900,23 @@ extension PDFKitView {
             ) as? NSFont)?.fontName
         }
 
+        private func displayFontSize(from selection: PDFSelection?) -> CGFloat? {
+            guard let pdfView,
+                  let attributedString = selection?.attributedString,
+                  attributedString.length > 0,
+                  let font = attributedString.attribute(
+                      .font,
+                      at: 0,
+                      effectiveRange: nil
+                  ) as? NSFont else { return nil }
+            let displaySize = font.pointSize * max(pdfView.scaleFactor, 0.001)
+            return displaySize.isFinite && displaySize > 0 ? displaySize : nil
+        }
+
         private func applyResolvedTextStyle(
             _ object: PDFPageObjectSnapshot,
-            to field: NSTextView
+            to field: NSTextView,
+            preservingCurrentPDFStyle: Bool
         ) {
             guard let pdfView else { return }
             let color = objectTextColor(object.fillColor)
@@ -1558,13 +1931,28 @@ extension PDFKitView {
                 scaleFactor: pdfView.scaleFactor,
                 color: color
             )
+            if !preservingCurrentPDFStyle {
+                inlineEditingPDFStyle = stagedTextByObjectID[object.id]?.pdfStyle ??
+                    PDFTextStyle.inferred(fromFontName: object.fontName)
+            }
             inlineEditingTextStyle = style
             field.textColor = color
-            field.font = font
-            if let frame = inlineTextEditorFrame(for: object) {
-                field.frame = frame
+            field.font = style.font(
+                at: field.superview is PDFPageOverlayContainer ? 1 : pdfView.scaleFactor,
+                pdfStyle: inlineEditingPDFStyle
+            )
+            if inlineStyleBar == nil {
+                guard let container = field.superview else { return }
+                installInlineStyleBar(above: field.frame, in: container)
+            } else {
+                updateInlineStyleButtonStates()
             }
-            inlineTextMaskView?.frame = textMaskFrame(for: object) ?? .zero
+            if let frame = inlineTextEditorFrame(for: object) {
+                field.frame = field.superview?.convert(frame, from: pdfView) ?? frame
+            }
+            inlineTextMaskView?.frame = textMaskFrame(for: object).map {
+                field.superview?.convert($0, from: pdfView) ?? $0
+            } ?? .zero
             adjustInlineEditorWidth(field)
             adjustInlineEditorHeight(field)
             alignInlineTextBaseline(field, object: object, annotation: nil)
@@ -1592,25 +1980,36 @@ extension PDFKitView {
 
         private func adjustInlineEditorWidth(_ textView: NSTextView) {
             guard let pdfView,
+                  let superview = textView.superview,
                   let object = inlineEditingObject,
                   let baseFrame = inlineTextEditorFrame(for: object),
                   let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return }
+            let localBaseFrame = superview.convert(baseFrame, from: pdfView)
             layoutManager.ensureLayout(for: textContainer)
             let measuredWidth = layoutManager.usedRect(for: textContainer).width + 4
-            let availableWidth = max(pdfView.bounds.maxX - baseFrame.minX - 8, baseFrame.width)
-            textView.frame.size.width = min(max(baseFrame.width, measuredWidth), availableWidth)
+            let availableWidth = max(
+                superview.bounds.maxX - localBaseFrame.minX - 8,
+                localBaseFrame.width
+            )
+            textView.frame.size.width = min(
+                max(localBaseFrame.width, measuredWidth),
+                availableWidth
+            )
         }
 
         private func adjustInlineEditorHeight(_ textView: NSTextView) {
-            guard let object = inlineEditingObject,
+            guard let pdfView,
+                  let superview = textView.superview,
+                  let object = inlineEditingObject,
                   let baseFrame = inlineTextEditorFrame(for: object),
                   let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return }
+            let localBaseFrame = superview.convert(baseFrame, from: pdfView)
             layoutManager.ensureLayout(for: textContainer)
             let measuredHeight = ceil(layoutManager.usedRect(for: textContainer).height)
             guard measuredHeight.isFinite else { return }
-            textView.frame.size.height = max(baseFrame.height, measuredHeight)
+            textView.frame.size.height = max(localBaseFrame.height, measuredHeight)
         }
 
         private func alignInlineTextBaseline(
@@ -1619,19 +2018,26 @@ extension PDFKitView {
             annotation: PDFAnnotationSnapshot?
         ) {
             guard annotation == nil else { return }
+            guard let pdfView, let superview = textView.superview else { return }
             let baselineY: CGFloat
-            if let object, let objectBaselineY = inlineTextBaselineY(for: object) {
-                baselineY = objectBaselineY
+            if let object,
+               let objectBaselineY = inlineTextBaselineY(for: object),
+               let objectFrame = inlineTextEditorFrame(for: object) {
+                baselineY = superview.convert(
+                    CGPoint(x: objectFrame.minX, y: objectBaselineY),
+                    from: pdfView
+                ).y
             } else {
                 guard let font = textView.font else { return }
-                baselineY = pdfView?.isFlipped == true
+                baselineY = superview.isFlipped
                     ? textView.frame.maxY + font.descender
                     : textView.frame.minY - font.descender
             }
             textView.frame = baselineAlignedFrame(
                 for: textView,
                 baseFrame: textView.frame,
-                baselineY: baselineY
+                baselineY: baselineY,
+                usesFlippedCoordinates: superview.isFlipped
             )
         }
 
@@ -1650,7 +2056,8 @@ extension PDFKitView {
         private func baselineAlignedFrame(
             for textView: NSTextView,
             baseFrame: CGRect,
-            baselineY: CGFloat
+            baselineY: CGFloat,
+            usesFlippedCoordinates: Bool? = nil
         ) -> CGRect {
             guard let pdfView,
                   !textView.string.isEmpty,
@@ -1668,15 +2075,20 @@ extension PDFKitView {
                 lineRect.minY + glyphLocation.y
             guard baselineOffsetFromTop.isFinite else { return baseFrame }
             var alignedFrame = baseFrame
-            alignedFrame.origin.y = pdfView.isFlipped
+            alignedFrame.origin.y = (usesFlippedCoordinates ?? pdfView.isFlipped)
                 ? baselineY - baselineOffsetFromTop
                 : baselineY + baselineOffsetFromTop - baseFrame.height
             return alignedFrame
         }
 
         private func updateStagedTextOverlays() {
-            guard let pdfView else { return }
+            guard let pdfView, let document = pdfView.document else { return }
             let liveObjects = Dictionary(uniqueKeysWithValues: objects.map { ($0.id, $0) })
+            if let fallback = transientStagedTextFallback,
+               stagedTextByObjectID[fallback.objectID] == nil ||
+               liveObjects[fallback.objectID] == nil {
+                removeTransientStagedTextFallback()
+            }
             let renderedIDs = Set(stagedTextViews.keys).union(stagedTextMaskViews.keys)
             let obsoleteIDs = renderedIDs.filter {
                 stagedTextByObjectID[$0] == nil || liveObjects[$0] == nil
@@ -1688,14 +2100,21 @@ extension PDFKitView {
 
             for (objectID, edit) in stagedTextByObjectID {
                 guard let object = liveObjects[objectID],
+                      let page = document.page(at: object.pageIndex),
+                      hasMountedPageOverlay(for: object.pageIndex),
+                      let pageOverlay = pageOverlayViews[object.pageIndex],
                       let frame = inlineTextEditorFrame(for: object),
                       let maskFrame = textMaskFrame(for: object) else { continue }
+                let pageFrame = pageOverlay.convert(frame, from: pdfView)
                 let maskView = stagedTextMaskViews[objectID] ?? PDFTextMaskView(frame: maskFrame)
                 if stagedTextMaskViews[objectID] == nil {
                     stagedTextMaskViews[objectID] = maskView
-                    pdfView.addSubview(maskView, positioned: .above, relativeTo: nil)
                 }
-                maskView.frame = maskFrame
+                if maskView.superview !== pageOverlay {
+                    maskView.removeFromSuperview()
+                    pageOverlay.addSubview(maskView, positioned: .above, relativeTo: nil)
+                }
+                maskView.frame = pageOverlay.convert(maskFrame, from: pdfView)
                 let view = stagedTextViews[objectID] ?? PDFPassiveTextView(frame: frame)
                 if stagedTextViews[objectID] == nil {
                     view.isEditable = false
@@ -1713,35 +2132,67 @@ extension PDFKitView {
                     view.textContainer?.widthTracksTextView = true
                     view.textContainer?.heightTracksTextView = false
                     stagedTextViews[objectID] = view
-                    pdfView.addSubview(view, positioned: .above, relativeTo: maskView)
                 }
-                view.frame = frame
+                if view.superview !== pageOverlay {
+                    view.removeFromSuperview()
+                    pageOverlay.addSubview(view, positioned: .above, relativeTo: maskView)
+                }
                 if view.string != edit.text {
                     view.string = edit.text
                 }
                 view.textColor = edit.style.color
-                view.font = edit.style.font(at: pdfView.scaleFactor)
+                view.font = edit.style.font(
+                    at: 1,
+                    pdfStyle: edit.pdfStyle
+                )
+                var stagedFrame = pageFrame
                 if let font = view.font {
                     let measuredWidth = (edit.text as NSString).size(
                         withAttributes: [.font: font]
                     ).width + 4
-                    let availableWidth = max(pdfView.bounds.maxX - frame.minX - 8, frame.width)
-                    view.frame.size.width = min(max(frame.width, measuredWidth), availableWidth)
+                    let pageBounds = pageOverlay.convert(
+                        pdfView.convert(page.bounds(for: pdfView.displayBox), from: page),
+                        from: pdfView
+                    ).standardized
+                    let availableWidth = max(
+                        pageBounds.maxX - pageFrame.minX - 8,
+                        pageFrame.width
+                    )
+                    stagedFrame.size.width = min(
+                        max(pageFrame.width, measuredWidth),
+                        availableWidth
+                    )
                 }
                 if let layoutManager = view.layoutManager,
                    let textContainer = view.textContainer {
                     textContainer.containerSize = NSSize(
-                        width: view.frame.width,
+                        width: stagedFrame.width,
                         height: CGFloat.greatestFiniteMagnitude
                     )
                     layoutManager.ensureLayout(for: textContainer)
                     let contentHeight = ceil(layoutManager.usedRect(for: textContainer).height)
                     if contentHeight.isFinite {
-                        view.frame.size.height = max(frame.height, contentHeight)
+                        stagedFrame.size.height = max(pageFrame.height, contentHeight)
                     }
                 }
-                alignInlineTextBaseline(view, object: object, annotation: nil)
+                if let baselineY = inlineTextBaselineY(for: object) {
+                    let pageBaselineY = pageOverlay.convert(
+                        CGPoint(x: frame.minX, y: baselineY),
+                        from: pdfView
+                    ).y
+                    stagedFrame = baselineAlignedFrame(
+                        for: view,
+                        baseFrame: stagedFrame,
+                        baselineY: pageBaselineY,
+                        usesFlippedCoordinates: pageOverlay.isFlipped
+                    )
+                }
+                view.frame = stagedFrame
                 view.isHidden = inlineEditingObject?.id == objectID
+                maskView.needsDisplay = true
+                view.needsDisplay = true
+                pageOverlay.needsDisplay = true
+                removeTransientStagedTextFallback(for: objectID)
             }
         }
 
@@ -1749,10 +2200,13 @@ extension PDFKitView {
             at viewPoint: CGPoint,
             pageIndex: Int
         ) -> (object: PDFPageObjectSnapshot, view: PDFPassiveTextView)? {
-            guard let objectID = stagedTextViews.first(where: { objectID, view in
-                stagedTextByObjectID[objectID] != nil &&
+            guard let pdfView,
+                  let objectID = stagedTextViews.first(where: { objectID, view in
+                guard let superview = view.superview else { return false }
+                let frameInPDFView = pdfView.convert(view.frame, from: superview)
+                return stagedTextByObjectID[objectID] != nil &&
                     !view.isHidden &&
-                    view.frame.contains(viewPoint)
+                    frameInPDFView.contains(viewPoint)
             })?.key,
                   let view = stagedTextViews[objectID],
                   let object = objects.first(where: {
@@ -1860,13 +2314,21 @@ extension PDFKitView {
             where !pendingIDs.contains(objectID) {
                 stagedTextByObjectID.removeValue(forKey: objectID)
             }
-            for (objectID, text) in pendingStagedTextByObjectID {
+            for (objectID, pendingEdit) in pendingStagedTextByObjectID {
                 let style = stagedTextStylesByObjectID[objectID] ??
                     stagedTextByObjectID[objectID]?.style ??
                     objects.first(where: { $0.id == objectID }).flatMap(makeInlineTextStyle)
                 guard let style else { continue }
                 stagedTextStylesByObjectID[objectID] = style
-                stagedTextByObjectID[objectID] = StagedTextEdit(text: text, style: style)
+                stagedTextByObjectID[objectID] = StagedTextEdit(
+                    text: pendingEdit.text,
+                    style: style,
+                    pdfStyle: pendingEdit.style
+                )
+            }
+            if let fallback = transientStagedTextFallback,
+               stagedTextByObjectID[fallback.objectID] == nil {
+                removeTransientStagedTextFallback()
             }
             scheduleOverlayRefresh()
         }
@@ -1889,6 +2351,94 @@ extension PDFKitView {
             )
         }
 #elseif os(iOS)
+        private func makeInlineStyleToolbar() -> UIToolbar {
+            let toolbar = UIToolbar()
+            toolbar.sizeToFit()
+            let boldButton = UIBarButtonItem(
+                title: "Bold",
+                style: .plain,
+                target: self,
+                action: #selector(toggleInlineBold)
+            )
+            let italicButton = UIBarButtonItem(
+                title: "Italic",
+                style: .plain,
+                target: self,
+                action: #selector(toggleInlineItalic)
+            )
+            inlineBoldButton = boldButton
+            inlineItalicButton = italicButton
+            toolbar.items = [
+                boldButton,
+                italicButton,
+                UIBarButtonItem(
+                    barButtonSystemItem: .flexibleSpace,
+                    target: nil,
+                    action: nil
+                ),
+                UIBarButtonItem(
+                    title: "Done",
+                    style: .done,
+                    target: self,
+                    action: #selector(finishInlineEditingFromToolbar)
+                ),
+            ]
+            updateInlineStyleButtonStates()
+            return toolbar
+        }
+
+        @objc private func toggleInlineBold() {
+            inlineEditingPDFStyle.formSymmetricDifference(.bold)
+            updateInlineTextStylePreview()
+        }
+
+        @objc private func toggleInlineItalic() {
+            inlineEditingPDFStyle.formSymmetricDifference(.italic)
+            updateInlineTextStylePreview()
+        }
+
+        @objc private func finishInlineEditingFromToolbar() {
+            finishInlineTextEditing(commit: true)
+        }
+
+        private func styledFont(_ baseFont: UIFont, style: PDFTextStyle) -> UIFont {
+            var traits = baseFont.fontDescriptor.symbolicTraits
+            if style.contains(.bold) {
+                traits.insert(.traitBold)
+            } else {
+                traits.remove(.traitBold)
+            }
+            if style.contains(.italic) {
+                traits.insert(.traitItalic)
+            } else {
+                traits.remove(.traitItalic)
+            }
+            guard let descriptor = baseFont.fontDescriptor.withSymbolicTraits(traits) else {
+                var fallbackTraits: UIFontDescriptor.SymbolicTraits = []
+                if style.contains(.bold) { fallbackTraits.insert(.traitBold) }
+                if style.contains(.italic) { fallbackTraits.insert(.traitItalic) }
+                let systemFont = UIFont.systemFont(
+                    ofSize: baseFont.pointSize,
+                    weight: style.contains(.bold) ? .bold : .regular
+                )
+                guard let fallbackDescriptor = systemFont.fontDescriptor
+                    .withSymbolicTraits(fallbackTraits) else { return systemFont }
+                return UIFont(descriptor: fallbackDescriptor, size: baseFont.pointSize)
+            }
+            return UIFont(descriptor: descriptor, size: baseFont.pointSize)
+        }
+
+        private func updateInlineStyleButtonStates() {
+            inlineBoldButton?.style = inlineEditingPDFStyle.contains(.bold) ? .done : .plain
+            inlineItalicButton?.style = inlineEditingPDFStyle.contains(.italic) ? .done : .plain
+        }
+
+        private func updateInlineTextStylePreview() {
+            guard let field = inlineTextField, let baseFont = inlineEditingBaseFont else { return }
+            field.font = styledFont(baseFont, style: inlineEditingPDFStyle)
+            updateInlineStyleButtonStates()
+        }
+
         private func objectTextColor(_ color: PDFObjectColor) -> UIColor {
             UIColor(
                 red: CGFloat(color.red) / 255,
@@ -1908,17 +2458,40 @@ extension PDFKitView {
             ) as? UIFont)?.fontName
         }
 
+        private func displayFontSize(from selection: PDFSelection?) -> CGFloat? {
+            guard let pdfView,
+                  let attributedString = selection?.attributedString,
+                  attributedString.length > 0,
+                  let font = attributedString.attribute(
+                      .font,
+                      at: 0,
+                      effectiveRange: nil
+                  ) as? UIFont else { return nil }
+            let displaySize = font.pointSize * max(pdfView.scaleFactor, 0.001)
+            return displaySize.isFinite && displaySize > 0 ? displaySize : nil
+        }
+
         private func applyResolvedTextStyle(
             _ object: PDFPageObjectSnapshot,
-            to field: UITextField
+            to field: UITextField,
+            preservingCurrentPDFStyle: Bool
         ) {
             field.textColor = objectTextColor(object.fillColor)
-            field.font = objectFont(
+            let baseFont = objectFont(
                 named: object.fontName,
                 displayPointSize: displayFontSize(for: object),
                 fontData: object.fontData,
                 viewHeight: field.frame.height
             )
+            if !preservingCurrentPDFStyle {
+                inlineEditingPDFStyle = PDFTextStyle.inferred(fromFontName: object.fontName)
+            }
+            inlineEditingBaseFont = baseFont
+            field.font = styledFont(baseFont, style: inlineEditingPDFStyle)
+            if field.inputAccessoryView == nil {
+                field.inputAccessoryView = makeInlineStyleToolbar()
+                field.reloadInputViews()
+            }
         }
 
         private func objectFont(
@@ -2256,10 +2829,50 @@ extension PDFKitView {
 }
 
 #if os(macOS)
+extension PDFKitView.Coordinator: PDFPageOverlayViewProvider {
+    func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
+        guard let document = view.document else { return nil }
+        let pageIndex = document.index(for: page)
+        guard pageIndex != NSNotFound else { return nil }
+        let overlay = PDFPageOverlayContainer(pageIndex: pageIndex)
+        pageOverlayViews[pageIndex] = overlay
+        return overlay
+    }
+
+    func pdfView(
+        _ pdfView: PDFView,
+        willDisplayOverlayView overlayView: NSView,
+        for page: PDFPage
+    ) {
+        guard let overlay = overlayView as? PDFPageOverlayContainer else { return }
+        pageOverlayViews[overlay.pageIndex] = overlay
+        scheduleOverlayRefresh()
+    }
+
+    func pdfView(
+        _ pdfView: PDFView,
+        willEndDisplayingOverlayView overlayView: NSView,
+        for page: PDFPage
+    ) {
+        guard let overlay = overlayView as? PDFPageOverlayContainer,
+              pageOverlayViews[overlay.pageIndex] === overlay else { return }
+        if inlineTextField?.superview === overlayView {
+            finishInlineTextEditing(commit: true)
+        }
+        stagedTextViews.values
+            .filter { $0.superview === overlayView }
+            .forEach { $0.removeFromSuperview() }
+        stagedTextMaskViews.values
+            .filter { $0.superview === overlayView }
+            .forEach { $0.removeFromSuperview() }
+        pageOverlayViews.removeValue(forKey: overlay.pageIndex)
+    }
+}
+
 extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
-        if let inlineTextField {
-            return !inlineTextField.frame.contains(viewPoint)
+        if inlineTextField != nil {
+            return !inlineEditorContains(viewPoint)
         }
         if pdfView.currentSelection != nil ||
             selection.wrappedValue != nil ||
@@ -2288,7 +2901,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool {
         let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
-        if let inlineTextField, inlineTextField.frame.contains(viewPoint) {
+        if inlineEditorContains(viewPoint) {
             return false
         }
 
@@ -2408,7 +3021,7 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
     ) -> Bool {
         guard let pdfView else { return false }
         let point = pdfView.convert(event.locationInWindow, from: nil)
-        if let inlineTextField, inlineTextField.frame.contains(point) {
+        if inlineEditorContains(point) {
             return false
         }
         return shouldBeginInteractionGesture(
