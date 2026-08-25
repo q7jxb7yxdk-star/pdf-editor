@@ -1,4 +1,5 @@
 import PDFKit
+import CoreText
 import QuartzCore
 import SwiftUI
 
@@ -15,6 +16,9 @@ private final class PDFInteractionPDFView: PDFView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let defaultHit = super.hitTest(point)
+        guard NSApp.currentEvent?.type == .leftMouseDown else {
+            return defaultHit
+        }
         if interactionHandler?.shouldCaptureMouse(at: point, in: self) == true {
             return self
         }
@@ -329,10 +333,36 @@ extension PDFKitView {
         private var dragMode: DragMode = .move
 
 #if os(macOS)
+        private struct InlineTextStyle {
+            let fontDescriptor: NSFontDescriptor
+            let pointSize: CGFloat
+            let scaleFactor: CGFloat
+            let color: NSColor
+
+            init(font: NSFont, scaleFactor: CGFloat, color: NSColor) {
+                fontDescriptor = font.fontDescriptor
+                pointSize = font.pointSize
+                self.scaleFactor = max(scaleFactor, 0.001)
+                self.color = color
+            }
+
+            func font(at scaleFactor: CGFloat) -> NSFont {
+                let scaledSize = pointSize * max(scaleFactor, 0.001) / self.scaleFactor
+                return NSFont(descriptor: fontDescriptor, size: scaledSize) ??
+                    NSFont.systemFont(ofSize: scaledSize)
+            }
+        }
+
+        private struct StagedTextEdit {
+            let text: String
+            let style: InlineTextStyle
+        }
+
         private var gestures: [NSGestureRecognizer] = []
         private var inlineTextField: NSTextView?
         private var inlineEditorDidGainFocus = false
-        private var stagedTextByObjectID: [String: String] = [:]
+        private var inlineEditingTextStyle: InlineTextStyle?
+        private var stagedTextByObjectID: [String: StagedTextEdit] = [:]
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
@@ -904,7 +934,7 @@ extension PDFKitView {
             guard object.kind == .text,
                   let frame = inlineTextEditorFrame(for: object) else { return }
 #if os(macOS)
-            let editableText = stagedTextByObjectID[object.id] ?? object.text ?? ""
+            let editableText = stagedTextByObjectID[object.id]?.text ?? object.text ?? ""
 #else
             let editableText = object.text ?? ""
 #endif
@@ -913,6 +943,7 @@ extension PDFKitView {
                 color: object.fillColor,
                 fontName: object.fontName,
                 fontSize: object.fontSize,
+                fontData: object.fontData,
                 frame: frame,
                 object: object,
                 annotation: nil
@@ -936,6 +967,7 @@ extension PDFKitView {
                 ),
                 fontName: nil,
                 fontSize: annotation.fontSize,
+                fontData: nil,
                 frame: frame,
                 object: nil,
                 annotation: annotation
@@ -947,6 +979,7 @@ extension PDFKitView {
             color: PDFObjectColor,
             fontName: String?,
             fontSize: CGFloat?,
+            fontData: Data?,
             frame: CGRect,
             object: PDFPageObjectSnapshot?,
             annotation: PDFAnnotationSnapshot?
@@ -962,13 +995,27 @@ extension PDFKitView {
             field.string = text
             field.drawsBackground = true
             field.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.98)
-            field.textColor = objectTextColor(color)
-            field.font = objectFont(
-                named: fontName,
-                pointSize: fontSize,
-                viewHeight: frame.height,
-                viewScale: pdfView.scaleFactor
-            )
+            let resolvedColor = objectTextColor(color)
+            let resolvedStyle: InlineTextStyle
+            if let object, let stagedEdit = stagedTextByObjectID[object.id] {
+                resolvedStyle = stagedEdit.style
+            } else {
+                let font = objectFont(
+                    named: fontName,
+                    pointSize: fontSize,
+                    fontData: fontData,
+                    viewHeight: frame.height,
+                    viewScale: pdfView.scaleFactor
+                )
+                resolvedStyle = InlineTextStyle(
+                    font: font,
+                    scaleFactor: pdfView.scaleFactor,
+                    color: resolvedColor
+                )
+            }
+            inlineEditingTextStyle = resolvedStyle
+            field.textColor = resolvedStyle.color
+            field.font = resolvedStyle.font(at: pdfView.scaleFactor)
             field.isEditable = true
             field.isSelectable = true
             field.isRichText = false
@@ -997,6 +1044,7 @@ extension PDFKitView {
             field.font = objectFont(
                 named: fontName,
                 pointSize: fontSize,
+                fontData: fontData,
                 viewHeight: frame.height,
                 viewScale: pdfView.scaleFactor
             )
@@ -1025,9 +1073,11 @@ extension PDFKitView {
             isFinishingInlineTextEditing = true
 #if os(macOS)
             let text = field.string
+            let textStyle = inlineEditingTextStyle
             field.delegate = nil
             field.removeFromSuperview()
             inlineEditorDidGainFocus = false
+            inlineEditingTextStyle = nil
 #elseif os(iOS)
             let text = field.text ?? ""
             field.delegate = nil
@@ -1040,8 +1090,11 @@ extension PDFKitView {
             isFinishingInlineTextEditing = false
 #if os(macOS)
             if let object {
-                if commit, text != object.text {
-                    stagedTextByObjectID[object.id] = text
+                if commit, text != object.text, let textStyle {
+                    stagedTextByObjectID[object.id] = StagedTextEdit(
+                        text: text,
+                        style: textStyle
+                    )
                 } else if commit {
                     stagedTextByObjectID.removeValue(forKey: object.id)
                 }
@@ -1049,11 +1102,15 @@ extension PDFKitView {
             }
 #endif
             refreshOverlay()
-#if os(iOS)
-            if commit, let object, text != object.text {
+            if commit, let object {
+#if os(macOS)
+                DispatchQueue.main.async { [weak self] in
+                    self?.onReplaceTextObject(object, text)
+                }
+#else
                 onReplaceTextObject(object, text)
-            }
 #endif
+            }
             if commit, let annotation, text != annotation.contents {
                 onReplaceAnnotationText(annotation, text)
             }
@@ -1139,11 +1196,17 @@ extension PDFKitView {
         private func objectFont(
             named fontName: String?,
             pointSize: CGFloat?,
+            fontData: Data?,
             viewHeight: CGFloat,
             viewScale: CGFloat
         ) -> NSFont {
             let sourceSize = pointSize.map { $0 * viewScale } ?? 0
             let size = max(min(max(sourceSize, viewHeight * 0.9), 96), 6)
+            if let fontData,
+               let provider = CGDataProvider(data: fontData as CFData),
+               let graphicsFont = CGFont(provider) {
+                return CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil) as NSFont
+            }
             let name = fontName?.split(separator: "+").last.map(String.init)
             return name.flatMap { NSFont(name: $0, size: size) } ??
                 NSFont.systemFont(ofSize: size)
@@ -1171,7 +1234,7 @@ extension PDFKitView {
                 stagedTextViews.removeValue(forKey: objectID)?.removeFromSuperview()
             }
 
-            for (objectID, text) in stagedTextByObjectID {
+            for (objectID, edit) in stagedTextByObjectID {
                 guard let object = liveObjects[objectID],
                       let frame = inlineTextEditorFrame(for: object) else { continue }
                 let view = stagedTextViews[objectID] ?? PDFPassiveTextView(frame: frame)
@@ -1187,17 +1250,14 @@ extension PDFKitView {
                     pdfView.addSubview(view, positioned: .above, relativeTo: nil)
                 }
                 view.frame = frame
-                view.string = text
+                view.string = edit.text
                 view.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.98)
-                view.textColor = objectTextColor(object.fillColor)
-                view.font = objectFont(
-                    named: object.fontName,
-                    pointSize: object.fontSize,
-                    viewHeight: frame.height,
-                    viewScale: pdfView.scaleFactor
-                )
+                view.textColor = edit.style.color
+                view.font = edit.style.font(at: pdfView.scaleFactor)
                 if let font = view.font {
-                    let measuredWidth = (text as NSString).size(withAttributes: [.font: font]).width + 4
+                    let measuredWidth = (edit.text as NSString).size(
+                        withAttributes: [.font: font]
+                    ).width + 4
                     let availableWidth = max(pdfView.bounds.maxX - frame.minX - 8, frame.width)
                     view.frame.size.width = min(max(frame.width, measuredWidth), availableWidth)
                 }
@@ -1217,12 +1277,18 @@ extension PDFKitView {
         private func objectFont(
             named fontName: String?,
             pointSize: CGFloat?,
+            fontData: Data?,
             viewHeight: CGFloat,
             viewScale: CGFloat
         ) -> UIFont {
             let sourceSize = pointSize.map { $0 * viewScale } ?? 0
             let scaledSize = max(sourceSize, viewHeight * 0.72)
             let size = max(min(scaledSize, 96), 10)
+            if let fontData,
+               let provider = CGDataProvider(data: fontData as CFData),
+               let graphicsFont = CGFont(provider) {
+                return CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil) as UIFont
+            }
             let name = fontName?.split(separator: "+").last.map(String.init)
             return name.flatMap { UIFont(name: $0, size: size) } ??
                 UIFont.systemFont(ofSize: size)

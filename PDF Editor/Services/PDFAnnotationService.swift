@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreText
 import Foundation
 import PDFKit
 
@@ -188,20 +189,18 @@ final class PDFAnnotationService {
     func addAppearanceSafeTextReplacement(
         text: String,
         replacing object: PDFPageObjectSnapshot,
+        originalFontData: Data?,
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let text = try validated(text)
         let padding = max(1, min(object.bounds.height * 0.08, 3))
-        let fontSize = max(
-            object.fontSize ?? 0,
-            object.bounds.height * 1.35,
-            6
-        )
+        let visualHeight = max(object.bounds.height, 6)
+        let fontSize = min(max(object.fontSize ?? visualHeight * 0.82, 6), visualHeight)
         let width = max(
             object.bounds.width + padding * 2,
             fontSize * 0.72 * CGFloat(max(text.count, 1)) + fontSize
         )
-        let height = max(object.bounds.height + padding * 2, fontSize * 1.35)
+        let height = max(object.bounds.height + padding * 2, fontSize * 1.2)
         let bounds = CGRect(
             x: object.bounds.minX - padding,
             y: object.bounds.maxY + padding - height,
@@ -214,7 +213,11 @@ final class PDFAnnotationService {
             withProperties: nil
         )
         annotation.contents = text
-        annotation.font = appearanceSafeReplacementFont(for: object, size: fontSize)
+        annotation.font = appearanceSafeReplacementFont(
+            for: object,
+            size: fontSize,
+            originalFontData: originalFontData
+        )
         annotation.fontColor = platformColor(PDFAnnotationColor(
             red: CGFloat(object.fillColor.red) / 255,
             green: CGFloat(object.fillColor.green) / 255,
@@ -229,12 +232,20 @@ final class PDFAnnotationService {
 
     private func appearanceSafeReplacementFont(
         for object: PDFPageObjectSnapshot,
-        size: CGFloat
+        size: CGFloat,
+        originalFontData: Data?
     ) -> PlatformFont {
-        let fontName = object.fontName?.lowercased() ?? ""
-        let usesBoldWeight = ["bold", "black", "heavy", "semibold", "demibold"]
-            .contains { fontName.contains($0) }
-        return .systemFont(ofSize: size, weight: usesBoldWeight ? .bold : .regular)
+        if let originalFontData,
+           let provider = CGDataProvider(data: originalFontData as CFData),
+           let graphicsFont = CGFont(provider) {
+            let coreTextFont = CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil)
+#if os(macOS)
+            return coreTextFont as NSFont
+#else
+            return coreTextFont as UIFont
+#endif
+        }
+        return .systemFont(ofSize: size, weight: .regular)
     }
 
     func addHighlight(

@@ -26,6 +26,11 @@ private struct PDFCommentPlacement: Equatable {
     let point: CGPoint
 }
 
+private struct PendingTextEdit {
+    let object: PDFPageObjectSnapshot
+    let text: String
+}
+
 struct ContentView: View {
     let document: PDFEditorDocument
 
@@ -38,6 +43,10 @@ struct ContentView: View {
     @State private var annotationText = ""
     @State private var errorMessage: String?
     @State private var pageObjects: [PDFPageObjectSnapshot] = []
+    @State private var pageObjectCache: [Int: [PDFPageObjectSnapshot]] = [:]
+    @State private var pageObjectCacheRevision = -1
+    @State private var pageObjectLoadTask: Task<Void, Never>?
+    @State private var pendingTextEdits: [String: PendingTextEdit] = [:]
     @State private var selectedObject: PDFPageObjectSnapshot?
     private let objectEditingEnabled = true
     @State private var ocrResult: OCRPageResult?
@@ -96,13 +105,18 @@ struct ContentView: View {
     }
 
     private var canSave: Bool {
-        !isSaving && (editorState.hasUnsavedChanges || saveURL == nil)
+        !isSaving && (
+            editorState.hasUnsavedChanges || !pendingTextEdits.isEmpty || saveURL == nil
+        )
     }
 
     var body: some View {
         fileTransferView
             .focusedValue(\.manualPDFSaveAction, saveDocument)
-            .onDisappear { ocrBatchTask?.cancel() }
+            .onDisappear {
+                ocrBatchTask?.cancel()
+                pageObjectLoadTask?.cancel()
+            }
     }
 
     private var editorRoot: some View {
@@ -180,6 +194,8 @@ struct ContentView: View {
             loadCanvasAnnotations()
         }
         .onChange(of: editorState.revision) { _, _ in
+            pageObjectCache.removeAll()
+            pageObjectCacheRevision = editorState.revision
             loadCanvasObjects()
             loadCanvasAnnotations()
         }
@@ -486,24 +502,40 @@ struct ContentView: View {
 
     private func saveDocument() {
         guard !isSaving else { return }
-
-        do {
-            let data = try document.dataForManualSave()
-            if let saveURL {
-                isSaving = true
-                defer { isSaving = false }
-                try ManualPDFSaveCoordinator.write(data, to: saveURL)
-                document.markManuallySaved(data: data)
-            } else {
-                pendingManualSaveData = data
-                manualSaveExportDocument = PDFExportDocument(
-                    data: data,
-                    filename: "Untitled.pdf"
-                )
-                isSaving = true
+        isSaving = true
+        Task { @MainActor in
+            await Task.yield()
+            do {
+                try commitPendingTextEdits()
+                let data = try document.dataForManualSave()
+                if let saveURL {
+                    try ManualPDFSaveCoordinator.write(data, to: saveURL)
+                    document.markManuallySaved(data: data)
+                    isSaving = false
+                } else {
+                    pendingManualSaveData = data
+                    manualSaveExportDocument = PDFExportDocument(
+                        data: data,
+                        filename: "Untitled.pdf"
+                    )
+                }
+            } catch {
+                isSaving = false
+                present(error)
             }
-        } catch {
-            present(error)
+        }
+    }
+
+    private func commitPendingTextEdits() throws {
+        let edits = pendingTextEdits.values.sorted {
+            if $0.object.pageIndex != $1.object.pageIndex {
+                return $0.object.pageIndex < $1.object.pageIndex
+            }
+            return $0.object.path.displayValue < $1.object.path.displayValue
+        }
+        for edit in edits {
+            try commitTextReplacement(edit.object, text: edit.text)
+            pendingTextEdits.removeValue(forKey: edit.object.id)
         }
     }
 
@@ -907,24 +939,59 @@ struct ContentView: View {
     }
 
     private func loadObjects() {
-        guard let index = selectedPageIndex else { return }
-        do {
-            pageObjects = try document.pageObjects(at: index)
-            showsObjectInspector = true
-        } catch { present(error) }
+        guard selectedPageIndex != nil else { return }
+        showsObjectInspector = true
+        loadCanvasObjects()
     }
 
     private func loadCanvasObjects() {
+        pageObjectLoadTask?.cancel()
         guard let index = selectedPageIndex else {
             pageObjects = []
             return
         }
-        do {
-            pageObjects = try document.pageObjects(at: index)
-        } catch { present(error) }
+        let revision = editorState.revision
+        if pageObjectCacheRevision != revision {
+            pageObjectCache.removeAll()
+            pageObjectCacheRevision = revision
+        }
+        pageObjects = pageObjectCache[index] ?? []
+
+        pageObjectLoadTask = Task { @MainActor in
+            do {
+                let objects = try await document.pageObjectsForDisplay(at: index)
+                try Task.checkCancellation()
+                guard selectedPageIndex == index,
+                      editorState.revision == revision else { return }
+                pageObjectCache[index] = objects
+                pageObjects = objects
+
+                let nextIndex = index + 1
+                guard nextIndex < document.pageCount,
+                      pageObjectCache[nextIndex] == nil else { return }
+                let prefetched = try await document.pageObjectsForDisplay(at: nextIndex)
+                try Task.checkCancellation()
+                guard editorState.revision == revision else { return }
+                pageObjectCache[nextIndex] = prefetched
+            } catch is CancellationError {
+                return
+            } catch {
+                guard selectedPageIndex == index,
+                      editorState.revision == revision else { return }
+                present(error)
+            }
+        }
     }
 
     private func replaceText(_ object: PDFPageObjectSnapshot, text: String) {
+        if text == object.text {
+            pendingTextEdits.removeValue(forKey: object.id)
+        } else {
+            pendingTextEdits[object.id] = PendingTextEdit(object: object, text: text)
+        }
+    }
+
+    private func commitTextReplacement(_ object: PDFPageObjectSnapshot, text: String) throws {
         do {
             let result = try document.replaceText(
                 pageIndex: object.pageIndex,
@@ -950,7 +1017,9 @@ struct ContentView: View {
             case .preservedOriginalFont:
                 replacementNotice = nil
             }
-        } catch { present(error) }
+        } catch {
+            throw error
+        }
     }
 
     private func replaceAnnotationText(

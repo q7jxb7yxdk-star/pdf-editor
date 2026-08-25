@@ -19,7 +19,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | `PDF_EditorApp` → `DocumentGroup` → `PDFEditorDocument` → `ContentView` | Implemented | Normal application composition. |
 | `PDFEditorDocument` → `PDFiumEditingEngine` | Implemented | Primary editing path for new and unlocked documents. |
 | PDFKit display and annotation mutation | Implemented | Page/object operations refresh the visible document from serialized editing-session bytes. Successful annotation mutations preserve the current PDFKit document identity while synchronizing and verifying the PDFium session; rollback and Undo/Redo rebuild from serialized bytes. |
-| Explicit save | Implemented | macOS and iOS expose a Save toolbar action; macOS also replaces File → Save and Command-S with the same action. Edit-time refreshes do not publish a new `ReferenceFileDocument` snapshot. |
+| Explicit save | Implemented | macOS and iOS expose a Save toolbar action; macOS also replaces File → Save and Command-S with the same action. Inline text edits remain pending view state until Save; edit-time refreshes do not publish a new `ReferenceFileDocument` snapshot. |
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
 | Full page-order and metadata UI | Inactive | Commands exist in the engine surface, but `ContentView` does not expose them directly. |
@@ -65,11 +65,13 @@ flowchart TD
 ### Composition and lifecycle ownership
 
 - SwiftUI owns the `ReferenceFileDocument` lifecycle, but normal edits notify a nested `EditorState` rather than the document object's publisher. Its snapshot remains the last explicitly persisted bytes until Save succeeds.
-- `PDFEditorDocument` owns an `any PDFEditingSession` and the corresponding PDFKit `PDFDocument` used by the UI.
+- `PDFEditorDocument` owns an optional, lazily created `any PDFEditingSession` and the corresponding PDFKit `PDFDocument` used by the UI. Initial display does not wait for creation of the mutation session.
 - `PDFiumEditingSession` owns one opaque C document handle. It closes the handle on deinitialization.
 - `PDFiumRuntime.shared` initializes the PDFium library once and destroys it when the process-level singleton is deinitialized.
 - `ContentView` owns OCR tasks. A new document-wide OCR run cancels the previous one, and view disappearance cancels the active batch task.
 - `PDFKitView.Coordinator` owns notification observers, gesture recognizers, selection overlays, and the current gesture interaction state.
+- `ContentView` owns a cancellable page-object load task, a revision-scoped per-page cache, and pending inline text replacements. The current page is inspected on an independent background PDFium session and the next page is prefetched.
+- A process-wide recursive lock in `PDFEditorDocument` serializes PDFium inspection, mutation, export, and annotation-color access across foreground and background handles.
 
 There is protocol-based engine separation, but no application-level dependency-injection container. `PDFEditorDocument` constructs `PDFiumEditingEngine` directly, and `ContentView` constructs its services directly.
 
@@ -115,8 +117,8 @@ There is protocol-based engine separation, but no application-level dependency-i
 
 1. SwiftUI supplies file bytes to `PDFEditorDocument.init(configuration:)`.
 2. PDFKit first validates that the bytes form a PDF.
-3. An unlocked document immediately receives a PDFium editing session. A locked document retains source bytes but does not create the session until the user supplies a password.
-4. `ContentView` displays `PDFEditorDocument.pdfDocument` in `PDFKitView`.
+3. An unlocked document initially keeps only its source bytes and PDFKit document; its mutation session is created lazily on the first operation that requires it. A locked document retains source bytes and creates the session only after a valid password is supplied.
+4. `ContentView` immediately displays `PDFEditorDocument.pdfDocument` in `PDFKitView`. Page-object inspection runs on an independent background PDFium handle, caches the current page, and then prefetches the next page without blocking PDFKit presentation or scrolling.
 5. A mutation passes through `PDFEditorDocument.mutate`:
    - serialize and retain the current bytes;
    - reject the mutation when signature objects exist and consent has not been granted;
@@ -125,11 +127,11 @@ There is protocol-based engine separation, but no application-level dependency-i
    - restore the prior bytes if the operation or refresh fails;
    - register Undo using the prior serialized bytes.
 6. `EditorState` publishes the refreshed display revision and marks the working document unsaved. `PDFEditorDocument.objectWillChange` is not emitted for ordinary edits, and `snapshot(contentType:)` continues returning `persistedData`, the last explicitly saved bytes.
-7. The Save toolbar action on macOS or iOS, or File → Save/Command-S on macOS, asks the editing session for bytes using the preserve-security or remove-security policy.
+7. Leaving an inline text editor records or removes a `PendingTextEdit` in `ContentView`; it does not invoke PDFium. The Save toolbar action on macOS or iOS, or File → Save/Command-S on macOS, first applies pending text replacements in deterministic page/path order and then asks the editing session for bytes using the preserve-security or remove-security policy.
 8. An existing file is replaced through `ManualPDFSaveCoordinator`, which uses security-scoped access, `NSFileCoordinator`, and an atomic `Data.write`. A new document uses SwiftUI's PDF file exporter to obtain its first URL.
 9. Only after the write or export succeeds does `markManuallySaved(data:)` advance `persistedData`, update `sourceData`, and clear the unsaved flag.
 
-The in-memory `sourceData` supports unlock and rollback bookkeeping. Working edits remain in the PDFium/PDFKit session until an explicit Save succeeds; normal editing does not write them to disk.
+The in-memory `sourceData` supports unlock and rollback bookkeeping. Non-text working edits remain in the PDFium/PDFKit session, while inline text edits remain in `ContentView.pendingTextEdits` until Save applies them. Neither path writes to disk until an explicit Save succeeds.
 
 ### 4.2 Page operations
 
@@ -142,7 +144,7 @@ The in-memory `sourceData` supports unlock and rollback bookkeeping. Working edi
 ### 4.3 Page-object inspection and editing
 
 1. The bridge recursively walks page objects and returns an index path such as `[topLevelIndex, nestedIndex, ...]`.
-2. `PDFPageObjectSnapshot` exposes type, bounds, composed transform, fill color, text/font properties, and image pixel size where applicable.
+2. `PDFPageObjectSnapshot` exposes type, bounds, composed transform, fill color, text/font properties, optional embedded font data, and image pixel size where applicable. Object enumeration copies each distinct page font once and shares the resulting `Data` value among snapshots using that font.
 3. The UI can target an object through the inspector or the `PDFKitView` overlay.
 4. Translate, transform, z-order, delete, add, and replace operations snapshot the pre-mutation data.
 5. The session serializes and reopens after mutation, verifies the intended property, and restores prior bytes on failure.
@@ -151,15 +153,16 @@ The locally patched PDFium path clones Form ancestors before editing nested desc
 
 ### 4.4 Text replacement
 
-1. Inspect the selected text object and copy its embedded font data when available.
+1. Background page inspection copies each distinct embedded font once for inline display. Save-time replacement also retrieves the selected object's original font data directly from the editing session.
 2. `CoreTextShapingService.analyze` checks whether that font maps all UTF-16 code units to nonzero glyphs and whether the text contains combining marks or script ranges treated as requiring advanced shaping.
 3. When the font covers the text and advanced shaping is not required, replace the text in the existing object, serialize/reopen, and verify the normalized copied text.
 4. Otherwise:
-   - generate a one-page CoreText PDF overlay using the bundled Noto font;
+   - generate a one-page CoreText PDF overlay using the original embedded font when it covers the replacement but requires advanced shaping, or the bundled Noto font when original glyph coverage is insufficient;
    - replace the original object's visible text with a space;
    - import the overlay as a Form object with ActualText metadata;
    - serialize/reopen and verify that PDFKit search, page text, or page-object inspection can find the semantic replacement text.
-5. Any failure restores the original bytes.
+5. If page regeneration would materially change ICC or pattern color, create an opaque PDFKit FreeText replacement. Its visual size is capped to the original object's page-space height; it uses the embedded font when available and a regular-weight system fallback otherwise.
+6. Any failure restores the original bytes.
 
 The fallback is a new searchable vector layer, not preservation of the original PDF text object's font and internal encoding.
 
@@ -175,7 +178,7 @@ The fallback is a new searchable vector layer, not preservation of the original 
 
 - PDFKit creates notes, free text, highlights, and ink signatures.
 - Annotation and page-object selection are simultaneously available without toolbar mode switches. Comment placement takes precedence, followed by annotation hit testing and then page-object hit testing; selecting one target clears the other.
-- A single click or tap selects a page object for movement and transforms. Object hit testing converts bounds into view coordinates and applies a six-point screen-space tolerance; the custom click/tap recognizers may recognize alongside PDFKit's built-in selection recognizers. A double-click on macOS or double-tap on iOS activates type-specific editing: text receives a borderless native text field positioned over its converted page bounds, while images open the replacement importer. Return/Done or clicking outside commits through the existing replacement transaction; Escape cancels on macOS. Note comments retain their single-click editor behavior, while FreeText annotations can be edited again in place.
+- A single click or tap selects a page object for movement and transforms. Object hit testing converts bounds into view coordinates and applies a six-point screen-space tolerance. On macOS, custom hit testing captures only left-mouse-down events; scroll-wheel and trackpad events continue to the PDFKit hierarchy so the document can scroll from its central content area. A double-click on macOS or double-tap on iOS activates type-specific editing: text receives a borderless native text field positioned over its converted page bounds, while images open the replacement importer. Return/Done or clicking outside stages inline text for the next Save; Escape cancels on macOS. Note comments retain their single-click editor behavior, while FreeText annotations can be edited again in place.
 - Add a comment uses a cross-platform sheet with a focused multi-line `TextEditor`, replacing the size-constrained alert text field.
 - Edit comment in the left Tools panel opens a page-scoped Comment List. Wide layouts place it beside the Tools panel; compact layouts present it as a sheet. It reuses the same annotation editor for content, color, opacity, font size, line width, selection, and deletion.
 - Annotation identity is a page index plus annotation-array index, not a persistent PDF object identifier.
@@ -262,7 +265,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 ### Page-object models
 
 - `PDFPageObjectPath` stores recursive sibling indices.
-- `PDFPageObjectSnapshot` stores inspection data; it is a value snapshot, not a live object.
+- `PDFPageObjectSnapshot` stores inspection data and optional shared embedded-font bytes; it is a value snapshot, not a live object.
 - `PDFBitmapPayload` stores validated BGRA data and geometry.
 - `PDFInvisibleTextItem` carries semantic text and a PDF-space rectangle.
 
@@ -274,7 +277,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, comment placement, Tools/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
+`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, pending inline text replacements, comment placement, Tools/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
 
 ### Persistence and storage boundaries
 
@@ -318,8 +321,10 @@ ImageIO enforces an 8,192-pixel thumbnail cap, but memory use can still be mater
 
 ### Concurrency and stale state
 
-- Batch OCR is the only explicit long-running task path.
+- Batch OCR and background page-object inspection are explicit long-running task paths.
 - Starting a batch cancels the previous batch; disappearance also cancels it.
+- Changing page cancels the prior object-load task, rejects results whose page or document revision is stale, caches the requested page, and prefetches at most the next page. Cancellation cannot interrupt a native PDFium call already executing, so stale native work may finish but its result is discarded.
+- PDFium access is serialized across background inspection and foreground mutation because the library is not treated as thread-safe.
 - The source `PDFDocument` is passed to sequential recognition and the document is mutated only after review.
 - There is no document revision token between recognition and insertion. The insertion path mitigates staleness by validating page indices, rejecting duplicate pages, and refusing pages that now contain selectable text, but it does not prove that page ordering or rendered content is unchanged.
 
@@ -542,6 +547,13 @@ The following completed successfully on 2026-08-24 with Xcode 26.6 and Apple Swi
 - Unsigned Debug generic iOS Simulator build: succeeded for arm64 and x86_64 with `CODE_SIGNING_ALLOWED=NO` and DerivedData under `/tmp`.
 - Unsigned Debug generic iOS device build: succeeded for arm64 with `CODE_SIGNING_ALLOWED=NO` and DerivedData under `/tmp`.
 - SHA-256 comparison: all four bundled PDFium binaries matched the values recorded in `Packages/PDFiumBridge/Vendor/NOTICE.md`.
+
+Additional validation completed on 2026-08-25 after the pending-text, embedded-font, background-inspection, and scrolling changes:
+
+- `swift test --package-path Packages/PDFiumBridge`: 25 XCTest cases passed with 0 failures.
+- Debug macOS build: succeeded with isolated DerivedData under `/tmp`.
+- Debug generic iOS Simulator build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp`.
+- `git diff --check`: passed.
 
 The builds establish compilation and bundle construction for those destinations. They do not establish successful app launch, UI behavior, sandbox enforcement, signing, installation, or document workflow correctness.
 

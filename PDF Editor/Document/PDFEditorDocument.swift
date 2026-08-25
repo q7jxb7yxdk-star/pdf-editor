@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 final class PDFEditorDocument: ReferenceFileDocument {
     typealias Snapshot = Data
 
+    private static let pdfiumAccessLock = NSRecursiveLock()
+
     final class EditorState: ObservableObject {
         @Published private(set) var revision = 0
         @Published private(set) var hasUnsavedChanges = false
@@ -46,7 +48,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     var isEncrypted: Bool {
-        editingSession?.metadata.isEncrypted ?? pdfDocument.isEncrypted
+        pdfDocument.isEncrypted
     }
 
     var hasDigitalSignatures: Bool {
@@ -63,7 +65,6 @@ final class PDFEditorDocument: ReferenceFileDocument {
         persistedData = data
         authorizedPassword = nil
         pdfDocument = PDFDocument(data: data) ?? PDFDocument()
-        editingSession = try? PDFiumEditingEngine().makeSession(data: data, password: nil)
     }
 
     required init(configuration: ReadConfiguration) throws {
@@ -76,9 +77,6 @@ final class PDFEditorDocument: ReferenceFileDocument {
         persistedData = data
         authorizedPassword = nil
         pdfDocument = document
-        if !document.isLocked {
-            editingSession = try? PDFiumEditingEngine().makeSession(data: data, password: nil)
-        }
     }
 
     func snapshot(contentType: UTType) throws -> Data {
@@ -93,6 +91,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     func unlock(withPassword password: String) throws {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
         let session = try PDFiumEditingEngine().makeSession(
             data: sourceData,
             password: password
@@ -109,6 +109,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     func dataForManualSave() throws -> Data {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
         if let editingSession {
             return try editingSession.dataRepresentation(
                 options: PDFExportOptions(
@@ -138,9 +140,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
         actionName: String
     ) throws -> PDFEditingCommandResult {
         if case .split = command {
-            guard let editingSession else {
-                throw PDFEditingError.documentLocked
-            }
+            Self.pdfiumAccessLock.lock()
+            defer { Self.pdfiumAccessLock.unlock() }
+            let editingSession = try prepareEditingSessionIfNeeded()
             return try editingSession.apply(command)
         }
         return try mutate(undoManager: undoManager, actionName: actionName) {
@@ -152,7 +154,44 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     func pageObjects(at pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
-        guard let objectSession = editingSession as? any PDFObjectEditingSession else {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        guard let objectSession = try prepareEditingSessionIfNeeded()
+            as? any PDFObjectEditingSession else {
+            throw PDFObjectEditingError.objectInspectionFailed
+        }
+        return try objectSession.objects(onPage: pageIndex)
+    }
+
+    /// Inspects an immutable document snapshot on a private PDFium handle so page
+    /// rendering and scrolling never wait for object enumeration on the main thread.
+    func pageObjectsForDisplay(at pageIndex: Int) async throws -> [PDFPageObjectSnapshot] {
+        let data = sourceData
+        let password = authorizedPassword
+        return try await Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let objects = try Self.inspectPageObjects(
+                data: data,
+                password: password,
+                pageIndex: pageIndex
+            )
+            try Task.checkCancellation()
+            return objects
+        }.value
+    }
+
+    nonisolated private static func inspectPageObjects(
+        data: Data,
+        password: String?,
+        pageIndex: Int
+    ) throws -> [PDFPageObjectSnapshot] {
+        pdfiumAccessLock.lock()
+        defer { pdfiumAccessLock.unlock() }
+        let session = try PDFiumEditingEngine().makeSession(
+            data: data,
+            password: password
+        )
+        guard let objectSession = session as? any PDFObjectEditingSession else {
             throw PDFObjectEditingError.objectInspectionFailed
         }
         return try objectSession.objects(onPage: pageIndex)
@@ -168,6 +207,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
         guard let object else {
             throw PDFObjectEditingError.objectInspectionFailed
         }
+        let originalFontData = try? (editingSession as? any PDFObjectEditingSession)?
+            .fontData(pageIndex: pageIndex, path: path)
         do {
             return try mutate(undoManager: undoManager, actionName: "Replace PDF Text") {
                 guard let objectSession = editingSession as? any PDFObjectEditingSession else {
@@ -195,6 +236,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 _ = try service.addAppearanceSafeTextReplacement(
                     text: text,
                     replacing: object,
+                    originalFontData: originalFontData ?? nil,
                     to: page
                 )
             }
@@ -436,6 +478,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
         var snapshots = PDFAnnotationService().snapshots(on: page, pageIndex: pageIndex)
         if let annotationSession = editingSession as? any PDFAnnotationEditingSession {
+            Self.pdfiumAccessLock.lock()
+            defer { Self.pdfiumAccessLock.unlock() }
             for index in snapshots.indices {
                 let reference = snapshots[index].reference
                 if let color = try? annotationSession.annotationColor(
@@ -569,6 +613,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
         refreshesPDFKitDocument: Bool = true,
         _ mutation: () throws -> Result
     ) throws -> Result {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        _ = try prepareEditingSessionIfNeeded()
         if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
             throw PDFEditingError.digitalSignatureConsentRequired
         }
@@ -611,6 +658,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
         actionName: String,
         undoManager: UndoManager
     ) {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
         guard let redoData = try? currentData(),
               let session = try? PDFiumEditingEngine().makeSession(
                   data: data,
@@ -641,6 +690,22 @@ final class PDFEditorDocument: ReferenceFileDocument {
         return data
     }
 
+    @discardableResult
+    private func prepareEditingSessionIfNeeded() throws -> any PDFEditingSession {
+        if let editingSession {
+            return editingSession
+        }
+        guard !pdfDocument.isLocked else {
+            throw PDFEditingError.documentLocked
+        }
+        let session = try PDFiumEditingEngine().makeSession(
+            data: sourceData,
+            password: authorizedPassword
+        )
+        editingSession = session
+        return session
+    }
+
     private func refreshPDFKitDocument(markingUnsaved: Bool) throws {
         let data = try currentData()
         guard let document = PDFDocument(data: data) else {
@@ -653,6 +718,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             }
         }
         pdfDocument = document
+        sourceData = data
         editorState.documentDidChange(markingUnsaved: markingUnsaved)
     }
 

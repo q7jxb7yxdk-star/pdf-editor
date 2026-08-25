@@ -40,7 +40,24 @@ nonisolated struct PDFPageObjectSnapshot: Equatable, Identifiable, Sendable {
     let text: String?
     let fontName: String?
     let fontSize: CGFloat?
+    let fontData: Data?
     let imagePixelSize: CGSize?
+
+    func withFontData(_ fontData: Data?) -> PDFPageObjectSnapshot {
+        PDFPageObjectSnapshot(
+            pageIndex: pageIndex,
+            path: path,
+            kind: kind,
+            bounds: bounds,
+            transform: transform,
+            fillColor: fillColor,
+            text: text,
+            fontName: fontName,
+            fontSize: fontSize,
+            fontData: fontData,
+            imagePixelSize: imagePixelSize
+        )
+    }
 }
 
 nonisolated struct PDFInvisibleTextItem: Equatable, Sendable {
@@ -124,6 +141,7 @@ nonisolated enum PDFObjectEditingError: Error, LocalizedError, Equatable, Sendab
 nonisolated protocol PDFObjectEditingSession: AnyObject {
     var hasDigitalSignatures: Bool { get }
     func objects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot]
+    func fontData(pageIndex: Int, path: PDFPageObjectPath) throws -> Data?
     func replaceText(
         pageIndex: Int,
         path: PDFPageObjectPath,
@@ -474,9 +492,35 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     func objects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
         try validatePageIndex(pageIndex)
         let count = Int(PEPDFPageObjectCountRecursive(handle, Int32(pageIndex)))
+        var fontCache: [String: Data] = [:]
+        var unavailableFonts = Set<String>()
         return try (0..<count).map { flatIndex in
-            try object(onPage: pageIndex, path: copyPath(pageIndex: pageIndex, flatIndex: flatIndex))
+            let object = try object(
+                onPage: pageIndex,
+                path: copyPath(pageIndex: pageIndex, flatIndex: flatIndex)
+            )
+            guard object.kind == .text else { return object }
+            let cacheKey = object.fontName ?? object.id
+            if let fontData = fontCache[cacheKey] {
+                return object.withFontData(fontData)
+            }
+            guard !unavailableFonts.contains(cacheKey),
+                  let fontData = copyFontData(pageIndex: pageIndex, path: object.path) else {
+                unavailableFonts.insert(cacheKey)
+                return object
+            }
+            fontCache[cacheKey] = fontData
+            return object.withFontData(fontData)
         }
+    }
+
+    func fontData(pageIndex: Int, path: PDFPageObjectPath) throws -> Data? {
+        try validatePageIndex(pageIndex)
+        let object = try object(onPage: pageIndex, path: path)
+        guard object.kind == .text else {
+            throw PDFObjectEditingError.invalidObjectType
+        }
+        return copyFontData(pageIndex: pageIndex, path: path)
     }
 
     func replaceText(
@@ -523,7 +567,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                 textTransform: object.transform,
                 fontSize: object.fontSize ?? max(object.bounds.height, 12),
                 color: object.fillColor,
-                preferredFontData: nil,
+                preferredFontData: analysis.coversAllCharacters ? originalFontData : nil,
                 fallbackFontData: fallbackFontData
             )
 
@@ -1062,6 +1106,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             text: kind == .text ? copyText(pageIndex: pageIndex, path: path) : nil,
             fontName: kind == .text ? copyFontName(pageIndex: pageIndex, path: path) : nil,
             fontSize: kind == .text ? CGFloat(info.fontSize) : nil,
+            fontData: nil,
             imagePixelSize: kind == .image
                 ? CGSize(width: Int(info.imagePixelWidth), height: Int(info.imagePixelHeight))
                 : nil
