@@ -255,108 +255,176 @@ private struct ToolRowLabel: View {
 }
 
 struct PDFRightPanel: View {
-    let page: PDFPage?
-    let pageCount: Int
-    @Binding var selectedPageIndex: Int?
     @Binding var viewerMode: PDFViewerMode
+    let isPagesPanelPresented: Bool
+    let onTogglePages: () -> Void
     let onViewerCommand: (PDFViewerCommand.Action) -> Void
-    let onAddComment: () -> Void
     let onFullScreen: () -> Void
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Button(action: onAddComment) {
-                    Label("Add a comment", systemImage: "note.text.badge.plus")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(spacing: 4) {
+                iconButton(
+                    "Pages",
+                    systemImage: "rectangle.stack",
+                    isSelected: isPagesPanelPresented,
+                    action: onTogglePages
+                )
+                iconButton(
+                    "Single-page view",
+                    systemImage: "doc",
+                    isSelected: viewerMode == .singlePage
+                ) {
+                    viewerMode = .singlePage
                 }
-                .buttonStyle(.borderedProminent)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Page")
-                        .font(.headline)
-                    if let page, let selectedPageIndex {
-                        PageThumbnailView(page: page, pageNumber: selectedPageIndex + 1)
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        ContentUnavailableView("No page", systemImage: "doc")
-                            .frame(height: 150)
-                    }
-                    HStack {
-                        Button {
-                            guard let index = selectedPageIndex, index > 0 else { return }
-                            selectedPageIndex = index - 1
-                        } label: {
-                            Image(systemName: "chevron.up")
-                        }
-                        .disabled((selectedPageIndex ?? 0) <= 0)
-                        Spacer()
-                        Text(pageCounter)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button {
-                            guard let index = selectedPageIndex, index + 1 < pageCount else { return }
-                            selectedPageIndex = index + 1
-                        } label: {
-                            Image(systemName: "chevron.down")
-                        }
-                        .disabled((selectedPageIndex ?? pageCount) + 1 >= pageCount)
-                    }
-                    .buttonStyle(.borderless)
+                iconButton(
+                    "Two-page view",
+                    systemImage: "book.pages",
+                    isSelected: viewerMode == .twoPage
+                ) {
+                    viewerMode = .twoPage
                 }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Zoom")
-                        .font(.headline)
-                        .padding(.bottom, 5)
-                    modeButton("Single-page view", icon: "doc", mode: .singlePage)
-                    modeButton("Two-page view", icon: "book.pages", mode: .twoPage)
-                    modeButton("View with scrolling", icon: "scroll", mode: .scrolling)
-                    commandButton("Fit one page", icon: "arrow.up.left.and.arrow.down.right", action: .fitPage)
-                    commandButton("Fit to width", icon: "arrow.left.and.right", action: .fitWidth)
-                    Button(action: onFullScreen) {
-                        ToolRowLabel(title: "Full screen", icon: "arrow.up.left.and.arrow.down.right")
-                    }
-                    .buttonStyle(.plain)
-                    commandButton("Zoom in", icon: "plus.magnifyingglass", action: .zoomIn)
-                    commandButton("Zoom out", icon: "minus.magnifyingglass", action: .zoomOut)
+                iconButton(
+                    "View with scrolling",
+                    systemImage: "scroll",
+                    isSelected: viewerMode == .scrolling
+                ) {
+                    viewerMode = .scrolling
+                }
+                iconButton("Fit one page", systemImage: "rectangle.inset.filled") {
+                    onViewerCommand(.fitPage)
+                }
+                iconButton("Fit to width", systemImage: "arrow.left.and.right") {
+                    onViewerCommand(.fitWidth)
+                }
+                iconButton(
+                    "Full screen",
+                    systemImage: "arrow.up.left.and.arrow.down.right",
+                    action: onFullScreen
+                )
+                iconButton("Zoom in", systemImage: "plus.magnifyingglass") {
+                    onViewerCommand(.zoomIn)
+                }
+                iconButton("Zoom out", systemImage: "minus.magnifyingglass") {
+                    onViewerCommand(.zoomOut)
                 }
             }
-            .padding(16)
+            .padding(.vertical, 8)
         }
         .background(.background)
     }
 
-    private var pageCounter: String {
-        guard let selectedPageIndex else { return "0 / \(pageCount)" }
-        return "\(selectedPageIndex + 1) / \(pageCount)"
-    }
-
-    private func modeButton(_ title: String, icon: String, mode: PDFViewerMode) -> some View {
-        Button { viewerMode = mode } label: {
-            HStack {
-                ToolRowLabel(title: title, icon: icon)
-                if viewerMode == mode {
-                    Image(systemName: "checkmark")
-                        .foregroundStyle(.tint)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func commandButton(
+    private func iconButton(
         _ title: String,
-        icon: String,
-        action: PDFViewerCommand.Action
+        systemImage: String,
+        isSelected: Bool = false,
+        action: @escaping () -> Void
     ) -> some View {
-        Button { onViewerCommand(action) } label: {
-            ToolRowLabel(title: title, icon: icon)
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(width: 24, height: 28)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+        .background(
+            isSelected ? Color.accentColor.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(
+                    isSelected ? Color.accentColor : Color.secondary.opacity(0.25),
+                    lineWidth: 1
+                )
+        }
+        .help(title)
+        .accessibilityLabel(title)
+    }
+}
+
+struct PDFPagesPanel: View {
+    let document: PDFDocument
+    @Binding var selectedPageIndex: Int?
+    let onMove: (IndexSet, Int) -> Void
+    let onRotate: (Int, Int) -> Void
+    let onDelete: (Int) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.stack")
+                    .foregroundStyle(.tint)
+                Text("Pages")
+                    .font(.headline)
+                Spacer()
+#if os(iOS)
+                EditButton()
+#endif
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .help("Close Pages")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            List(selection: $selectedPageIndex) {
+                ForEach(0..<document.pageCount, id: \.self) { index in
+                    if let page = document.page(at: index) {
+                        pageRow(page, at: index)
+                            .tag(index)
+                    }
+                }
+                .onMove(perform: onMove)
+            }
+            .listStyle(.sidebar)
+        }
+        .background(.background)
+    }
+
+    private func pageRow(_ page: PDFPage, at index: Int) -> some View {
+        VStack(spacing: 4) {
+            PageThumbnailView(page: page, pageNumber: index + 1)
+
+            HStack(spacing: 12) {
+                pageButton("Rotate left", systemImage: "rotate.left") {
+                    onRotate(index, -90)
+                }
+                pageButton("Rotate right", systemImage: "rotate.right") {
+                    onRotate(index, 90)
+                }
+                pageButton("Delete page", systemImage: "trash", role: .destructive) {
+                    onDelete(index)
+                }
+                .disabled(document.pageCount <= 1)
+            }
+            .buttonStyle(.borderless)
+        }
+        .contextMenu {
+            Button("Rotate Left") { onRotate(index, -90) }
+            Button("Rotate Right") { onRotate(index, 90) }
+            Divider()
+            Button("Delete Page", role: .destructive) { onDelete(index) }
+                .disabled(document.pageCount <= 1)
+        }
+    }
+
+    private func pageButton(
+        _ title: String,
+        systemImage: String,
+        role: ButtonRole? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Image(systemName: systemImage)
+        }
+        .help(title)
     }
 }
 

@@ -22,7 +22,8 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | Explicit save | Implemented | macOS and iOS expose a Save toolbar action; macOS also replaces File → Save and Command-S with the same action. Inline text edits remain in a `PendingTextEditStore` until Save; edit-time refreshes do not publish a new `ReferenceFileDocument` snapshot. |
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
-| Full page-order and metadata UI | Inactive | Commands exist in the engine surface, but `ContentView` does not expose them directly. |
+| Full page-order UI | Implemented | The toggleable Pages panel exposes selection, full-list drag reordering, 90-degree rotation, and deletion except for the final page. |
+| Document metadata UI | Inactive | Metadata commands exist in the engine surface, but `ContentView` does not expose them directly. |
 | Remote or hosted service mode | Not implemented | No configuration or adapter exists in the reviewed source. |
 
 ## 2. Architecture
@@ -55,7 +56,7 @@ flowchart TD
 ### Layers and dependency direction
 
 1. **Application composition**: `PDF_EditorApp.swift` creates a `DocumentGroup` and injects each `PDFEditorDocument` into `ContentView`.
-2. **Presentation**: `ContentView.swift` and `FeatureViews.swift` own transient UI state, the hidden-by-default Tools panel, Comment List, explicit Save action, and document operations. `PDFKitView.swift` bridges SwiftUI to `PDFView` on AppKit and UIKit.
+2. **Presentation**: `ContentView.swift` and `FeatureViews.swift` own transient UI state, the hidden-by-default Tools panel, toggleable Pages panel, narrow right-side viewing rail, Comment List, explicit Save action, and document operations. Save, Tools, and OCR use separate leading toolbar items with hidden shared backgrounds; `DocumentGroup` continues to own the native document title. `PDFKitView.swift` bridges SwiftUI to `PDFView` on AppKit and UIKit.
 3. **Document coordination**: `PDFEditorDocument.swift` owns source bytes, the last explicitly persisted bytes, the PDFium session, the PDFKit display document, password authorization, save policy, signature consent, and Undo registration.
 4. **Core abstraction**: `PDFEditingEngine.swift` defines platform-neutral metadata, page commands, results, errors, and the engine/session protocols.
 5. **Concrete engines**: `PDFiumEditingEngine.swift` is primary. `PDFKitEditingEngine.swift` is a limited alternate implementation and a metadata helper.
@@ -82,8 +83,8 @@ There is protocol-based engine separation, but no application-level dependency-i
 | Path | Responsibility |
 | --- | --- |
 | `PDF Editor/PDF_EditorApp.swift` | Application entry point and document scene. |
-| `PDF Editor/ContentView.swift` | Main editor UI, hidden/toggleable Tools panel, Comment List integration, explicit Save toolbar action, imports/exports, OCR workflow, protected merge flow, and transient view state. |
-| `PDF Editor/FeatureViews.swift` | English tool panels, Comment List, protected-PDF password sheet, OCR result views, object inspector, signature pad, and annotation inspector. |
+| `PDF Editor/ContentView.swift` | Main editor UI, hidden/toggleable Tools and Pages panels, narrow right-side viewing rail composition, Comment List integration, separate Save/Tools/OCR toolbar items, imports/exports, OCR workflow, protected merge flow, and transient view state. |
+| `PDF Editor/FeatureViews.swift` | Pages panel and icon-only viewing rail, English tool panels, Comment List, protected-PDF password sheet, OCR result views, object inspector, signature pad, and annotation inspector. |
 | `PDF Editor/Core/PDFEditingEngine.swift` | Engine/session protocols, page command model, metadata model, export policy, and shared errors. |
 | `PDF Editor/Core/PDFiumEditingEngine.swift` | Primary page and page-object engine, native handle management, verification, rollback, permissions, text fallback, images, and annotation-color bridge. |
 | `PDF Editor/Core/PDFKitEditingEngine.swift` | Page-level PDFKit implementation and metadata mutation helper. |
@@ -280,7 +281,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
+`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
 
 ### Persistence and storage boundaries
 
@@ -566,6 +567,13 @@ Additional validation completed on 2026-08-25 after adding Bold and Italic exist
 - Debug macOS build: succeeded with isolated DerivedData under `/tmp/PDFEditorStyledTextMac`.
 - Debug generic iOS Simulator build: succeeded for arm64 and x86_64 with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/PDFEditorStyledTextIOS`.
 - UI interaction, visual weight/slant, exact baseline placement, and Save/reopen appearance still require manual validation on macOS and iOS.
+
+Additional validation completed on 2026-08-25 after adding the Pages panel and compact viewing rail:
+
+- Debug macOS build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/pdf-editor-pages-macos`.
+- Debug generic iOS Simulator build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/pdf-editor-pages-ios`.
+- `git diff --check`: passed.
+- Exact toolbar appearance, thumbnail dragging, page-action buttons, responsive panel sizing, and the native `DocumentGroup` title interaction still require manual UI validation.
 
 Additional user-validated macOS runtime evidence on 2026-08-25:
 

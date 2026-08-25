@@ -159,7 +159,7 @@ struct ContentView: View {
     @State private var commentPlacementEnabled = false
     @State private var pendingCommentPlacement: PDFCommentPlacement?
     @State private var showsToolPanel = false
-    @State private var showsViewPanel = false
+    @State private var showsPagePanel = false
     @State private var usesInlinePanels = false
 
     private let annotationService = PDFAnnotationService()
@@ -206,43 +206,49 @@ struct ContentView: View {
                     }
                     documentView
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showsPagePanel {
+                        Divider()
+                        pageSidebar
+                            .frame(width: 220)
+                    }
                     Divider()
                     rightPanel
-                        .frame(width: 220)
+                        .frame(width: 52)
                 }
                 .onAppear { usesInlinePanels = true }
                 .onDisappear { usesInlinePanels = false }
             } else {
-                documentView
-                    .onAppear { usesInlinePanels = false }
-                    .sheet(isPresented: $showsToolPanel) {
-                        NavigationStack {
-                            toolSidebar
-                                .navigationTitle("Tools")
-                                .toolbar {
-                                    ToolbarItem(placement: .confirmationAction) {
-                                        Button("Done") { showsToolPanel = false }
-                                    }
+                HStack(spacing: 0) {
+                    documentView
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showsPagePanel {
+                        Divider()
+                        pageSidebar
+                            .frame(
+                                width: min(220, max(160, proxy.size.width * 0.45))
+                            )
+                    }
+                    Divider()
+                    rightPanel
+                        .frame(width: 52)
+                }
+                .onAppear { usesInlinePanels = false }
+                .sheet(isPresented: $showsToolPanel) {
+                    NavigationStack {
+                        toolSidebar
+                            .navigationTitle("Tools")
+                            .toolbar {
+                                ToolbarItem(placement: .confirmationAction) {
+                                    Button("Done") { showsToolPanel = false }
                                 }
-                        }
-                        .frame(minWidth: 300, minHeight: 560)
+                            }
                     }
-                    .sheet(isPresented: $showsViewPanel) {
-                        NavigationStack {
-                            rightPanel
-                                .navigationTitle("View")
-                                .toolbar {
-                                    ToolbarItem(placement: .confirmationAction) {
-                                        Button("Done") { showsViewPanel = false }
-                                    }
-                                }
-                        }
-                        .frame(minWidth: 280, minHeight: 520)
-                    }
-                    .sheet(isPresented: $showsCommentList) {
-                        commentList
-                            .frame(minWidth: 360, minHeight: 520)
-                    }
+                    .frame(minWidth: 300, minHeight: 560)
+                }
+                .sheet(isPresented: $showsCommentList) {
+                    commentList
+                        .frame(minWidth: 360, minHeight: 520)
+                }
             }
         }
         .toolbar { adaptiveToolbar }
@@ -421,14 +427,14 @@ struct ContentView: View {
     }
 
     private var pageSidebar: some View {
-        List(selection: $selectedPageIndex) {
-            ForEach(0..<document.pageCount, id: \.self) { index in
-                if let page = document.pdfDocument.page(at: index) {
-                    PageThumbnailView(page: page, pageNumber: index + 1).tag(index)
-                }
-            }
-        }
-        .navigationSplitViewColumnWidth(min: 150, ideal: 190, max: 240)
+        PDFPagesPanel(
+            document: document.pdfDocument,
+            selectedPageIndex: $selectedPageIndex,
+            onMove: reorderPages,
+            onRotate: rotatePage,
+            onDelete: deletePage,
+            onClose: { showsPagePanel = false }
+        )
     }
 
     @ViewBuilder
@@ -513,12 +519,10 @@ struct ContentView: View {
 
     private var rightPanel: some View {
         PDFRightPanel(
-            page: selectedPage,
-            pageCount: document.pageCount,
-            selectedPageIndex: $selectedPageIndex,
             viewerMode: $viewerMode,
+            isPagesPanelPresented: showsPagePanel,
+            onTogglePages: togglePagePanel,
             onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
-            onAddComment: beginCommentPlacement,
             onFullScreen: toggleFullScreen
         )
     }
@@ -536,37 +540,60 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var adaptiveToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
+        ToolbarItem(placement: .navigation) {
             Button(action: saveDocument) {
-                Label("Save", systemImage: "square.and.arrow.down")
+                Image(systemName: "square.and.arrow.down")
             }
+            .buttonStyle(.plain)
             .disabled(!canSave)
             .help("Save")
+            .accessibilityLabel("Save")
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .navigation) {
             Button { toggleToolPanel() } label: {
-                Label("Tools", systemImage: "wrench.and.screwdriver")
+                Image(systemName: "wrench.and.screwdriver")
             }
+            .buttonStyle(.plain)
             .help("Tools")
-            Button { showsViewPanel = true } label: {
-                Label("View", systemImage: "sidebar.right")
-            }
-            .help("View")
+            .accessibilityLabel("Tools")
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .navigation) {
             Menu {
                 Button("Recognize current page", action: runOCR)
                     .disabled(selectedPage == nil)
                 Button("Recognize all scanned pages", action: runDocumentOCR)
                     .disabled(document.pageCount == 0)
             } label: {
-                Label("OCR", systemImage: "viewfinder")
+                Image(systemName: "viewfinder")
             }
+            .menuStyle(.borderlessButton)
             .disabled(isRunningOCR)
             .help("OCR")
+            .accessibilityLabel("OCR")
         }
+        .sharedBackgroundVisibility(.hidden)
     }
 
     private func toggleToolPanel() {
         withAnimation {
-            showsToolPanel.toggle()
+            let willShow = !showsToolPanel
+            showsToolPanel = willShow
+            if willShow {
+                showsPagePanel = false
+            }
             if !showsToolPanel {
+                showsCommentList = false
+            }
+        }
+    }
+
+    private func togglePagePanel() {
+        withAnimation {
+            showsPagePanel.toggle()
+            if showsPagePanel {
+                showsToolPanel = false
                 showsCommentList = false
             }
         }
@@ -717,122 +744,6 @@ struct ContentView: View {
 #endif
     }
 
-    @ToolbarContentBuilder
-    private var pageToolbar: some ToolbarContent {
-        ToolbarItemGroup {
-            Button {
-                apply(.insertBlankPage(at: document.pageCount, size: .a4), name: "Insert Page")
-            } label: {
-                Label("Insert Page", systemImage: "plus")
-            }
-            Button(role: .destructive) {
-                guard let index = selectedPageIndex else { return }
-                apply(.deletePage(at: index), name: "Delete Page")
-            } label: {
-                Label("Delete Page", systemImage: "trash")
-            }
-            .disabled(document.pageCount <= 1 || selectedPageIndex == nil)
-        }
-    }
-
-    @ToolbarContentBuilder
-    private var editingToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Menu {
-                Button("Rotate Left") { rotate(by: -90) }
-                Button("Rotate Right") { rotate(by: 90) }
-                Divider()
-                Button("Move Page Earlier") { movePage(by: -1) }
-                Button("Move Page Later") { movePage(by: 1) }
-                Divider()
-                Button("Combine Another PDF…") { beginFileImport(.mergePDF) }
-                Button("Extract Current Page…") { exportSelectedPage() }
-                Button("Split into Individual Pages…") { splitEveryPage() }
-            } label: {
-                Label("Page Tools", systemImage: "rectangle.stack")
-            }
-            Menu {
-                Button("Inspect and Edit Existing Objects…") { loadObjects() }
-                Button("Add Text") { showsAddTextPrompt = true }
-                Button("Add Image…") { beginFileImport(.addImage) }
-            } label: {
-                Label("Content Tools", systemImage: "textformat")
-            }
-            if annotationEditingEnabled, let selectedAnnotation {
-                Menu {
-                    Button("Move Left 5 pt") { nudgeAnnotation(selectedAnnotation, dx: -5, dy: 0) }
-                    Button("Move Right 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 5, dy: 0) }
-                    Button("Move Up 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 0, dy: 5) }
-                    Button("Move Down 5 pt") { nudgeAnnotation(selectedAnnotation, dx: 0, dy: -5) }
-                    Divider()
-                    Button("Enlarge 10%") { scaleAnnotation(selectedAnnotation, factor: 1.1) }
-                    Button("Reduce 10%") { scaleAnnotation(selectedAnnotation, factor: 0.9) }
-                    Divider()
-                    Button("Edit Properties…") { showsAnnotationInspector = true }
-                    Button("Delete", role: .destructive) { deleteAnnotation(selectedAnnotation) }
-                } label: {
-                    Label("Selected Annotation", systemImage: "square.dashed.inset.filled")
-                }
-            }
-            if objectEditingEnabled, let selectedObject {
-                Menu {
-                    if selectedObject.kind == .image {
-                        Button("Replace Image…") { beginImageReplacement(selectedObject) }
-                    }
-                    Divider()
-                    Button("Enlarge 10%") { scaleObject(selectedObject, factor: 1.1) }
-                    Button("Reduce 10%") { scaleObject(selectedObject, factor: 0.9) }
-                    Button("Rotate Left 15°") { rotateObject(selectedObject, radians: .pi / 12) }
-                    Button("Rotate Right 15°") { rotateObject(selectedObject, radians: -.pi / 12) }
-                    Divider()
-                    Button("Bring to Front") {
-                        moveObject(selectedObject, destinationIndex: siblingCount(for: selectedObject) - 1)
-                    }
-                    Button("Send to Back") { moveObject(selectedObject, destinationIndex: 0) }
-                    Divider()
-                    Button("Delete", role: .destructive) { deleteObject(selectedObject) }
-                } label: {
-                    Label("Selected Object", systemImage: "square.dashed")
-                }
-            }
-            Menu {
-                TextField("Annotation text", text: $annotationText)
-                Button("Add Text Annotation") { addFreeText() }
-                Button("Add Comment", action: beginCommentPlacement)
-                Button("Highlight Selected Text") { addHighlight() }
-                    .disabled(pdfSelection == nil)
-                Button("Handwritten Signature…") { showsSignaturePad = true }
-                Button("Manage Page Annotations…") { loadAnnotations() }
-            } label: {
-                Label("Annotations and Signatures", systemImage: "pencil.and.scribble")
-            }
-            Menu {
-                Button("Recognize Current Page", action: runOCR)
-                    .disabled(selectedPage == nil)
-                Button("Recognize All Scanned Pages", action: runDocumentOCR)
-                    .disabled(document.pageCount == 0)
-            } label: {
-                Label("OCR", systemImage: "viewfinder")
-            }
-            .disabled(isRunningOCR)
-            if document.isEncrypted && !document.isLocked {
-                Toggle(
-                    "Remove Password When Saving",
-                    isOn: Binding(
-                        get: { document.removesPasswordProtectionOnSave },
-                        set: { newValue in
-                            if newValue {
-                                showsPasswordRemovalConfirmation = true
-                            } else {
-                                document.setRemovesPasswordProtectionOnSave(false)
-                            }
-                        }
-                    )
-                )
-            }
-        }
-    }
-
     private var selectedPage: PDFPage? {
         guard let selectedPageIndex else { return nil }
         return document.pdfDocument.page(at: selectedPageIndex)
@@ -889,10 +800,15 @@ struct ContentView: View {
         return observations
     }
 
-    private func apply(_ command: PDFEditingCommand, name: String) {
+    @discardableResult
+    private func apply(_ command: PDFEditingCommand, name: String) -> Bool {
         do {
             _ = try document.apply(command, undoManager: undoManager, actionName: name)
-        } catch { present(error) }
+            return true
+        } catch {
+            present(error)
+            return false
+        }
     }
 
     private func unlockDocument() {
@@ -913,6 +829,36 @@ struct ContentView: View {
         guard (0..<document.pageCount).contains(destination) else { return }
         apply(.movePage(from: index, to: destination), name: "Reorder Page")
         selectedPageIndex = destination
+    }
+
+    private func reorderPages(from source: IndexSet, to destination: Int) {
+        var order = Array(0..<document.pageCount)
+        let selectedSourceIndex = selectedPageIndex
+        order.move(fromOffsets: source, toOffset: destination)
+        guard apply(.reorderPages(order), name: "Reorder Pages") else { return }
+        if let selectedSourceIndex {
+            selectedPageIndex = order.firstIndex(of: selectedSourceIndex)
+        }
+    }
+
+    private func rotatePage(at index: Int, by degrees: Int) {
+        guard (0..<document.pageCount).contains(index) else { return }
+        selectedPageIndex = index
+        apply(.rotatePage(at: index, byDegrees: degrees), name: "Rotate Page")
+    }
+
+    private func deletePage(at index: Int) {
+        guard document.pageCount > 1, (0..<document.pageCount).contains(index) else { return }
+        let previousSelection = selectedPageIndex
+        guard apply(.deletePage(at: index), name: "Delete Page") else { return }
+        switch previousSelection {
+        case index:
+            selectedPageIndex = min(index, document.pageCount - 1)
+        case let selected? where selected > index:
+            selectedPageIndex = selected - 1
+        default:
+            break
+        }
     }
 
     private func exportSelectedPage() {
@@ -1324,7 +1270,6 @@ struct ContentView: View {
         commentPlacementEnabled = true
         if !usesInlinePanels {
             showsToolPanel = false
-            showsViewPanel = false
         }
     }
 

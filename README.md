@@ -20,9 +20,9 @@ This repository uses the following terms:
 ### Implemented
 
 - Open, display, edit, and create PDF documents through SwiftUI's document architecture. Edits remain in memory until the user selects the cross-platform Save toolbar action; macOS also provides File → Save and Command-S.
-- Start each document with the left Tools panel hidden and toggle it from the toolbar. The English tool workspace groups text/annotation, page, organization, export, e-signature, and security actions alongside the right-side viewing controls.
-- Navigate pages with PDF thumbnails.
-- Insert an A4 page, delete a page, rotate a page, and move a page one position at a time.
+- Start each document with the left Tools panel hidden and toggle it from the toolbar. Save, Tools, and OCR are separate leading toolbar items with hidden shared backgrounds, while the document title remains the native `DocumentGroup` title. The English tool workspace groups text/annotation, page, organization, export, e-signature, and security actions.
+- Toggle the Pages thumbnail panel immediately to the left of the narrow right-side viewing rail. Select a thumbnail to navigate, drag thumbnails to reorder pages, rotate a page left or right, and delete any page except the final remaining page. iOS exposes the standard Edit control for list reordering; macOS uses the list's direct move interaction.
+- Insert an A4 page, delete or rotate a selected page, move a page one position at a time, or reorder the full document from the Pages panel.
 - Merge another PDF at the end of the open document, including a password-protected source after password entry.
 - Export the selected page or split the document into one PDF per page.
 - Inspect recursively discovered page objects, including objects nested in Form XObjects.
@@ -39,7 +39,7 @@ This repository uses the following terms:
 ### Experimental or inactive paths
 
 - `PDFKitEditingEngine` is an alternate page-level backend. The normal document path uses `PDFiumEditingEngine`; PDFKit's editing session is currently invoked internally only for document metadata mutation.
-- The engine command surface includes full page reordering and document metadata updates, but the current UI does not expose those commands directly.
+- The engine command surface includes document metadata updates, but the current UI does not expose metadata editing directly.
 - A direct JPEG insertion API exists in the engine and C bridge, while the normal image-import UI decodes supported images into a bounded BGRA bitmap first.
 
 ## Requirements
