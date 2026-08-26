@@ -1080,11 +1080,18 @@ final class PDFiumBridgeTests: XCTestCase {
 
     private func copyData(
         _ document: PEPDFDocumentRef,
-        removeSecurity: Bool = false
+        removeSecurity: Bool = false,
+        subsetNewFonts: Bool = true
     ) throws -> Data {
         var pointer: UnsafeMutablePointer<UInt8>?
         var length = 0
-        XCTAssertTrue(PEPDFDocumentCopyData(document, removeSecurity, &pointer, &length))
+        XCTAssertTrue(PEPDFDocumentCopyData(
+            document,
+            removeSecurity,
+            subsetNewFonts,
+            &pointer,
+            &length
+        ))
         let bytes = try XCTUnwrap(pointer)
         defer { PEPDFFree(bytes) }
         return Data(bytes: bytes, count: length)

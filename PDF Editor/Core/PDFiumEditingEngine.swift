@@ -352,7 +352,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                 invalidDocumentError: .sourceDocumentInvalid
             )
             let previousCount = metadata.pageCount
-            try mutateAndReopen {
+            try mutateAndReopen(subsetNewFontsAfterMutation: false) {
                 var errorCode: UInt32 = 0
                 let importPages: (UnsafePointer<CChar>?) -> Bool = { password in
                     sourceData.withUnsafeBytes { bytes in
@@ -396,12 +396,20 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func dataRepresentation(options: PDFExportOptions = PDFExportOptions()) throws -> Data {
+        try dataRepresentation(options: options, subsetNewFonts: true)
+    }
+
+    private func dataRepresentation(
+        options: PDFExportOptions,
+        subsetNewFonts: Bool
+    ) throws -> Data {
         var bytes: UnsafeMutablePointer<UInt8>?
         var length = 0
         let removeSecurity = options.securityPolicy == .removeAfterAuthorizedUnlock
         guard PEPDFDocumentCopyData(
             handle,
             removeSecurity,
+            subsetNewFonts,
             &bytes,
             &length
         ), let bytes else {
@@ -956,6 +964,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     private func mutateAndReopen(
+        subsetNewFontsAfterMutation: Bool = true,
         _ mutation: () -> Bool,
         verify: () throws -> Bool
     ) throws {
@@ -964,7 +973,10 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             guard mutation() else {
                 throw PDFEditingError.pageMutationFailed
             }
-            let updatedData = try dataRepresentation(options: PDFExportOptions())
+            let updatedData = try dataRepresentation(
+                options: PDFExportOptions(),
+                subsetNewFonts: subsetNewFontsAfterMutation
+            )
             try replaceHandle(with: updatedData, password: authorizedPassword)
             guard try verify() else {
                 throw PDFEditingError.pageMutationFailed

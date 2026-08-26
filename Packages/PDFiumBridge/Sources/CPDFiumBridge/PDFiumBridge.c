@@ -955,6 +955,7 @@ bool PEPDFDocumentCopyPages(
 bool PEPDFDocumentCopyData(
     PEPDFDocumentRef document,
     bool removeSecurity,
+    bool subsetNewFonts,
     uint8_t** outputBytes,
     size_t* outputLength
 ) {
@@ -963,7 +964,10 @@ bool PEPDFDocumentCopyData(
         return false;
     }
 
-    int flags = FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS;
+    int flags = FPDF_NO_INCREMENTAL;
+    if (subsetNewFonts) {
+        flags |= FPDF_SUBSET_NEW_FONTS;
+    }
     if (removeSecurity) {
         flags |= FPDF_REMOVE_SECURITY;
     }

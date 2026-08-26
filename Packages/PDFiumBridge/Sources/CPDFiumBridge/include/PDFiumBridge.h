@@ -103,6 +103,7 @@ bool PEPDFDocumentCopyPages(
 bool PEPDFDocumentCopyData(
     PEPDFDocumentRef document,
     bool removeSecurity,
+    bool subsetNewFonts,
     uint8_t** outputBytes,
     size_t* outputLength
 );
