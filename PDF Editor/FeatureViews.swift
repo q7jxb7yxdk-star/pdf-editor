@@ -6,7 +6,6 @@ enum PDFToolAction {
     case editComments
     case highlight
     case drawFreehand
-    case eraseDrawing
     case deletePage
     case extractPage
     case movePageEarlier
@@ -88,7 +87,6 @@ struct PDFToolSidebar: View {
                         )
                         tool("Highlight", icon: "highlighter", action: .highlight)
                         tool("Draw freehand", icon: "pencil.and.outline", action: .drawFreehand)
-                        tool("Erase a drawing", icon: "eraser", action: .eraseDrawing)
                     }
 
                     section("Edit pages") {

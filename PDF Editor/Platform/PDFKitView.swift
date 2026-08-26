@@ -1087,7 +1087,12 @@ extension PDFKitView {
             outlineLayer.lineWidth = 2
             outlineLayer.lineDashPattern = [6, 4]
             outlineLayer.zPosition = 10_000
-            freehandPreviewLayer.strokeColor = CGColor(gray: 0.05, alpha: 1)
+            freehandPreviewLayer.strokeColor = CGColor(
+                red: 0.9,
+                green: 0.15,
+                blue: 0.15,
+                alpha: 1
+            )
             freehandPreviewLayer.fillColor = nil
             freehandPreviewLayer.lineWidth = 2
             freehandPreviewLayer.lineCap = .round

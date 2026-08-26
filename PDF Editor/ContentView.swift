@@ -828,8 +828,6 @@ struct ContentView: View {
             if !usesInlinePanels {
                 showsToolPanel = false
             }
-        case .eraseDrawing:
-            loadAnnotations()
         case .cropPage:
             showUnavailable("Crop")
         case .numberPages:
@@ -1531,6 +1529,7 @@ struct ContentView: View {
             ) {
                 let annotation = try annotationService.addInkStroke(
                     points: points,
+                    color: .red,
                     to: page
                 )
                 guard let annotationIndex = page.annotations.firstIndex(where: {
