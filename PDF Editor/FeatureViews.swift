@@ -7,7 +7,6 @@ enum PDFToolAction {
     case highlight
     case drawFreehand
     case deletePage
-    case extractPage
     case movePageEarlier
     case movePageLater
     case rotateLeft
@@ -447,6 +446,7 @@ struct PDFPagesPanel: View {
     let document: PDFDocument
     @Binding var selectedPageIndex: Int?
     let onMove: (IndexSet, Int) -> Void
+    let onExtract: (Int) -> Void
     let onRotate: (Int, Int) -> Void
     let onDelete: (Int) -> Void
     let onClose: () -> Void
@@ -492,6 +492,9 @@ struct PDFPagesPanel: View {
             PageThumbnailView(page: page, pageNumber: index + 1)
 
             HStack(spacing: 12) {
+                pageButton("Extract page", systemImage: "doc.badge.arrow.up") {
+                    onExtract(index)
+                }
                 pageButton("Rotate left", systemImage: "rotate.left") {
                     onRotate(index, -90)
                 }

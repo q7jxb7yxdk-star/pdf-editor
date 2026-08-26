@@ -22,7 +22,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | Explicit save | Implemented | macOS and iOS expose a Save toolbar action; macOS also replaces File → Save and Command-S with the same action. Inline text edits remain in a `PendingTextEditStore` until Save; edit-time refreshes do not publish a new `ReferenceFileDocument` snapshot. |
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
-| Full page-order UI | Implemented | The toggleable Pages panel exposes selection, full-list drag reordering, 90-degree rotation, and deletion except for the final page. |
+| Full page-order UI | Implemented | The toggleable Pages panel exposes selection, per-thumbnail extraction, full-list drag reordering, 90-degree rotation, and deletion except for the final page. |
 | Document metadata UI | Inactive | Metadata commands exist in the engine surface, but `ContentView` does not expose them directly. |
 | Remote or hosted service mode | Not implemented | No configuration or adapter exists in the reviewed source. |
 
@@ -136,11 +136,11 @@ The in-memory `sourceData` supports unlock and rollback bookkeeping. Non-text wo
 
 ### 4.2 Page operations
 
-- Insert, delete, rotate, move, reorder, and merge execute in the PDFium session.
+- Delete, rotate, move, reorder, and merge execute in the PDFium session.
 - Page-assembly mutations require PDF permission bit `0x400`.
 - Each mutating native call is followed by serialization, handle replacement, and a narrow verification such as page-count, size, or rotation equality.
-- Split is nonmutating with respect to the open document. It validates nonoverlapping zero-based ranges, copies selected pages into new PDF bytes, and verifies the expected page count after reopening without a password.
-- The UI exports either one selected-page document or one document per page through SwiftUI file exporters.
+- Split is nonmutating with respect to the open document. It validates nonoverlapping zero-based ranges, copies selected pages into new PDF bytes, preserves their existing embedded font programs without applying PDFium's experimental new-font subsetting flag, and verifies the expected page count after reopening without a password.
+- Each Pages thumbnail exposes Extract immediately before Rotate left. macOS presents an `NSSavePanel` for the resulting one-page PDF, while iOS uses a SwiftUI file exporter. The split-all-pages action continues to export one document per page through the SwiftUI multi-document exporter.
 
 ### 4.3 Page-object inspection and editing
 
@@ -481,7 +481,7 @@ The app opens encrypted PDFs and can remove their encryption dictionary. Export-
 - bitmap insertion/replacement and alpha handling;
 - shared image and nested/shared Form isolation;
 - clipping and marked-content preservation;
-- page delete/rotate/move/reorder/split/merge;
+- page delete/rotate/move/reorder/split/merge, including preservation of page resources and embedded fonts during extraction;
 - password acceptance/rejection, encryption preservation, and authorized removal;
 - a 120-page workflow and malformed/truncated input rejection.
 
@@ -562,6 +562,7 @@ The following completed successfully on 2026-08-24 with Xcode 26.6 and Apple Swi
 - On 2026-08-26, the updated standalone annotation validation passed with selectable two-line highlight text, eight local quadrilateral points, and serialization/reopen verification. The Highlight/Comment interaction changes and annotation-anchored macOS Comment Editor popover also passed `git diff --check` plus unsigned Debug builds for macOS and the generic iOS Simulator destination. Exact popover placement, hover timing, dynamic sizing, keyboard focus, and selection behavior remain manual UI checks.
 - On 2026-08-26, a focused regression test first reproduced PDFium rejecting a color change for a Highlight with a fixed appearance stream, then passed after the scoped appearance-regeneration fix. The complete `PDFiumBridge` suite passed 27 tests with 0 failures, the standalone annotation round trip passed with the Highlight changed to green while preserving alpha and geometry, and the selected-Highlight color/delete action bar passed `git diff --check` plus unsigned Debug builds for macOS and the generic iOS Simulator destination. Exact action-bar placement, color-popover interaction, tooltips, and deletion behavior remain manual UI checks.
 - On 2026-08-26, the first-Comment-color fast path, failure rollback event, ordered Red/Orange/Yellow/Green/Blue/Indigo/Purple Comment palette, and single-page-load PDFium display enumeration passed `git diff --check`, the complete 27-test PDFiumBridge suite, the standalone annotation round trip, and unsigned Debug builds for macOS and the generic iOS Simulator destination. The iOS build emitted only existing `UIBarButtonItem.Style.done` deprecation warnings in `PDFKitView.swift`. Exact first-Apply latency, swatch rendering, and absence of the macOS spinning wait cursor with the reported real-world PDF remain manual UI checks.
+- On 2026-08-26, per-thumbnail Extract was verified in the macOS UI with its control immediately before Rotate left and a native save panel. The PDFium page-copy path was then verified against `OBM Timetable 2026.08.24.pdf`: the extracted page retained identical content-stream and text hashes, identical embedded-font names and byte sizes, and a pixel-identical rendered PNG compared with the source page. The complete PDFiumBridge suite passed 28 tests with 0 failures, and Debug builds succeeded for macOS and the generic iOS Simulator destination.
 - On 2026-08-26, freehand Ink drawing with a red preview/default stroke, removal of the separate Erase a drawing action, annotation-local path serialization, appearance regeneration for color and line width, the selected-Ink color/thickness/delete action bar, zoom-aware page hit testing, and the expanded 12-point macOS/22-point iOS invisible thickness-choice hit shapes passed `git diff --check`, the standalone annotation round trip, the complete 28-test PDFiumBridge suite, and Debug builds for macOS and the generic iOS Simulator destination. Rendering the standalone validation PDF also showed the expected Ink stroke. Exact drawing feel, action-bar placement, popover interaction, and hit-target behavior remain manual UI checks.
 - SHA-256 comparison: all four bundled PDFium binaries matched the values recorded in `Packages/PDFiumBridge/Vendor/NOTICE.md`.
 

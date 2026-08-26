@@ -130,6 +130,7 @@ struct ContentView: View {
     @State private var isRunningOCR = false
     @State private var showsOCRProgress = false
     @State private var splitExportDocument: PDFExportDocument?
+    @State private var showsSinglePageExporter = false
     @State private var splitExportDocuments: [PDFExportDocument] = []
     @State private var manualSaveExportDocument: PDFExportDocument?
     @State private var pendingManualSaveData: Data?
@@ -445,10 +446,7 @@ struct ContentView: View {
             finishManualSaveExport(result)
         }
         .fileExporter(
-            isPresented: Binding(
-                get: { splitExportDocument != nil },
-                set: { if !$0 { splitExportDocument = nil } }
-            ),
+            isPresented: $showsSinglePageExporter,
             document: splitExportDocument,
             contentType: .pdf,
             defaultFilename: "PDF Split"
@@ -474,6 +472,7 @@ struct ContentView: View {
             document: document.pdfDocument,
             selectedPageIndex: $selectedPageIndex,
             onMove: reorderPages,
+            onExtract: exportPage,
             onRotate: rotatePage,
             onDelete: deletePage,
             onClose: { showsPagePanel = false }
@@ -799,8 +798,6 @@ struct ContentView: View {
         case .deletePage:
             guard let index = selectedPageIndex else { return }
             apply(.deletePage(at: index), name: "Delete Page")
-        case .extractPage:
-            exportSelectedPage()
         case .movePageEarlier:
             movePage(by: -1)
         case .movePageLater:
@@ -980,8 +977,8 @@ struct ContentView: View {
         }
     }
 
-    private func exportSelectedPage() {
-        guard let index = selectedPageIndex else { return }
+    private func exportPage(at index: Int) {
+        guard (0..<document.pageCount).contains(index) else { return }
         do {
             let result = try document.apply(
                 .split(ranges: [PDFPageRange(index, through: index)]),
@@ -989,9 +986,43 @@ struct ContentView: View {
                 actionName: "Split PDF"
             )
             guard case let .split(documents) = result, let data = documents.first else { return }
-            splitExportDocument = PDFExportDocument(data: data, filename: "Page \(index + 1).pdf")
+            let filename = "Page \(index + 1).pdf"
+#if os(macOS)
+            presentSinglePageSavePanel(data: data, filename: filename)
+#else
+            splitExportDocument = PDFExportDocument(data: data, filename: filename)
+            Task { @MainActor in
+                await Task.yield()
+                guard splitExportDocument != nil else { return }
+                showsSinglePageExporter = true
+            }
+#endif
         } catch { present(error) }
     }
+
+#if os(macOS)
+    private func presentSinglePageSavePanel(data: Data, filename: String) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = filename
+        panel.canCreateDirectories = true
+
+        let completionHandler: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                present(error)
+            }
+        }
+
+        if let window = NSApp.keyWindow {
+            panel.beginSheetModal(for: window, completionHandler: completionHandler)
+        } else {
+            panel.begin(completionHandler: completionHandler)
+        }
+    }
+#endif
 
     private func splitEveryPage() {
         guard document.pageCount > 0 else { return }

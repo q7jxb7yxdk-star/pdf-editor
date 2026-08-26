@@ -943,7 +943,7 @@ bool PEPDFDocumentCopyPages(
         FPDF_CopyViewerPreferences(output, document->handle);
         success = PECopyDocumentData(
             output,
-            FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS,
+            FPDF_NO_INCREMENTAL,
             outputBytes,
             outputLength
         );
