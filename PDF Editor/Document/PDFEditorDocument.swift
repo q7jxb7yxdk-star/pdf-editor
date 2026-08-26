@@ -980,10 +980,20 @@ final class PDFEditorDocument: ReferenceFileDocument {
             )
         }
         for (reference, expectedColor) in colorOverrides {
-            let actual = try annotationSession.annotationColor(
-                pageIndex: reference.pageIndex,
-                annotationIndex: reference.annotationIndex
-            )
+            let actual: PDFAnnotationColor
+            if let serialized = serializedAnnotations[reference],
+               serialized.kind == .ink,
+               serialized.hasAppearanceStream {
+                // PDFium's annotation color API intentionally fails when an
+                // appearance stream is present. Ink keeps its PDFKit-generated
+                // appearance, so verify the serialized annotation dictionary.
+                actual = serialized.color
+            } else {
+                actual = try annotationSession.annotationColor(
+                    pageIndex: reference.pageIndex,
+                    annotationIndex: reference.annotationIndex
+                )
+            }
             guard abs(actual.red - expectedColor.red) < 0.01,
                   abs(actual.green - expectedColor.green) < 0.01,
                   abs(actual.blue - expectedColor.blue) < 0.01,

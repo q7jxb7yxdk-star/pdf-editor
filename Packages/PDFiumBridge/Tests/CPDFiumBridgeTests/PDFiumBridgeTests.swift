@@ -113,6 +113,29 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(alpha, 115)
     }
 
+    func testInkAppearanceColorIsReadFromSerializedAnnotation() throws {
+        let data = makeInkWithAppearancePDF()
+        let document = try open(data)
+        defer { PEPDFDocumentClose(document) }
+
+        var red: UInt32 = 0
+        var green: UInt32 = 0
+        var blue: UInt32 = 0
+        var alpha: UInt32 = 0
+        XCTAssertFalse(PEPDFAnnotationGetColor(
+            document, 0, 0, &red, &green, &blue, &alpha
+        ))
+
+        let reopened = try XCTUnwrap(PDFDocument(data: data))
+        let annotation = try XCTUnwrap(reopened.page(at: 0)?.annotations.first)
+        let color = try XCTUnwrap(annotation.color.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(annotation.type, "Ink")
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("/AP << /N 6 0 R >>"))
+        XCTAssertEqual(color.redComponent, 0.9, accuracy: 0.01)
+        XCTAssertEqual(color.greenComponent, 0.15, accuracy: 0.01)
+        XCTAssertEqual(color.blueComponent, 0.15, accuracy: 0.01)
+    }
+
     func testExistingTextObjectCanBeRewrittenAndPreservesStyleGeometry() throws {
         let document = try open(makeTextPDF())
         defer { PEPDFDocumentClose(document) }
@@ -1355,6 +1378,21 @@ final class PDFiumBridgeTests: XCTestCase {
                 "/QuadPoints [40 224 130 224 40 212 130 212 130 212 220 212 130 200 220 200] " +
                 "/C [1 0.8 0] /CA 0.45 /P 3 0 R /AP << /N 6 0 R >> >>",
             "<< /Type /XObject /Subtype /Form /BBox [0 0 180 24] /Resources << >> " +
+                "/Length \(appearance.utf8.count) >>\nstream\n\(appearance)\nendstream",
+        ])
+    }
+
+    private func makeInkWithAppearancePDF() -> Data {
+        let appearance = "0.9 0.15 0.15 RG 4 w 0 0 m 40 40 l 80 10 l S"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Annots [5 0 R] /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+            "<< /Type /Annot /Subtype /Ink /Rect [20 20 100 60] " +
+                "/InkList [[20 20 60 60 100 30]] /C [0.9 0.15 0.15] /CA 1 " +
+                "/BS << /W 4 >> /P 3 0 R /AP << /N 6 0 R >> >>",
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 80 40] /Resources << >> " +
                 "/Length \(appearance.utf8.count) >>\nstream\n\(appearance)\nendstream",
         ])
     }

@@ -22,6 +22,7 @@ struct SignatureStroke: Equatable, Sendable {
 nonisolated enum PDFAnnotationServiceError: LocalizedError {
     case emptyText
     case emptySignature
+    case emptyInkStroke
     case selectionHasNoPages
     case annotationNotFound
     case invalidBounds
@@ -34,6 +35,8 @@ nonisolated enum PDFAnnotationServiceError: LocalizedError {
             "Enter text before adding the annotation."
         case .emptySignature:
             "Draw a signature before adding it to the PDF."
+        case .emptyInkStroke:
+            "Draw a line before adding it to the PDF."
         case .selectionHasNoPages:
             "Select PDF text before adding a markup annotation."
         case .annotationNotFound:
@@ -105,7 +108,12 @@ final class PDFAnnotationService {
             let canRegenerateHighlightAppearance = annotation.type == "Highlight" &&
                 update.color != nil && update.fontColor == nil &&
                 update.fontSize == nil && update.lineWidth == nil
-            guard canRegenerateNoteAppearance || canRegenerateHighlightAppearance else {
+            let canRegenerateInkAppearance = annotation.type == "Ink" &&
+                update.contents == nil && update.fontColor == nil &&
+                update.fontSize == nil &&
+                (update.color != nil || update.lineWidth != nil)
+            guard canRegenerateNoteAppearance || canRegenerateHighlightAppearance ||
+                canRegenerateInkAppearance else {
                 throw PDFAnnotationServiceError.appearanceStreamStyleUnsupported
             }
             annotation.removeValue(forAnnotationKey: appearanceDictionaryKey)
@@ -380,6 +388,66 @@ final class PDFAnnotationService {
         return annotation
     }
 
+    @discardableResult
+    func addInkStroke(
+        points: [CGPoint],
+        color: PDFAnnotationColor = .black,
+        lineWidth: CGFloat = 2,
+        to page: PDFPage
+    ) throws -> PDFAnnotation {
+        let points = points.filter { point in
+            point.x.isFinite && point.y.isFinite
+        }
+        guard points.count > 1 else {
+            throw PDFAnnotationServiceError.emptyInkStroke
+        }
+
+        let clampedLineWidth = min(max(lineWidth, 0.5), 24)
+        let minimumX = points.map(\.x).min() ?? 0
+        let maximumX = points.map(\.x).max() ?? minimumX
+        let minimumY = points.map(\.y).min() ?? 0
+        let maximumY = points.map(\.y).max() ?? minimumY
+        let padding = max(clampedLineWidth, 2)
+        var bounds = CGRect(
+            x: minimumX - padding,
+            y: minimumY - padding,
+            width: maximumX - minimumX + padding * 2,
+            height: maximumY - minimumY + padding * 2
+        ).standardized
+        if bounds.width < 4 {
+            bounds = bounds.insetBy(dx: -(4 - bounds.width) / 2, dy: 0)
+        }
+        if bounds.height < 4 {
+            bounds = bounds.insetBy(dx: 0, dy: -(4 - bounds.height) / 2)
+        }
+
+        let annotation = PDFAnnotation(
+            bounds: bounds,
+            forType: .ink,
+            withProperties: nil
+        )
+        setPrimaryColor(color, on: annotation)
+        annotation.border = PDFBorder()
+        annotation.border?.lineWidth = clampedLineWidth
+
+        let localPoints = points.map { point in
+            CGPoint(x: point.x - bounds.minX, y: point.y - bounds.minY)
+        }
+        let path = PlatformBezierPath()
+        path.move(to: localPoints[0])
+        for point in localPoints.dropFirst() {
+#if os(macOS)
+            path.line(to: point)
+#else
+            path.addLine(to: point)
+#endif
+        }
+        path.lineWidth = clampedLineWidth
+        annotation.add(path)
+        page.addAnnotation(annotation)
+        return annotation
+    }
+
     func remove(_ annotation: PDFAnnotation, from page: PDFPage) {
         page.removeAnnotation(annotation)
     }
@@ -423,8 +491,8 @@ final class PDFAnnotationService {
     ) -> PlatformBezierPath {
         let points = normalizedPoints.map { point in
             CGPoint(
-                x: bounds.minX + min(max(point.x, 0), 1) * bounds.width,
-                y: bounds.minY + (1 - min(max(point.y, 0), 1)) * bounds.height
+                x: min(max(point.x, 0), 1) * bounds.width,
+                y: (1 - min(max(point.y, 0), 1)) * bounds.height
             )
         }
         let path = PlatformBezierPath()
@@ -526,8 +594,8 @@ final class PDFAnnotationService {
                 b: 0,
                 c: 0,
                 d: scaleY,
-                tx: newBounds.minX - oldBounds.minX * scaleX,
-                ty: newBounds.minY - oldBounds.minY * scaleY
+                tx: 0,
+                ty: 0
             )
             for path in paths {
                 annotation.remove(path)

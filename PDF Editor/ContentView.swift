@@ -159,6 +159,8 @@ struct ContentView: View {
     @State private var showsCommentList = false
     @State private var commentEditorAnnotation: PDFAnnotationSnapshot?
     @State private var commentPlacementEnabled = false
+    @State private var freehandDrawingEnabled = false
+    @State private var pendingFreehandSelectionReference: PDFAnnotationReference?
     @State private var pendingCommentPlacement: PDFCommentPlacement?
     @State private var showsToolPanel = false
     @State private var showsPagePanel = false
@@ -269,13 +271,21 @@ struct ContentView: View {
             }
             selectedPageIndex = 0
         }
-        .onChange(of: selectedPageIndex) { _, _ in
+        .onChange(of: selectedPageIndex) { _, pageIndex in
+            let pendingFreehandReference = pendingFreehandSelectionReference
             highlightSelectionSnapshot = nil
             highlightModeEnabled = false
             selectedObject = nil
             selectedAnnotation = nil
             loadCanvasObjects()
             loadCanvasAnnotations()
+            if let pageIndex, let pendingFreehandReference,
+               pendingFreehandReference.pageIndex == pageIndex {
+                selectedAnnotation = pageAnnotations.first {
+                    $0.reference == pendingFreehandReference
+                }
+                pendingFreehandSelectionReference = nil
+            }
         }
         .onChange(of: editorState.revision) { _, _ in
             pageObjectCache.removeAll()
@@ -512,6 +522,8 @@ struct ContentView: View {
                     onSetAnnotationBounds: setAnnotationBounds,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
+                    freehandDrawingEnabled: freehandDrawingEnabled,
+                    onAddFreehand: addFreehandStroke,
                     onReplaceTextObject: replaceText,
                     onReplaceAnnotationText: replaceAnnotationText,
                     onUpdateAnnotation: updateAnnotation,
@@ -532,6 +544,26 @@ struct ContentView: View {
                         Button("Cancel", action: cancelCommentPlacement)
                             .buttonStyle(.bordered)
                             .keyboardShortcut(.cancelAction)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 12)
+                    .shadow(radius: 4, y: 2)
+                }
+
+                if freehandDrawingEnabled {
+                    HStack(spacing: 12) {
+                        Label(
+                            "Draw anywhere on the PDF, then release to finish.",
+                            systemImage: "pencil.and.outline"
+                        )
+                        Button("Cancel") {
+                            freehandDrawingEnabled = false
+                        }
+                        .buttonStyle(.bordered)
+                        .keyboardShortcut(.cancelAction)
                     }
                     .font(.callout)
                     .padding(.horizontal, 14)
@@ -749,6 +781,9 @@ struct ContentView: View {
     }
 
     private func handleToolAction(_ action: PDFToolAction) {
+        if action != .drawFreehand {
+            freehandDrawingEnabled = false
+        }
         switch action {
         case .addComment:
             beginCommentPlacement()
@@ -785,7 +820,14 @@ struct ContentView: View {
         case .fillAndSign, .addSignature:
             showsSignaturePad = true
         case .drawFreehand:
-            showsSignaturePad = true
+            commentPlacementEnabled = false
+            highlightModeEnabled = false
+            selectedObject = nil
+            selectedAnnotation = nil
+            freehandDrawingEnabled = true
+            if !usesInlinePanels {
+                showsToolPanel = false
+            }
         case .eraseDrawing:
             loadAnnotations()
         case .cropPage:
@@ -1477,6 +1519,46 @@ struct ContentView: View {
             }
             refreshAnnotationsIfNeeded()
         } catch { present(error) }
+    }
+
+    private func addFreehandStroke(pageIndex: Int, points: [CGPoint]) {
+        guard let page = document.pdfDocument.page(at: pageIndex) else { return }
+        var newReference: PDFAnnotationReference?
+        do {
+            try document.mutateAnnotations(
+                undoManager: undoManager,
+                actionName: "Draw Freehand"
+            ) {
+                let annotation = try annotationService.addInkStroke(
+                    points: points,
+                    to: page
+                )
+                guard let annotationIndex = page.annotations.firstIndex(where: {
+                    $0 === annotation
+                }) else {
+                    throw PDFAnnotationServiceError.annotationNotFound
+                }
+                newReference = PDFAnnotationReference(
+                    pageIndex: pageIndex,
+                    annotationIndex: annotationIndex
+                )
+            }
+            guard let createdReference = newReference else {
+                throw PDFAnnotationServiceError.annotationNotFound
+            }
+            freehandDrawingEnabled = false
+            if selectedPageIndex == pageIndex {
+                loadCanvasAnnotations()
+                selectedAnnotation = pageAnnotations.first {
+                    $0.reference == createdReference
+                }
+            } else {
+                pendingFreehandSelectionReference = createdReference
+                selectedPageIndex = pageIndex
+            }
+        } catch {
+            present(error)
+        }
     }
 
     private func loadAnnotations() {

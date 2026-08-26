@@ -65,14 +65,13 @@ struct AnnotationRoundTripValidation {
             bounds: CGRect(x: 80, y: 600, width: 220, height: 50),
             to: page
         )
-        _ = try service.addSignature(
-            strokes: [SignatureStroke(points: [
-                CGPoint(x: 0, y: 0.6),
-                CGPoint(x: 0.35, y: 0.2),
-                CGPoint(x: 0.7, y: 0.8),
-                CGPoint(x: 1, y: 0.3),
-            ])],
-            bounds: CGRect(x: 120, y: 450, width: 240, height: 90),
+        _ = try service.addInkStroke(
+            points: [
+                CGPoint(x: 120, y: 486),
+                CGPoint(x: 204, y: 522),
+                CGPoint(x: 288, y: 468),
+                CGPoint(x: 360, y: 513),
+            ],
             to: page
         )
         guard let pageText = page.string,
@@ -147,6 +146,11 @@ struct AnnotationRoundTripValidation {
         )
 
         let ink = snapshots[2]
+        try requireInkPathsInsideAnnotationBounds(
+            ink.reference,
+            in: document,
+            service: service
+        )
         let resizedBounds = CGRect(x: 160, y: 410, width: 300, height: 120)
         let expectedInk = try service.update(
             ink.reference,
@@ -158,6 +162,11 @@ struct AnnotationRoundTripValidation {
             in: document
         )
         precondition(expectedInk.geometryPointCount == ink.geometryPointCount)
+        try requireInkPathsInsideAnnotationBounds(
+            expectedInk.reference,
+            in: document,
+            service: service
+        )
         let markup = snapshots[3]
         let markupColor = PDFAnnotationColor(
             red: 0.16,
@@ -204,6 +213,43 @@ struct AnnotationRoundTripValidation {
         precondition(abs(snapshots[3].color.green - markupColor.green) < 0.01)
         precondition(abs(snapshots[3].color.blue - markupColor.blue) < 0.01)
 
-        print("Annotation round-trip validation passed (note, free text, ink, highlight geometry and style).")
+        let reopenedInk = try service.update(
+            snapshots[2].reference,
+            with: PDFAnnotationUpdate(color: .blue, lineWidth: 6),
+            in: reopened
+        )
+        guard let restyledData = reopened.dataRepresentation(),
+              let restyledDocument = PDFDocument(data: restyledData) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try service.verify(reopenedInk, in: restyledDocument)
+        try requireInkPathsInsideAnnotationBounds(
+            reopenedInk.reference,
+            in: restyledDocument,
+            service: service
+        )
+
+        print("Annotation round-trip validation passed (note, free text, freehand ink, highlight geometry and style).")
+    }
+
+    private static func requireInkPathsInsideAnnotationBounds(
+        _ reference: PDFAnnotationReference,
+        in document: PDFDocument,
+        service: PDFAnnotationService
+    ) throws {
+        let annotation = try service.resolve(reference, in: document).annotation
+        let localBounds = CGRect(origin: .zero, size: annotation.bounds.size)
+            .insetBy(dx: -0.05, dy: -0.05)
+        guard let paths = annotation.paths, !paths.isEmpty,
+              paths.allSatisfy({ localBounds.contains($0.bounds) }) else {
+            throw NSError(
+                domain: "AnnotationValidation",
+                code: 5,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Ink paths must use annotation-local coordinates inside \(localBounds)."
+                ]
+            )
+        }
     }
 }

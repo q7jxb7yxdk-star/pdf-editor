@@ -3,14 +3,17 @@ import CoreText
 import QuartzCore
 import SwiftUI
 
-private struct PDFHighlightActionBar: View {
+private struct PDFAnnotationActionBar: View {
     let annotation: PDFAnnotationSnapshot
     let onChangeColor: (PDFAnnotationColor) -> Void
+    let onChangeLineWidth: (CGFloat) -> Void
     let onDelete: () -> Void
 
     @State private var showsColorPicker = false
+    @State private var showsLineWidthPicker = false
 
     private let colorChoices: [(name: String, color: PDFAnnotationColor)] = [
+        ("Black", .black),
         ("Yellow", .yellow),
         ("Red", PDFAnnotationColor(red: 0.93, green: 0.18, blue: 0.18, alpha: 1)),
         ("Orange", PDFAnnotationColor(red: 1, green: 0.5, blue: 0.05, alpha: 1)),
@@ -19,6 +22,12 @@ private struct PDFHighlightActionBar: View {
         ("Indigo", PDFAnnotationColor(red: 0.29, green: 0.25, blue: 0.78, alpha: 1)),
         ("Purple", PDFAnnotationColor(red: 0.63, green: 0.25, blue: 0.82, alpha: 1)),
     ]
+    private let lineWidthChoices: [CGFloat] = [0.5, 1, 2, 4, 8, 12]
+#if os(macOS)
+    private let lineWidthChoiceHitTolerance: CGFloat = 12
+#else
+    private let lineWidthChoiceHitTolerance: CGFloat = 22
+#endif
 
     var body: some View {
         HStack(spacing: 6) {
@@ -33,7 +42,7 @@ private struct PDFHighlightActionBar: View {
             .buttonStyle(.plain)
             .help("Change color")
             .accessibilityLabel("Change color")
-            .accessibilityHint("Choose a new color for this highlight")
+            .accessibilityHint("Choose a new color for this annotation")
             .popover(isPresented: $showsColorPicker, arrowEdge: .bottom) {
                 HStack(spacing: 10) {
                     ForEach(availableColorChoices.indices, id: \.self) { index in
@@ -59,13 +68,60 @@ private struct PDFHighlightActionBar: View {
             Divider()
                 .frame(height: 18)
 
+            if annotation.kind == .ink {
+                Button {
+                    showsLineWidthPicker.toggle()
+                } label: {
+                    Image(systemName: "lineweight")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("Change line thickness")
+                .accessibilityLabel("Change line thickness")
+                .accessibilityHint("Choose a new thickness for this line")
+                .popover(isPresented: $showsLineWidthPicker, arrowEdge: .bottom) {
+                    HStack(spacing: 8) {
+                        ForEach(lineWidthChoices, id: \.self) { lineWidth in
+                            Button {
+                                showsLineWidthPicker = false
+                                onChangeLineWidth(lineWidth)
+                            } label: {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(
+                                            abs(lineWidth - annotation.lineWidth) < 0.01
+                                                ? Color.accentColor.opacity(0.14)
+                                                : Color.clear
+                                        )
+                                    Capsule()
+                                        .fill(.primary)
+                                        .frame(width: 30, height: max(1, min(lineWidth, 10)))
+                                }
+                                .frame(width: 38, height: 32)
+                                .contentShape(
+                                    Rectangle().inset(by: -lineWidthChoiceHitTolerance)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("\(lineWidth.formatted()) pt")
+                            .accessibilityLabel("\(lineWidth.formatted()) point line")
+                        }
+                    }
+                    .padding(10)
+                    .presentationCompactAdaptation(.popover)
+                }
+
+                Divider()
+                    .frame(height: 18)
+            }
+
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")
                     .frame(width: 18, height: 18)
             }
             .help("Delete")
             .accessibilityLabel("Delete")
-            .accessibilityHint("Delete this highlight")
+            .accessibilityHint("Delete this annotation")
         }
         .controlSize(.small)
         .padding(.horizontal, 8)
@@ -87,7 +143,10 @@ private struct PDFHighlightActionBar: View {
     }
 
     private var availableColorChoices: [(name: String, color: PDFAnnotationColor)] {
-        colorChoices.filter { !approximatelySameRGB(annotation.color, $0.color) }
+        colorChoices.filter { choice in
+            (annotation.kind == .ink || choice.name != "Black") &&
+                !approximatelySameRGB(annotation.color, choice.color)
+        }
     }
 
     private func approximatelySameRGB(
@@ -103,7 +162,7 @@ private struct PDFHighlightActionBar: View {
 #if os(macOS)
 import AppKit
 
-private final class PDFHighlightActionContainerView: NSView {}
+private final class PDFAnnotationActionContainerView: NSView {}
 
 private protocol PDFInteractionMouseHandling: AnyObject {
     func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
@@ -135,7 +194,7 @@ private final class PDFInteractionPDFView: PDFView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let defaultHit = super.hitTest(point)
-        if defaultHit?.isInsideHighlightActionBar == true {
+        if defaultHit?.isInsideAnnotationActionBar == true {
             return defaultHit
         }
         guard NSApp.currentEvent?.type == .leftMouseDown else {
@@ -206,10 +265,10 @@ private final class PDFInteractionPDFView: PDFView {
 }
 
 private extension NSView {
-    var isInsideHighlightActionBar: Bool {
+    var isInsideAnnotationActionBar: Bool {
         var candidate: NSView? = self
         while let view = candidate {
-            if view is PDFHighlightActionContainerView { return true }
+            if view is PDFAnnotationActionContainerView { return true }
             candidate = view.superview
         }
         return false
@@ -309,6 +368,8 @@ struct PDFKitView: NSViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let freehandDrawingEnabled: Bool
+    let onAddFreehand: (Int, [CGPoint]) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
     let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
@@ -373,6 +434,8 @@ struct PDFKitView: UIViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let freehandDrawingEnabled: Bool
+    let onAddFreehand: (Int, [CGPoint]) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
     let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
@@ -419,6 +482,8 @@ private extension PDFKitView {
             onSetAnnotationBounds: onSetAnnotationBounds,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
+            freehandDrawingEnabled: freehandDrawingEnabled,
+            onAddFreehand: onAddFreehand,
             onReplaceTextObject: onReplaceTextObject,
             onReplaceAnnotationText: onReplaceAnnotationText,
             onUpdateAnnotation: onUpdateAnnotation,
@@ -472,6 +537,8 @@ private extension PDFKitView {
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
+        coordinator.freehandDrawingEnabled = freehandDrawingEnabled
+        coordinator.onAddFreehand = onAddFreehand
         coordinator.onReplaceTextObject = onReplaceTextObject
         coordinator.onReplaceAnnotationText = onReplaceAnnotationText
         coordinator.onUpdateAnnotation = onUpdateAnnotation
@@ -579,6 +646,14 @@ extension PDFKitView {
             }
         }
         var onPlaceComment: (Int, CGPoint) -> Void
+        var freehandDrawingEnabled: Bool {
+            didSet {
+                guard oldValue != freehandDrawingEnabled else { return }
+                if !freehandDrawingEnabled { cancelFreehandDrawing() }
+                updateGestureAvailability()
+            }
+        }
+        var onAddFreehand: (Int, [CGPoint]) -> Void
         var onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
         var onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
         var onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
@@ -591,6 +666,7 @@ extension PDFKitView {
         private weak var pdfView: PDFView?
         private var observers: [NSObjectProtocol] = []
         private let outlineLayer = CAShapeLayer()
+        private let freehandPreviewLayer = CAShapeLayer()
         private var handleLayers: [CAShapeLayer] = []
         private var interactionObject: PDFPageObjectSnapshot?
         private var interactionAnnotation: PDFAnnotationSnapshot?
@@ -609,6 +685,11 @@ extension PDFKitView {
         }
         private var pendingTextActivation: PendingTextActivation?
         private var hoveredCommentReference: PDFAnnotationReference?
+        private weak var freehandGesture: AnyObject?
+        private var freehandPage: PDFPage?
+        private var freehandPageIndex: Int?
+        private var freehandPagePoints: [CGPoint] = []
+        private var freehandViewPoints: [CGPoint] = []
 
 #if os(macOS)
         private struct InlineTextStyle {
@@ -668,8 +749,8 @@ extension PDFKitView {
         private var inlineEditingTextStyle: InlineTextStyle?
         private var inlineEditingPDFStyle: PDFTextStyle = []
         private var inlineStyleBar: NSStackView?
-        private var highlightActionContainer: PDFHighlightActionContainerView?
-        private var highlightActionHost: NSHostingView<PDFHighlightActionBar>?
+        private var annotationActionContainer: PDFAnnotationActionContainerView?
+        private var annotationActionHost: NSHostingView<PDFAnnotationActionBar>?
         private var stagedTextByObjectID: [String: StagedTextEdit] = [:]
         private var stagedTextStylesByObjectID: [String: InlineTextStyle] = [:]
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
@@ -690,8 +771,8 @@ extension PDFKitView {
         private var transientStagedTextFallback: TransientStagedTextFallback?
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
-        private var highlightActionContainer: UIView?
-        private var highlightActionHostingController: UIHostingController<PDFHighlightActionBar>?
+        private var annotationActionContainer: UIView?
+        private var annotationActionHostingController: UIHostingController<PDFAnnotationActionBar>?
         private var inlineTextField: UITextField?
         private var inlineEditingBaseFont: UIFont?
         private var inlineEditingPDFStyle: PDFTextStyle = []
@@ -718,6 +799,8 @@ extension PDFKitView {
             onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
+            freehandDrawingEnabled: Bool,
+            onAddFreehand: @escaping (Int, [CGPoint]) -> Void,
             onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void,
             onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String) -> Void,
             onUpdateAnnotation: @escaping (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void,
@@ -739,6 +822,8 @@ extension PDFKitView {
             self.onSetAnnotationBounds = onSetAnnotationBounds
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
+            self.freehandDrawingEnabled = freehandDrawingEnabled
+            self.onAddFreehand = onAddFreehand
             self.onReplaceTextObject = onReplaceTextObject
             self.onReplaceAnnotationText = onReplaceAnnotationText
             self.onUpdateAnnotation = onUpdateAnnotation
@@ -757,10 +842,12 @@ extension PDFKitView {
             pdfView.wantsLayer = true
             pdfView.layer?.addSublayer(outlineLayer)
             handleLayers.forEach { pdfView.layer?.addSublayer($0) }
+            pdfView.layer?.addSublayer(freehandPreviewLayer)
             synchronizeStagedTextEdits()
 #else
             pdfView.layer.addSublayer(outlineLayer)
             handleLayers.forEach { pdfView.layer.addSublayer($0) }
+            pdfView.layer.addSublayer(freehandPreviewLayer)
 #endif
             installGestures(on: pdfView)
 
@@ -850,7 +937,8 @@ extension PDFKitView {
 #endif
             outlineLayer.removeFromSuperlayer()
             handleLayers.forEach { $0.removeFromSuperlayer() }
-            removeHighlightActionBar()
+            freehandPreviewLayer.removeFromSuperlayer()
+            removeAnnotationActionBar()
             if let pdfView {
 #if os(macOS)
                 closeCommentPopover()
@@ -960,7 +1048,7 @@ extension PDFKitView {
                 layer.path = CGPath(ellipseIn: layer.bounds, transform: nil)
             }
             CATransaction.commit()
-            updateHighlightActionBar(
+            updateAnnotationActionBar(
                 for: selectedAnnotation.wrappedValue,
                 above: displayBounds,
                 in: pdfView
@@ -999,6 +1087,13 @@ extension PDFKitView {
             outlineLayer.lineWidth = 2
             outlineLayer.lineDashPattern = [6, 4]
             outlineLayer.zPosition = 10_000
+            freehandPreviewLayer.strokeColor = CGColor(gray: 0.05, alpha: 1)
+            freehandPreviewLayer.fillColor = nil
+            freehandPreviewLayer.lineWidth = 2
+            freehandPreviewLayer.lineCap = .round
+            freehandPreviewLayer.lineJoin = .round
+            freehandPreviewLayer.zPosition = 10_002
+            freehandPreviewLayer.isHidden = true
             handleLayers = (0..<4).map { _ in
                 let layer = CAShapeLayer()
                 layer.fillColor = accent
@@ -1013,25 +1108,32 @@ extension PDFKitView {
         private func setOverlayHidden(_ hidden: Bool) {
             outlineLayer.isHidden = hidden
             handleLayers.forEach { $0.isHidden = hidden }
-            if hidden { removeHighlightActionBar() }
+            if hidden { removeAnnotationActionBar() }
         }
 
-        private func updateHighlightActionBar(
+        private func updateAnnotationActionBar(
             for annotation: PDFAnnotationSnapshot?,
-            above highlightBounds: CGRect,
+            above annotationBounds: CGRect,
             in pdfView: PDFView
         ) {
-            guard let annotation, annotation.kind == .highlight else {
-                removeHighlightActionBar()
+            guard let annotation,
+                  annotation.kind == .highlight || annotation.kind == .ink else {
+                removeAnnotationActionBar()
                 return
             }
 
-            let actionBar = PDFHighlightActionBar(
+            let actionBar = PDFAnnotationActionBar(
                 annotation: annotation,
                 onChangeColor: { [weak self] color in
                     self?.onUpdateAnnotation(
                         annotation,
                         PDFAnnotationUpdate(color: color)
+                    )
+                },
+                onChangeLineWidth: { [weak self] lineWidth in
+                    self?.onUpdateAnnotation(
+                        annotation,
+                        PDFAnnotationUpdate(lineWidth: lineWidth)
                     )
                 },
                 onDelete: { [weak self] in
@@ -1040,29 +1142,29 @@ extension PDFKitView {
             )
 
 #if os(macOS)
-            let container: PDFHighlightActionContainerView
-            let host: NSHostingView<PDFHighlightActionBar>
-            if let existingContainer = highlightActionContainer,
-               let existingHost = highlightActionHost {
+            let container: PDFAnnotationActionContainerView
+            let host: NSHostingView<PDFAnnotationActionBar>
+            if let existingContainer = annotationActionContainer,
+               let existingHost = annotationActionHost {
                 container = existingContainer
                 host = existingHost
                 host.rootView = actionBar
             } else {
-                container = PDFHighlightActionContainerView(frame: .zero)
+                container = PDFAnnotationActionContainerView(frame: .zero)
                 host = NSHostingView(rootView: actionBar)
                 container.addSubview(host)
                 pdfView.addSubview(container)
-                highlightActionContainer = container
-                highlightActionHost = host
+                annotationActionContainer = container
+                annotationActionHost = host
             }
             let fittingSize = host.fittingSize
             let size = CGSize(width: max(fittingSize.width, 150), height: max(fittingSize.height, 32))
             host.frame = CGRect(origin: .zero, size: size)
 #else
             let container: UIView
-            let hostingController: UIHostingController<PDFHighlightActionBar>
-            if let existingContainer = highlightActionContainer,
-               let existingController = highlightActionHostingController {
+            let hostingController: UIHostingController<PDFAnnotationActionBar>
+            if let existingContainer = annotationActionContainer,
+               let existingController = annotationActionHostingController {
                 container = existingContainer
                 hostingController = existingController
                 hostingController.rootView = actionBar
@@ -1073,8 +1175,8 @@ extension PDFKitView {
                 hostingController.view.backgroundColor = .clear
                 container.addSubview(hostingController.view)
                 pdfView.addSubview(container)
-                highlightActionContainer = container
-                highlightActionHostingController = hostingController
+                annotationActionContainer = container
+                annotationActionHostingController = hostingController
             }
             let fittingSize = hostingController.sizeThatFits(
                 in: CGSize(width: 320, height: 80)
@@ -1087,31 +1189,31 @@ extension PDFKitView {
             let spacing: CGFloat = 8
             let availableBounds = pdfView.bounds.insetBy(dx: horizontalInset, dy: horizontalInset)
             let originX = min(
-                max(highlightBounds.midX - size.width / 2, availableBounds.minX),
+                max(annotationBounds.midX - size.width / 2, availableBounds.minX),
                 max(availableBounds.minX, availableBounds.maxX - size.width)
             )
 #if os(macOS)
             let preferredY: CGFloat
             if pdfView.isFlipped {
-                let aboveY = highlightBounds.minY - size.height - spacing
+                let aboveY = annotationBounds.minY - size.height - spacing
                 preferredY = aboveY >= availableBounds.minY
                     ? aboveY
-                    : highlightBounds.maxY + spacing
+                    : annotationBounds.maxY + spacing
             } else {
-                let aboveY = highlightBounds.maxY + spacing
+                let aboveY = annotationBounds.maxY + spacing
                 preferredY = aboveY + size.height <= availableBounds.maxY
                     ? aboveY
-                    : highlightBounds.minY - size.height - spacing
+                    : annotationBounds.minY - size.height - spacing
             }
             let originY = min(
                 max(preferredY, availableBounds.minY),
                 max(availableBounds.minY, availableBounds.maxY - size.height)
             )
 #else
-            let aboveY = highlightBounds.minY - size.height - spacing
+            let aboveY = annotationBounds.minY - size.height - spacing
             let preferredY = aboveY >= availableBounds.minY
                 ? aboveY
-                : highlightBounds.maxY + spacing
+                : annotationBounds.maxY + spacing
             let originY = min(
                 max(preferredY, availableBounds.minY),
                 max(availableBounds.minY, availableBounds.maxY - size.height)
@@ -1126,16 +1228,16 @@ extension PDFKitView {
 #endif
         }
 
-        private func removeHighlightActionBar() {
+        private func removeAnnotationActionBar() {
 #if os(macOS)
-            highlightActionContainer?.removeFromSuperview()
-            highlightActionContainer = nil
-            highlightActionHost = nil
+            annotationActionContainer?.removeFromSuperview()
+            annotationActionContainer = nil
+            annotationActionHost = nil
 #else
-            highlightActionHostingController?.view.removeFromSuperview()
-            highlightActionHostingController = nil
-            highlightActionContainer?.removeFromSuperview()
-            highlightActionContainer = nil
+            annotationActionHostingController?.view.removeFromSuperview()
+            annotationActionHostingController = nil
+            annotationActionContainer?.removeFromSuperview()
+            annotationActionContainer = nil
 #endif
         }
 
@@ -1146,7 +1248,11 @@ extension PDFKitView {
             let hasSelectedAnnotation = annotationEditingEnabled &&
                 selectedAnnotation.wrappedValue != nil
             for gesture in gestures {
-                if gesture is NSRotationGestureRecognizer {
+                if gesture === freehandGesture {
+                    gesture.isEnabled = freehandDrawingEnabled
+                } else if freehandDrawingEnabled {
+                    gesture.isEnabled = false
+                } else if gesture is NSRotationGestureRecognizer {
                     gesture.isEnabled = hasSelectedObject && !hasSelectedAnnotation
                 } else if gesture is NSMagnificationGestureRecognizer {
                     gesture.isEnabled = hasSelectedObject || hasSelectedAnnotation
@@ -1156,7 +1262,11 @@ extension PDFKitView {
             }
 #else
             for gesture in gestures {
-                if gesture is UITapGestureRecognizer {
+                if gesture === freehandGesture {
+                    gesture.isEnabled = freehandDrawingEnabled
+                } else if freehandDrawingEnabled {
+                    gesture.isEnabled = false
+                } else if gesture is UITapGestureRecognizer {
                     gesture.isEnabled = commentPlacementEnabled ||
                         objectEditingEnabled || annotationEditingEnabled
                 } else {
@@ -1165,6 +1275,83 @@ extension PDFKitView {
             }
 #endif
             scheduleOverlayRefresh()
+        }
+
+        private func beginFreehandDrawing(at viewPoint: CGPoint) {
+            guard freehandDrawingEnabled,
+                  let pdfView,
+                  let document = pdfView.document,
+                  let page = pdfView.page(for: viewPoint, nearest: false) else {
+                cancelFreehandDrawing()
+                return
+            }
+            let pageIndex = document.index(for: page)
+            guard pageIndex != NSNotFound else {
+                cancelFreehandDrawing()
+                return
+            }
+
+            finishInlineTextEditing(commit: true)
+            selectedObject.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            pdfView.clearSelection()
+            selection.wrappedValue = nil
+            setOverlayHidden(true)
+
+            freehandPage = page
+            freehandPageIndex = pageIndex
+            freehandPagePoints = [pdfView.convert(viewPoint, to: page)]
+            freehandViewPoints = [viewPoint]
+            updateFreehandPreview()
+        }
+
+        private func appendFreehandPoint(_ viewPoint: CGPoint) {
+            guard let pdfView, let page = freehandPage,
+                  pdfView.page(for: viewPoint, nearest: false) === page else { return }
+            if let previous = freehandViewPoints.last,
+               hypot(viewPoint.x - previous.x, viewPoint.y - previous.y) < 0.5 {
+                return
+            }
+            freehandViewPoints.append(viewPoint)
+            freehandPagePoints.append(pdfView.convert(viewPoint, to: page))
+            updateFreehandPreview()
+        }
+
+        private func finishFreehandDrawing(at viewPoint: CGPoint) {
+            appendFreehandPoint(viewPoint)
+            let pageIndex = freehandPageIndex
+            let points = freehandPagePoints
+            cancelFreehandDrawing()
+            guard let pageIndex, points.count > 1 else { return }
+            onAddFreehand(pageIndex, points)
+        }
+
+        private func cancelFreehandDrawing() {
+            freehandPage = nil
+            freehandPageIndex = nil
+            freehandPagePoints.removeAll()
+            freehandViewPoints.removeAll()
+            freehandPreviewLayer.path = nil
+            freehandPreviewLayer.isHidden = true
+        }
+
+        private func updateFreehandPreview() {
+            guard let first = freehandViewPoints.first else {
+                freehandPreviewLayer.path = nil
+                freehandPreviewLayer.isHidden = true
+                return
+            }
+            let path = CGMutablePath()
+            path.move(to: first)
+            for point in freehandViewPoints.dropFirst() {
+                path.addLine(to: point)
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            freehandPreviewLayer.frame = pdfView?.bounds ?? .zero
+            freehandPreviewLayer.path = path
+            freehandPreviewLayer.isHidden = false
+            CATransaction.commit()
         }
 
         private func selectTarget(at viewPoint: CGPoint) {
@@ -2916,10 +3103,19 @@ extension PDFKitView {
             at pagePoint: CGPoint,
             pageIndex: Int
         ) -> PDFAnnotationSnapshot? {
-            annotations
+            let scaleFactor = max(pdfView?.scaleFactor ?? 1, 0.01)
+#if os(macOS)
+            let minimumInkHitPaddingInViewPoints: CGFloat = 12
+#else
+            let minimumInkHitPaddingInViewPoints: CGFloat = 22
+#endif
+            return annotations
                 .filter {
-                    $0.reference.pageIndex == pageIndex &&
-                    $0.bounds.insetBy(dx: -8, dy: -8).contains(pagePoint)
+                    guard $0.reference.pageIndex == pageIndex else { return false }
+                    let padding = $0.kind == .ink
+                        ? max(8, minimumInkHitPaddingInViewPoints / scaleFactor)
+                        : 8
+                    return $0.bounds.insetBy(dx: -padding, dy: -padding).contains(pagePoint)
                 }
                 .min { lhs, rhs in
                     lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
@@ -3108,12 +3304,17 @@ extension PDFKitView {
 #if os(macOS)
         private func installGestures(on pdfView: PDFView) {
             let pan = NSPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            let freehandPan = NSPanGestureRecognizer(
+                target: self,
+                action: #selector(handleFreehandPan(_:))
+            )
             let magnify = NSMagnificationGestureRecognizer(
                 target: self,
                 action: #selector(handleMagnification(_:))
             )
             let rotate = NSRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
-            gestures = [pan, magnify, rotate]
+            freehandGesture = freehandPan
+            gestures = [pan, magnify, rotate, freehandPan]
             gestures.forEach { $0.delegate = self }
             gestures.forEach(pdfView.addGestureRecognizer)
         }
@@ -3132,6 +3333,28 @@ extension PDFKitView {
             case .ended: updatePan(at: point, finished: true)
             case .cancelled: clearInteraction(); refreshOverlay()
             default: break
+            }
+        }
+
+        @objc private func handleFreehandPan(_ recognizer: NSPanGestureRecognizer) {
+            guard let pdfView else { return }
+            let point = recognizer.location(in: pdfView)
+            switch recognizer.state {
+            case .began:
+                let translation = recognizer.translation(in: pdfView)
+                beginFreehandDrawing(at: CGPoint(
+                    x: point.x - translation.x,
+                    y: point.y - translation.y
+                ))
+                appendFreehandPoint(point)
+            case .changed:
+                appendFreehandPoint(point)
+            case .ended:
+                finishFreehandDrawing(at: point)
+            case .cancelled, .failed:
+                cancelFreehandDrawing()
+            default:
+                break
             }
         }
 
@@ -3164,9 +3387,14 @@ extension PDFKitView {
             doubleTap.numberOfTapsRequired = 2
             tap.require(toFail: doubleTap)
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            let freehandPan = UIPanGestureRecognizer(
+                target: self,
+                action: #selector(handleFreehandPan(_:))
+            )
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
             let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
-            gestures = [tap, doubleTap, pan, pinch, rotate]
+            freehandGesture = freehandPan
+            gestures = [tap, doubleTap, pan, pinch, rotate, freehandPan]
             gestures.forEach {
                 $0.delegate = self
                 pdfView.addGestureRecognizer($0)
@@ -3197,6 +3425,28 @@ extension PDFKitView {
             case .ended: updatePan(at: point, finished: true)
             case .cancelled: clearInteraction(); refreshOverlay()
             default: break
+            }
+        }
+
+        @objc private func handleFreehandPan(_ recognizer: UIPanGestureRecognizer) {
+            guard let pdfView else { return }
+            let point = recognizer.location(in: pdfView)
+            switch recognizer.state {
+            case .began:
+                let translation = recognizer.translation(in: pdfView)
+                beginFreehandDrawing(at: CGPoint(
+                    x: point.x - translation.x,
+                    y: point.y - translation.y
+                ))
+                appendFreehandPoint(point)
+            case .changed:
+                appendFreehandPoint(point)
+            case .ended:
+                finishFreehandDrawing(at: point)
+            case .cancelled, .failed:
+                cancelFreehandDrawing()
+            default:
+                break
             }
         }
 
@@ -3416,6 +3666,9 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     }
 
     func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
+        if freehandDrawingEnabled {
+            return pdfView.page(for: viewPoint, nearest: false) != nil
+        }
         if inlineTextField != nil {
             return !inlineEditorContains(viewPoint)
         }
@@ -3429,6 +3682,10 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
               let document = pdfView.document else { return false }
         let pageIndex = document.index(for: page)
         let pagePoint = pdfView.convert(viewPoint, to: page)
+
+        if freehandDrawingEnabled {
+            return true
+        }
         if commentPlacementEnabled {
             return true
         }
@@ -3548,6 +3805,11 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
         at viewPoint: CGPoint,
         in pdfView: PDFView
     ) -> Bool {
+        if gestureRecognizer === freehandGesture {
+            return freehandDrawingEnabled &&
+                pdfView.page(for: viewPoint, nearest: false) != nil
+        }
+        if freehandDrawingEnabled { return false }
         if gestureRecognizer is NSRotationGestureRecognizer {
             return objectEditingEnabled &&
                 selectedObject.wrappedValue != nil &&
@@ -3650,9 +3912,9 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelega
         shouldReceive touch: UITouch
     ) -> Bool {
         guard let touchedView = touch.view else { return true }
-        if let highlightActionContainer,
-           touchedView === highlightActionContainer ||
-            touchedView.isDescendant(of: highlightActionContainer) {
+        if let annotationActionContainer,
+           touchedView === annotationActionContainer ||
+            touchedView.isDescendant(of: annotationActionContainer) {
             return false
         }
         guard let inlineTextField else { return true }
@@ -3660,6 +3922,14 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelega
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === freehandGesture {
+            guard freehandDrawingEnabled, let pdfView else { return false }
+            return pdfView.page(
+                for: gestureRecognizer.location(in: pdfView),
+                nearest: false
+            ) != nil
+        }
+        if freehandDrawingEnabled { return false }
         if gestureRecognizer is UITapGestureRecognizer {
             return commentPlacementEnabled || objectEditingEnabled || annotationEditingEnabled
         }
