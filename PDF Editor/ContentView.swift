@@ -983,17 +983,23 @@ struct ContentView: View {
             pageObjectCache.removeAll()
             pageObjectCacheRevision = revision
         }
-        pageObjects = pageObjectCache[index] ?? []
+        let cachedObjects = pageObjectCache[index]
+        pageObjects = cachedObjects ?? []
 
         pageObjectLoadTask = Task { @MainActor in
             do {
-                let objects = try await document.pageObjectsForDisplay(at: index)
+                if cachedObjects == nil {
+                    let objects = try await document.pageObjectsForDisplay(at: index)
+                    try Task.checkCancellation()
+                    guard selectedPageIndex == index,
+                          editorState.revision == revision else { return }
+                    pageObjectCache[index] = objects
+                    pageObjects = objects
+                }
+
                 try Task.checkCancellation()
                 guard selectedPageIndex == index,
                       editorState.revision == revision else { return }
-                pageObjectCache[index] = objects
-                pageObjects = objects
-
                 let nextIndex = index + 1
                 guard nextIndex < document.pageCount,
                       pageObjectCache[nextIndex] == nil else { return }

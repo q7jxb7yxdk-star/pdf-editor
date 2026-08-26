@@ -168,16 +168,18 @@ final class PDFEditorDocument: ReferenceFileDocument {
     func pageObjectsForDisplay(at pageIndex: Int) async throws -> [PDFPageObjectSnapshot] {
         let data = sourceData
         let password = authorizedPassword
-        return try await Task.detached(priority: .userInitiated) {
-            try Task.checkCancellation()
-            let objects = try Self.inspectPageObjects(
+        let inspectionTask = Task.detached(priority: .userInitiated) {
+            try Self.inspectPageObjects(
                 data: data,
                 password: password,
                 pageIndex: pageIndex
             )
-            try Task.checkCancellation()
-            return objects
-        }.value
+        }
+        return try await withTaskCancellationHandler(operation: {
+            try await inspectionTask.value
+        }, onCancel: {
+            inspectionTask.cancel()
+        })
     }
 
     nonisolated private static func inspectPageObjects(
@@ -185,8 +187,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
         password: String?,
         pageIndex: Int
     ) throws -> [PDFPageObjectSnapshot] {
-        pdfiumAccessLock.lock()
+        try acquirePDFiumAccessLockForDisplay()
         defer { pdfiumAccessLock.unlock() }
+        try Task.checkCancellation()
         let session = try PDFiumEditingEngine().makeSession(
             data: data,
             password: password
@@ -194,7 +197,23 @@ final class PDFEditorDocument: ReferenceFileDocument {
         guard let objectSession = session as? any PDFObjectEditingSession else {
             throw PDFObjectEditingError.objectInspectionFailed
         }
-        return try objectSession.displayObjects(onPage: pageIndex)
+        let objects = try objectSession.displayObjects(onPage: pageIndex)
+        try Task.checkCancellation()
+        return objects
+    }
+
+    /// Waits for the shared PDFium runtime without pinning cancelled display work
+    /// behind an older page scan. This synchronous helper is called only from the
+    /// detached inspector, so acquisition and release stay on the same thread.
+    nonisolated private static func acquirePDFiumAccessLockForDisplay() throws {
+        while !pdfiumAccessLock.try() {
+            try Task.checkCancellation()
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        if Task.isCancelled {
+            pdfiumAccessLock.unlock()
+            throw CancellationError()
+        }
     }
 
     func replaceText(
@@ -480,19 +499,20 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFAnnotationServiceError.annotationNotFound
         }
         var snapshots = PDFAnnotationService().snapshots(on: page, pageIndex: pageIndex)
-        if let annotationSession = editingSession as? any PDFAnnotationEditingSession {
-            Self.pdfiumAccessLock.lock()
-            defer { Self.pdfiumAccessLock.unlock() }
-            for index in snapshots.indices {
-                let reference = snapshots[index].reference
-                if let color = try? annotationSession.annotationColor(
-                    pageIndex: reference.pageIndex,
-                    annotationIndex: reference.annotationIndex
-                ) {
-                    snapshots[index].color = color
-                    if snapshots[index].fontColor != nil {
-                        snapshots[index].fontColor?.alpha = color.alpha
-                    }
+        guard let annotationSession = editingSession as? any PDFAnnotationEditingSession,
+              Self.pdfiumAccessLock.try() else {
+            return snapshots
+        }
+        defer { Self.pdfiumAccessLock.unlock() }
+        for index in snapshots.indices {
+            let reference = snapshots[index].reference
+            if let color = try? annotationSession.annotationColor(
+                pageIndex: reference.pageIndex,
+                annotationIndex: reference.annotationIndex
+            ) {
+                snapshots[index].color = color
+                if snapshots[index].fontColor != nil {
+                    snapshots[index].fontColor?.alpha = color.alpha
                 }
             }
         }

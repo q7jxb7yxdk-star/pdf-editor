@@ -119,7 +119,7 @@ There is protocol-based engine separation, but no application-level dependency-i
 1. SwiftUI supplies file bytes to `PDFEditorDocument.init(configuration:)`.
 2. PDFKit first validates that the bytes form a PDF.
 3. An unlocked document initially keeps only its source bytes and PDFKit document; its mutation session is created lazily on the first operation that requires it. A locked document retains source bytes and creates the session only after a valid password is supplied.
-4. `ContentView` immediately displays `PDFEditorDocument.pdfDocument` in `PDFKitView`. Page-object inspection runs on an independent background PDFium handle, caches the current page, and then prefetches the next page without blocking PDFKit presentation or scrolling.
+4. `ContentView` immediately displays `PDFEditorDocument.pdfDocument` in `PDFKitView`. Page-object inspection runs on an independent background PDFium handle. A cache hit for the selected page is used without rescanning; a cache miss scans that page first, then the same revision-scoped task prefetches at most the next page without blocking PDFKit presentation or scrolling.
 5. A mutation passes through `PDFEditorDocument.mutate`:
    - serialize and retain the current bytes;
    - reject the mutation when signature objects exist and consent has not been granted;
@@ -281,7 +281,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. `PDFRightPanel` binds to `selectedPageIndex`, derives one-based display values, and keeps a local numeric text-field draft. Valid input selects the matching page immediately, submit or focus loss clamps an invalid range to the document bounds, and PDFKit-originated page changes refresh the field while it is not focused. The page-number field and total-page display each occupy a 44-point-high rail slot; Previous page and Next page are separate 44-point buttons and disable at their respective boundaries. Direct object and annotation selection remain continuously available outside comment placement. This state is neither persisted nor versioned by application code.
+`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. `PDFRightPanel` binds to `selectedPageIndex`, derives one-based display values, and keeps a local numeric text-field draft. Valid input selects the matching page immediately, submit or focus loss clamps an invalid range to the document bounds, and PDFKit-originated page changes refresh the field while it is not focused. The page-number field and total-page display each occupy a 44-point-high rail slot; Previous page and Next page are separate 44-point buttons and disable at their respective boundaries. Direct object and annotation selection remain continuously available outside comment placement. This state is transient except for the `PDFToolSidebar` disclosure state: it is restored from app preferences, rather than from a document or a live view instance.
 
 ### Persistence and storage boundaries
 
@@ -289,7 +289,8 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 - Existing PDFs are written only by an explicit Save through coordinated atomic replacement. A new document's first Save uses a SwiftUI file exporter, after which later Saves target the selected URL.
 - Committed document mutations use complete serialized PDF `Data` snapshots for Undo/Redo. Pending inline replacements use value-level store actions until Save applies them.
 - Passwords and pending protected-merge bytes are held in memory for the active view/document.
-- No database, cache directory, UserDefaults schema, Keychain item, cloud state, migration, or application data-version field exists.
+- `PDFToolSidebar` stores its six disclosure titles in bundle `UserDefaults` under the versioned `com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1` key. The value is a `[String]` because `Set<String>` cannot be stored directly with `@AppStorage`; unrecognized titles are discarded on load. With no value for this key, all six sections initially expand. This app-scoped preference survives closing/reopening Tools, changing documents, and app relaunches; it is not PDF document state.
+- No database, cache directory, Keychain item, cloud state, migration, or application data-version field exists.
 - The bundled PDFium and font are immutable app resources from the application's perspective.
 
 ## 7. Important logic and edge cases
@@ -327,8 +328,9 @@ ImageIO enforces an 8,192-pixel thumbnail cap, but memory use can still be mater
 
 - Batch OCR and background page-object inspection are explicit long-running task paths.
 - Starting a batch cancels the previous batch; disappearance also cancels it.
-- Changing page cancels the prior object-load task, rejects results whose page or document revision is stale, caches the requested page, and prefetches at most the next page. Cancellation cannot interrupt a native PDFium call already executing, so stale native work may finish but its result is discarded.
-- PDFium access is serialized across background inspection and foreground mutation because the library is not treated as thread-safe.
+- Changing page cancels the prior object-load task, rejects results whose page or document revision is stale, reuses the requested page when it is already cached, and prefetches at most the next page on a miss. Cancellation cannot interrupt a native PDFium call already executing, so stale native work may finish but its result is discarded; it does prevent a stale scan waiting for the process-wide lock from starting.
+- `pageObjectsForDisplay` passes cancellation into its detached inspection task. The detached inspector uses a cancellable try-lock polling loop, then keeps lock acquisition, the native PDFium scan, and unlock on that same detached thread; it does not hand the lock across task boundaries. PDFium access is serialized across background inspection and foreground mutation because the library is not treated as thread-safe.
+- `annotationSnapshots(onPage:)` always obtains the PDFKit snapshot first. If the PDFium lock is busy, it returns that baseline immediately rather than making the main thread wait; PDFium-provided annotation color correction can therefore be temporarily omitted.
 - The source `PDFDocument` is passed to sequential recognition and the document is mutated only after review.
 - There is no document revision token between recognition and insertion. The insertion path mitigates staleness by validating page indices, rejecting duplicate pages, and refusing pages that now contain selectable text, but it does not prove that page ordering or rendered content is unchanged.
 
@@ -598,6 +600,12 @@ Additional validation completed on 2026-08-25 after adding direct page navigatio
 - Debug generic iOS Simulator build: succeeded with `CODE_SIGNING_ALLOWED=NO` and isolated DerivedData under `/tmp/PDFEditorRightPanel-ios`.
 - `git diff --check`: passed.
 - Exact 44-point sizing, post-Zoom-out placement, text-field focus behavior, button appearance, and runtime synchronization with PDFKit remain manual UI checks.
+
+Additional validation completed on 2026-08-26 after the rapid-scroll background-inspection fix:
+
+- Unsigned Debug macOS and generic iOS Simulator builds succeeded with `CODE_SIGNING_ALLOWED=NO`.
+- `git diff --check`: passed.
+- Rapid dragging of the scroll bar remains a manual macOS UI check; these builds do not establish scrolling behavior or visual responsiveness.
 
 The builds establish compilation and bundle construction for those destinations. They do not establish successful app launch, UI behavior, sandbox enforcement, signing, installation, or document workflow correctness.
 

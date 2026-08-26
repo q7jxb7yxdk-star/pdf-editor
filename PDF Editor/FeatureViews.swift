@@ -35,12 +35,35 @@ enum PDFToolAction {
 }
 
 struct PDFToolSidebar: View {
+    private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
+    private static let sectionTitles: Set<String> = [
+        "Edit text",
+        "Edit pages",
+        "Organize a PDF",
+        "Export PDF to",
+        "E-sign",
+        "Secure PDF"
+    ]
+
     let pageCount: Int
     let hasSelectedPage: Bool
     let hasTextSelection: Bool
     let onAction: (PDFToolAction) -> Void
 
-    @State private var expandedSections: Set<String> = ["Edit text", "Edit pages"]
+    @State private var expandedSections: Set<String>
+
+    init(
+        pageCount: Int,
+        hasSelectedPage: Bool,
+        hasTextSelection: Bool,
+        onAction: @escaping (PDFToolAction) -> Void
+    ) {
+        self.pageCount = pageCount
+        self.hasSelectedPage = hasSelectedPage
+        self.hasTextSelection = hasTextSelection
+        self.onAction = onAction
+        _expandedSections = State(initialValue: Self.loadExpandedSections())
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -130,6 +153,7 @@ struct PDFToolSidebar: View {
             set: { expanded in
                 if expanded { expandedSections.insert(title) }
                 else { expandedSections.remove(title) }
+                saveExpandedSections()
             }
         )
         return DisclosureGroup(isExpanded: isExpanded) {
@@ -143,6 +167,17 @@ struct PDFToolSidebar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private static func loadExpandedSections() -> Set<String> {
+        guard let storedTitles = UserDefaults.standard.array(forKey: expandedSectionsDefaultsKey) as? [String] else {
+            return sectionTitles
+        }
+        return Set(storedTitles).intersection(sectionTitles)
+    }
+
+    private func saveExpandedSections() {
+        UserDefaults.standard.set(expandedSections.sorted(), forKey: Self.expandedSectionsDefaultsKey)
     }
 
     private func tool(
