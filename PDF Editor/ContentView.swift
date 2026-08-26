@@ -610,6 +610,30 @@ struct ContentView: View {
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
+            Button {
+                undoManager?.undo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .buttonStyle(.plain)
+            .disabled(!(undoManager?.canUndo ?? false))
+            .help("Undo")
+            .accessibilityLabel("Undo")
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .navigation) {
+            Button {
+                undoManager?.redo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .buttonStyle(.plain)
+            .disabled(!(undoManager?.canRedo ?? false))
+            .help("Redo")
+            .accessibilityLabel("Redo")
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .navigation) {
             Button { toggleToolPanel() } label: {
                 Image(systemName: "wrench.and.screwdriver")
             }

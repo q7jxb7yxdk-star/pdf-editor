@@ -1020,7 +1020,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             if refreshesPDFKitDocument {
                 try refreshPDFKitDocument(markingUnsaved: true)
             } else {
-                editorState.documentDidChange(markingUnsaved: true)
+                publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
             }
         } catch {
             if let session = try? PDFiumEditingEngine().makeSession(
@@ -1111,9 +1111,40 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 throw PDFEditingError.invalidPassword
             }
         }
-        pdfDocument = document
+        if pdfDocument.isLocked {
+            pdfDocument = document
+        } else {
+            synchronizePresentationPages(with: document)
+        }
         sourceData = data
-        editorState.documentDidChange(markingUnsaved: markingUnsaved)
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: markingUnsaved)
+    }
+
+    private func publishDocumentChangeAfterViewUpdate(markingUnsaved: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.editorState.documentDidChange(markingUnsaved: markingUnsaved)
+        }
+    }
+
+    private func synchronizePresentationPages(with document: PDFDocument) {
+        let replacementPages = (0..<document.pageCount).compactMap {
+            document.page(at: $0)
+        }
+
+        for (index, page) in replacementPages.enumerated() {
+            if index < pdfDocument.pageCount {
+                pdfDocument.insert(page, at: index)
+                pdfDocument.removePage(at: index + 1)
+            } else {
+                pdfDocument.insert(page, at: index)
+            }
+        }
+
+        while pdfDocument.pageCount > replacementPages.count {
+            pdfDocument.removePage(at: pdfDocument.pageCount - 1)
+        }
+
+        pdfDocument.documentAttributes = document.documentAttributes
     }
 
     private static func makeBlankPDF() -> Data {
