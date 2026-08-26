@@ -151,9 +151,11 @@ struct PDFToolSidebar: View {
         let isExpanded = Binding(
             get: { expandedSections.contains(title) },
             set: { expanded in
-                if expanded { expandedSections.insert(title) }
-                else { expandedSections.remove(title) }
-                saveExpandedSections()
+                var updatedSections = expandedSections
+                if expanded { updatedSections.insert(title) }
+                else { updatedSections.remove(title) }
+                expandedSections = updatedSections
+                saveExpandedSections(updatedSections)
             }
         )
         return DisclosureGroup(isExpanded: isExpanded) {
@@ -176,8 +178,8 @@ struct PDFToolSidebar: View {
         return Set(storedTitles).intersection(sectionTitles)
     }
 
-    private func saveExpandedSections() {
-        UserDefaults.standard.set(expandedSections.sorted(), forKey: Self.expandedSectionsDefaultsKey)
+    private func saveExpandedSections(_ sections: Set<String>) {
+        UserDefaults.standard.set(sections.sorted(), forKey: Self.expandedSectionsDefaultsKey)
     }
 
     private func tool(
