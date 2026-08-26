@@ -62,6 +62,14 @@ final class PDFAnnotationService {
         }
     }
 
+    func snapshot(
+        for reference: PDFAnnotationReference,
+        in document: PDFDocument
+    ) throws -> PDFAnnotationSnapshot {
+        let resolved = try resolve(reference, in: document)
+        return snapshot(resolved.annotation, reference: reference)
+    }
+
     func resolve(
         _ reference: PDFAnnotationReference,
         in document: PDFDocument

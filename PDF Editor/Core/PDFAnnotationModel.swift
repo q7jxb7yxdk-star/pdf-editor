@@ -61,6 +61,18 @@ nonisolated struct PDFAnnotationSnapshot: Identifiable, Equatable, Sendable {
     var id: PDFAnnotationReference { reference }
 }
 
+nonisolated struct PDFAnnotationColorUpdateEvent: Equatable, Sendable {
+    let generation: Int
+    let reference: PDFAnnotationReference
+    let color: PDFAnnotationColor
+}
+
+nonisolated struct PDFAnnotationBackgroundFailureEvent: Equatable, Sendable {
+    let generation: Int
+    let message: String
+    let requiresDigitalSignatureConsent: Bool
+}
+
 nonisolated struct PDFAnnotationUpdate: Sendable {
     var bounds: CGRect?
     var contents: String?
@@ -71,5 +83,50 @@ nonisolated struct PDFAnnotationUpdate: Sendable {
 
     static func bounds(_ bounds: CGRect) -> Self {
         PDFAnnotationUpdate(bounds: bounds)
+    }
+
+    var isEmpty: Bool {
+        bounds == nil && contents == nil && color == nil && fontColor == nil &&
+            fontSize == nil && lineWidth == nil
+    }
+
+    func changes(from snapshot: PDFAnnotationSnapshot) -> Self {
+        PDFAnnotationUpdate(
+            bounds: bounds.flatMap {
+                approximatelyEqual($0.standardized, snapshot.bounds.standardized) ? nil : $0
+            },
+            contents: contents == snapshot.contents ? nil : contents,
+            color: color.flatMap { approximatelyEqual($0, snapshot.color) ? nil : $0 },
+            fontColor: fontColor.flatMap { proposedColor in
+                snapshot.fontColor.map { approximatelyEqual(proposedColor, $0) } == true
+                    ? nil
+                    : proposedColor
+            },
+            fontSize: fontSize.flatMap { proposedSize in
+                snapshot.fontSize.map { abs(proposedSize - $0) < 0.01 } == true
+                    ? nil
+                    : proposedSize
+            },
+            lineWidth: lineWidth.flatMap {
+                abs($0 - snapshot.lineWidth) < 0.01 ? nil : $0
+            }
+        )
+    }
+
+    private func approximatelyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) < 0.01 &&
+            abs(lhs.minY - rhs.minY) < 0.01 &&
+            abs(lhs.width - rhs.width) < 0.01 &&
+            abs(lhs.height - rhs.height) < 0.01
+    }
+
+    private func approximatelyEqual(
+        _ lhs: PDFAnnotationColor,
+        _ rhs: PDFAnnotationColor
+    ) -> Bool {
+        abs(lhs.red - rhs.red) < 0.005 &&
+            abs(lhs.green - rhs.green) < 0.005 &&
+            abs(lhs.blue - rhs.blue) < 0.005 &&
+            abs(lhs.alpha - rhs.alpha) < 0.005
     }
 }

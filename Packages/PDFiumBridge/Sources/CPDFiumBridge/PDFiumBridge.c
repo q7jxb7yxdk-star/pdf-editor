@@ -314,6 +314,36 @@ static int PERecursiveObjectCount(FPDF_PAGEOBJECT object) {
     return count;
 }
 
+static bool PERecursiveObjectMetrics(
+    FPDF_PAGEOBJECT object,
+    size_t depth,
+    size_t* objectCount,
+    size_t* pathIndexCount
+) {
+    if (object == NULL || objectCount == NULL || pathIndexCount == NULL ||
+        depth >= 64 || *objectCount == SIZE_MAX ||
+        *pathIndexCount > SIZE_MAX - (depth + 1)) {
+        return false;
+    }
+    *objectCount += 1;
+    *pathIndexCount += depth + 1;
+    if (FPDFPageObj_GetType(object) != FPDF_PAGEOBJ_FORM || depth >= 63) {
+        return true;
+    }
+    int childCount = FPDFFormObj_CountObjects(object);
+    for (int index = 0; index < childCount; ++index) {
+        if (!PERecursiveObjectMetrics(
+            FPDFFormObj_GetObject(object, (unsigned long)index),
+            depth + 1,
+            objectCount,
+            pathIndexCount
+        )) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool PEFindObjectPath(
     FPDF_PAGEOBJECT object,
     int32_t objectIndex,
@@ -450,6 +480,119 @@ static void PECloseObjectContext(PEObjectContext* context) {
         FPDF_ClosePage(context->page);
         context->page = NULL;
     }
+}
+
+static void PEFillObjectInfo(
+    FPDF_PAGEOBJECT object,
+    FS_MATRIX parentMatrix,
+    PEPDFObjectInfo* outputInfo
+) {
+    memset(outputInfo, 0, sizeof(*outputInfo));
+    outputInfo->type = FPDFPageObj_GetType(object);
+    float left = 0;
+    float bottom = 0;
+    float right = 0;
+    float top = 0;
+    if (FPDFPageObj_GetBounds(object, &left, &bottom, &right, &top)) {
+        float x[4];
+        float y[4];
+        PETransformPoint(parentMatrix, left, bottom, &x[0], &y[0]);
+        PETransformPoint(parentMatrix, right, bottom, &x[1], &y[1]);
+        PETransformPoint(parentMatrix, left, top, &x[2], &y[2]);
+        PETransformPoint(parentMatrix, right, top, &x[3], &y[3]);
+        outputInfo->left = outputInfo->right = x[0];
+        outputInfo->bottom = outputInfo->top = y[0];
+        for (int index = 1; index < 4; ++index) {
+            if (x[index] < outputInfo->left) outputInfo->left = x[index];
+            if (x[index] > outputInfo->right) outputInfo->right = x[index];
+            if (y[index] < outputInfo->bottom) outputInfo->bottom = y[index];
+            if (y[index] > outputInfo->top) outputInfo->top = y[index];
+        }
+    }
+    FS_MATRIX localMatrix = kPEIdentityMatrix;
+    FPDFPageObj_GetMatrix(object, &localMatrix);
+    FS_MATRIX pageMatrix = PEMatrixMultiply(parentMatrix, localMatrix);
+    outputInfo->matrixA = pageMatrix.a;
+    outputInfo->matrixB = pageMatrix.b;
+    outputInfo->matrixC = pageMatrix.c;
+    outputInfo->matrixD = pageMatrix.d;
+    outputInfo->matrixE = pageMatrix.e;
+    outputInfo->matrixF = pageMatrix.f;
+    FPDFPageObj_GetFillColor(
+        object,
+        &outputInfo->fillRed,
+        &outputInfo->fillGreen,
+        &outputInfo->fillBlue,
+        &outputInfo->fillAlpha
+    );
+    if (outputInfo->type == FPDF_PAGEOBJ_TEXT) {
+        FPDFTextObj_GetFontSize(object, &outputInfo->fontSize);
+    } else if (outputInfo->type == FPDF_PAGEOBJ_IMAGE) {
+        FPDFImageObj_GetImagePixelSize(
+            object,
+            &outputInfo->imagePixelWidth,
+            &outputInfo->imagePixelHeight
+        );
+    }
+}
+
+static bool PECollectDisplayObjects(
+    FPDF_PAGEOBJECT object,
+    int32_t objectIndex,
+    FS_MATRIX parentMatrix,
+    int32_t* path,
+    size_t depth,
+    int32_t* pathIndices,
+    int32_t* pathOffsets,
+    PEPDFObjectInfo* infos,
+    size_t objectCapacity,
+    size_t pathCapacity,
+    size_t* objectPosition,
+    size_t* pathPosition
+) {
+    if (object == NULL || depth >= 64 || *objectPosition >= objectCapacity ||
+        *pathPosition > pathCapacity ||
+        depth + 1 > pathCapacity - *pathPosition) {
+        return false;
+    }
+    path[depth] = objectIndex;
+    size_t outputIndex = *objectPosition;
+    pathOffsets[outputIndex] = (int32_t)*pathPosition;
+    memcpy(
+        pathIndices + *pathPosition,
+        path,
+        (depth + 1) * sizeof(int32_t)
+    );
+    *pathPosition += depth + 1;
+    PEFillObjectInfo(object, parentMatrix, &infos[outputIndex]);
+    *objectPosition += 1;
+
+    if (FPDFPageObj_GetType(object) != FPDF_PAGEOBJ_FORM || depth >= 63) {
+        return true;
+    }
+    FS_MATRIX formMatrix = kPEIdentityMatrix;
+    FPDFPageObj_GetMatrix(object, &formMatrix);
+    FS_MATRIX childParentMatrix = PEMatrixMultiply(parentMatrix, formMatrix);
+    int childCount = FPDFFormObj_CountObjects(object);
+    for (int childIndex = 0; childIndex < childCount; ++childIndex) {
+        if (!PECollectDisplayObjects(
+            FPDFFormObj_GetObject(object, (unsigned long)childIndex),
+            childIndex,
+            childParentMatrix,
+            path,
+            depth + 1,
+            pathIndices,
+            pathOffsets,
+            infos,
+            objectCapacity,
+            pathCapacity,
+            objectPosition,
+            pathPosition
+        )) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static uint16_t* PECopyWideString(
@@ -917,6 +1060,110 @@ bool PEPDFPageObjectCopyPath(
     return found;
 }
 
+bool PEPDFPageObjectCopyDisplayList(
+    PEPDFDocumentRef document,
+    int32_t pageIndex,
+    int32_t** outputPathIndices,
+    int32_t** outputPathOffsets,
+    PEPDFObjectInfo** outputInfos,
+    size_t* outputObjectCount,
+    size_t* outputPathIndexCount
+) {
+    if (outputPathIndices == NULL || outputPathOffsets == NULL ||
+        outputInfos == NULL || outputObjectCount == NULL ||
+        outputPathIndexCount == NULL) {
+        return false;
+    }
+    *outputPathIndices = NULL;
+    *outputPathOffsets = NULL;
+    *outputInfos = NULL;
+    *outputObjectCount = 0;
+    *outputPathIndexCount = 0;
+
+    FPDF_PAGE page = PELoadPage(document, pageIndex);
+    if (page == NULL) {
+        return false;
+    }
+
+    size_t objectCount = 0;
+    size_t pathIndexCount = 0;
+    int topLevelCount = FPDFPage_CountObjects(page);
+    bool success = true;
+    for (int index = 0; index < topLevelCount && success; ++index) {
+        success = PERecursiveObjectMetrics(
+            FPDFPage_GetObject(page, index),
+            0,
+            &objectCount,
+            &pathIndexCount
+        );
+    }
+    if (!success || objectCount > INT32_MAX || pathIndexCount > INT32_MAX ||
+        objectCount > (SIZE_MAX / sizeof(PEPDFObjectInfo)) ||
+        pathIndexCount > (SIZE_MAX / sizeof(int32_t)) ||
+        objectCount + 1 > (SIZE_MAX / sizeof(int32_t))) {
+        FPDF_ClosePage(page);
+        return false;
+    }
+    if (objectCount == 0) {
+        FPDF_ClosePage(page);
+        return true;
+    }
+
+    int32_t* pathIndices = (int32_t*)malloc(
+        pathIndexCount * sizeof(int32_t)
+    );
+    int32_t* pathOffsets = (int32_t*)malloc(
+        (objectCount + 1) * sizeof(int32_t)
+    );
+    PEPDFObjectInfo* infos = (PEPDFObjectInfo*)calloc(
+        objectCount,
+        sizeof(PEPDFObjectInfo)
+    );
+    if (pathIndices == NULL || pathOffsets == NULL || infos == NULL) {
+        free(pathIndices);
+        free(pathOffsets);
+        free(infos);
+        FPDF_ClosePage(page);
+        return false;
+    }
+
+    int32_t path[64];
+    size_t objectPosition = 0;
+    size_t pathPosition = 0;
+    for (int index = 0; index < topLevelCount && success; ++index) {
+        success = PECollectDisplayObjects(
+            FPDFPage_GetObject(page, index),
+            index,
+            kPEIdentityMatrix,
+            path,
+            0,
+            pathIndices,
+            pathOffsets,
+            infos,
+            objectCount,
+            pathIndexCount,
+            &objectPosition,
+            &pathPosition
+        );
+    }
+    FPDF_ClosePage(page);
+    if (!success || objectPosition != objectCount ||
+        pathPosition != pathIndexCount) {
+        free(pathIndices);
+        free(pathOffsets);
+        free(infos);
+        return false;
+    }
+
+    pathOffsets[objectCount] = (int32_t)pathIndexCount;
+    *outputPathIndices = pathIndices;
+    *outputPathOffsets = pathOffsets;
+    *outputInfos = infos;
+    *outputObjectCount = objectCount;
+    *outputPathIndexCount = pathIndexCount;
+    return true;
+}
+
 bool PEPDFPageObjectInfoAtPath(
     PEPDFDocumentRef document,
     int32_t pageIndex,
@@ -932,53 +1179,7 @@ bool PEPDFPageObjectInfoAtPath(
         return false;
     }
 
-    memset(outputInfo, 0, sizeof(*outputInfo));
-    outputInfo->type = FPDFPageObj_GetType(context.object);
-    float left = 0;
-    float bottom = 0;
-    float right = 0;
-    float top = 0;
-    if (FPDFPageObj_GetBounds(context.object, &left, &bottom, &right, &top)) {
-        float x[4];
-        float y[4];
-        PETransformPoint(context.parentMatrix, left, bottom, &x[0], &y[0]);
-        PETransformPoint(context.parentMatrix, right, bottom, &x[1], &y[1]);
-        PETransformPoint(context.parentMatrix, left, top, &x[2], &y[2]);
-        PETransformPoint(context.parentMatrix, right, top, &x[3], &y[3]);
-        outputInfo->left = outputInfo->right = x[0];
-        outputInfo->bottom = outputInfo->top = y[0];
-        for (int index = 1; index < 4; ++index) {
-            if (x[index] < outputInfo->left) outputInfo->left = x[index];
-            if (x[index] > outputInfo->right) outputInfo->right = x[index];
-            if (y[index] < outputInfo->bottom) outputInfo->bottom = y[index];
-            if (y[index] > outputInfo->top) outputInfo->top = y[index];
-        }
-    }
-    FS_MATRIX localMatrix = kPEIdentityMatrix;
-    FPDFPageObj_GetMatrix(context.object, &localMatrix);
-    FS_MATRIX pageMatrix = PEMatrixMultiply(context.parentMatrix, localMatrix);
-    outputInfo->matrixA = pageMatrix.a;
-    outputInfo->matrixB = pageMatrix.b;
-    outputInfo->matrixC = pageMatrix.c;
-    outputInfo->matrixD = pageMatrix.d;
-    outputInfo->matrixE = pageMatrix.e;
-    outputInfo->matrixF = pageMatrix.f;
-    FPDFPageObj_GetFillColor(
-        context.object,
-        &outputInfo->fillRed,
-        &outputInfo->fillGreen,
-        &outputInfo->fillBlue,
-        &outputInfo->fillAlpha
-    );
-    if (outputInfo->type == FPDF_PAGEOBJ_TEXT) {
-        FPDFTextObj_GetFontSize(context.object, &outputInfo->fontSize);
-    } else if (outputInfo->type == FPDF_PAGEOBJ_IMAGE) {
-        FPDFImageObj_GetImagePixelSize(
-            context.object,
-            &outputInfo->imagePixelWidth,
-            &outputInfo->imagePixelHeight
-        );
-    }
+    PEFillObjectInfo(context.object, context.parentMatrix, outputInfo);
     PECloseObjectContext(&context);
     return true;
 }

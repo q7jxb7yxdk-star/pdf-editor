@@ -1042,18 +1042,20 @@ private struct AnnotationEditorRow: View {
                 ForEach(colorPresets.indices, id: \.self) { index in
                     let preset = colorPresets[index]
                     Button {
-                        color = preset.withAlpha(CGFloat(opacity))
+                        color = preset.color.withAlpha(CGFloat(opacity))
                     } label: {
                         Circle()
-                            .fill(swiftUIColor(preset))
+                            .fill(swiftUIColor(preset.color))
                             .frame(width: 22, height: 22)
                             .overlay {
-                                if approximatelySameRGB(color, preset) {
+                                if approximatelySameRGB(color, preset.color) {
                                     Circle().stroke(.primary, lineWidth: 2)
                                 }
                             }
                     }
                     .buttonStyle(.plain)
+                    .help(preset.name)
+                    .accessibilityLabel("Change color to \(preset.name)")
                 }
             }
             .disabled(!supportsStyleChanges)
@@ -1103,7 +1105,45 @@ private struct AnnotationEditorRow: View {
         .padding(.vertical, 6)
     }
 
-    private var colorPresets: [PDFAnnotationColor] { [.yellow, .red, .blue, .black] }
+    private var colorPresets: [(name: String, color: PDFAnnotationColor)] {
+        guard annotation.kind == .note else {
+            return [
+                ("Yellow", .yellow),
+                ("Red", .red),
+                ("Blue", .blue),
+                ("Black", .black),
+            ]
+        }
+        return [
+            ("Red", .red),
+            ("Orange", PDFAnnotationColor(
+                red: 1,
+                green: 0.5,
+                blue: 0.05,
+                alpha: 1
+            )),
+            ("Yellow", .yellow),
+            ("Green", PDFAnnotationColor(
+                red: 0.16,
+                green: 0.68,
+                blue: 0.32,
+                alpha: 1
+            )),
+            ("Blue", .blue),
+            ("Indigo", PDFAnnotationColor(
+                red: 0.29,
+                green: 0.25,
+                blue: 0.78,
+                alpha: 1
+            )),
+            ("Purple", PDFAnnotationColor(
+                red: 0.63,
+                green: 0.25,
+                blue: 0.82,
+                alpha: 1
+            )),
+        ]
+    }
 
     private var annotationTitle: String {
         switch annotation.kind {

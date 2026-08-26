@@ -186,6 +186,9 @@ struct ContentView: View {
     var body: some View {
         fileTransferView
             .focusedValue(\.manualPDFSaveAction, saveDocument)
+            .task {
+                await document.prepareEditingSessionForInteraction()
+            }
             .onDisappear {
                 ocrBatchTask?.cancel()
                 pageObjectLoadTask?.cancel()
@@ -279,6 +282,28 @@ struct ContentView: View {
             pageObjectCacheRevision = editorState.revision
             loadCanvasObjects()
             loadCanvasAnnotations()
+        }
+        .onChange(of: editorState.annotationColorUpdate) { _, event in
+            guard let event else { return }
+            if let index = pageAnnotations.firstIndex(where: {
+                $0.reference == event.reference
+            }) {
+                pageAnnotations[index].color = event.color
+            }
+            if selectedAnnotation?.reference == event.reference {
+                selectedAnnotation?.color = event.color
+            }
+            if commentEditorAnnotation?.reference == event.reference {
+                commentEditorAnnotation?.color = event.color
+            }
+        }
+        .onChange(of: editorState.annotationBackgroundFailure) { _, event in
+            guard let event else { return }
+            if event.requiresDigitalSignatureConsent {
+                showsSignatureWarning = true
+            } else {
+                errorMessage = event.message
+            }
         }
     }
 
@@ -1463,7 +1488,6 @@ struct ContentView: View {
                 with: update,
                 undoManager: undoManager
             )
-            loadCanvasAnnotations()
         } catch { present(error) }
     }
 

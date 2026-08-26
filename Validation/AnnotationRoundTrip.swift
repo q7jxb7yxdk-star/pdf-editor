@@ -121,6 +121,17 @@ struct AnnotationRoundTripValidation {
             in: document
         )
         precondition(abs(expectedNote.color.alpha - 0.35) < 0.01)
+        let unchangedNoteUpdate = PDFAnnotationUpdate(
+            contents: expectedNote.contents,
+            color: expectedNote.color
+        ).changes(from: expectedNote)
+        precondition(unchangedNoteUpdate.isEmpty)
+        let changedNoteUpdate = PDFAnnotationUpdate(
+            contents: expectedNote.contents,
+            color: .red
+        ).changes(from: expectedNote)
+        precondition(changedNoteUpdate.contents == nil)
+        precondition(changedNoteUpdate.color == .red)
 
         let freeText = snapshots[1]
         let expectedText = try service.update(

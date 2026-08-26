@@ -588,6 +588,16 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(try objectPath(document, flatIndex: 2), [0, 0, 0])
         XCTAssertEqual(try objectPath(document, flatIndex: 5), [1, 0, 0])
 
+        let displayObjects = try displayObjects(document)
+        XCTAssertEqual(displayObjects.map(\.path), [
+            [0], [0, 0], [0, 0, 0],
+            [1], [1, 0], [1, 0, 0]
+        ])
+        XCTAssertEqual(displayObjects[2].info.matrixE, 87, accuracy: 0.01)
+        XCTAssertEqual(displayObjects[2].info.matrixF, 627, accuracy: 0.01)
+        XCTAssertEqual(displayObjects[5].info.matrixE, 307.5, accuracy: 0.01)
+        XCTAssertEqual(displayObjects[5].info.matrixF, 513.5, accuracy: 0.01)
+
         let firstPath: [Int32] = [0, 0, 0]
         let secondPath: [Int32] = [1, 0, 0]
         let firstInfo = try objectInfo(document, path: firstPath)
@@ -962,6 +972,46 @@ final class PDFiumBridgeTests: XCTestCase {
         let indices = try XCTUnwrap(pointer)
         defer { PEPDFFree(indices) }
         return Array(UnsafeBufferPointer(start: indices, count: length))
+    }
+
+    private func displayObjects(
+        _ document: PEPDFDocumentRef
+    ) throws -> [(path: [Int32], info: PEPDFObjectInfo)] {
+        var pathIndices: UnsafeMutablePointer<Int32>?
+        var pathOffsets: UnsafeMutablePointer<Int32>?
+        var infos: UnsafeMutablePointer<PEPDFObjectInfo>?
+        var objectCount = 0
+        var pathIndexCount = 0
+        XCTAssertTrue(PEPDFPageObjectCopyDisplayList(
+            document,
+            0,
+            &pathIndices,
+            &pathOffsets,
+            &infos,
+            &objectCount,
+            &pathIndexCount
+        ))
+        guard objectCount > 0 else { return [] }
+        let indices = try XCTUnwrap(pathIndices)
+        let offsets = try XCTUnwrap(pathOffsets)
+        let objectInfos = try XCTUnwrap(infos)
+        defer {
+            PEPDFFree(indices)
+            PEPDFFree(offsets)
+            PEPDFFree(objectInfos)
+        }
+        XCTAssertEqual(offsets[objectCount], Int32(pathIndexCount))
+        return (0..<objectCount).map { index in
+            let start = Int(offsets[index])
+            let end = Int(offsets[index + 1])
+            return (
+                path: Array(UnsafeBufferPointer(
+                    start: indices.advanced(by: start),
+                    count: end - start
+                )),
+                info: objectInfos[index]
+            )
+        }
     }
 
     private func objectBitmap(

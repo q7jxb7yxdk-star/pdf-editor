@@ -507,11 +507,52 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
 
     func displayObjects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
         try validatePageIndex(pageIndex)
-        let count = Int(PEPDFPageObjectCountRecursive(handle, Int32(pageIndex)))
-        return try (0..<count).map { flatIndex in
-            try object(
-                onPage: pageIndex,
-                path: copyPath(pageIndex: pageIndex, flatIndex: flatIndex),
+        var pathIndices: UnsafeMutablePointer<Int32>?
+        var pathOffsets: UnsafeMutablePointer<Int32>?
+        var infos: UnsafeMutablePointer<PEPDFObjectInfo>?
+        var objectCount = 0
+        var pathIndexCount = 0
+        guard PEPDFPageObjectCopyDisplayList(
+            handle,
+            Int32(pageIndex),
+            &pathIndices,
+            &pathOffsets,
+            &infos,
+            &objectCount,
+            &pathIndexCount
+        ) else {
+            throw PDFObjectEditingError.objectInspectionFailed
+        }
+        guard objectCount > 0 else { return [] }
+        guard let pathIndices, let pathOffsets, let infos else {
+            throw PDFObjectEditingError.objectInspectionFailed
+        }
+        defer {
+            PEPDFFree(pathIndices)
+            PEPDFFree(pathOffsets)
+            PEPDFFree(infos)
+        }
+        guard pathOffsets[objectCount] == Int32(pathIndexCount) else {
+            throw PDFObjectEditingError.objectInspectionFailed
+        }
+        return try (0..<objectCount).map { index in
+            let start = Int(pathOffsets[index])
+            let end = Int(pathOffsets[index + 1])
+            guard start >= 0, end > start, end <= pathIndexCount else {
+                throw PDFObjectEditingError.objectInspectionFailed
+            }
+            let path = PDFPageObjectPath(
+                indices: Array(
+                    UnsafeBufferPointer(
+                        start: pathIndices.advanced(by: start),
+                        count: end - start
+                    )
+                )
+            )
+            return snapshot(
+                pageIndex: pageIndex,
+                path: path,
+                info: infos[index],
                 includesTextMetadata: false
             )
         }
@@ -1091,6 +1132,20 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             throw PDFObjectEditingError.objectInspectionFailed
         }
 
+        return snapshot(
+            pageIndex: pageIndex,
+            path: path,
+            info: info,
+            includesTextMetadata: includesTextMetadata
+        )
+    }
+
+    private func snapshot(
+        pageIndex: Int,
+        path: PDFPageObjectPath,
+        info: PEPDFObjectInfo,
+        includesTextMetadata: Bool
+    ) -> PDFPageObjectSnapshot {
         let kind = PDFPageObjectKind(rawValue: info.type) ?? .unknown
         return PDFPageObjectSnapshot(
             pageIndex: pageIndex,

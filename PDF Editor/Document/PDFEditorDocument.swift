@@ -4,6 +4,14 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+nonisolated private struct PreparedPDFEditingSession: @unchecked Sendable {
+    let session: any PDFEditingSession
+}
+
+nonisolated private struct PreparedPDFAnnotationSession: @unchecked Sendable {
+    let session: any PDFAnnotationEditingSession
+}
+
 final class PDFEditorDocument: ReferenceFileDocument {
     typealias Snapshot = Data
 
@@ -12,6 +20,12 @@ final class PDFEditorDocument: ReferenceFileDocument {
     final class EditorState: ObservableObject {
         @Published private(set) var revision = 0
         @Published private(set) var hasUnsavedChanges = false
+        @Published private(set) var annotationColorUpdate: PDFAnnotationColorUpdateEvent?
+        @Published private(set) var annotationBackgroundFailure:
+            PDFAnnotationBackgroundFailureEvent?
+
+        private var annotationColorGeneration = 0
+        private var annotationFailureGeneration = 0
 
         fileprivate func documentDidChange(markingUnsaved: Bool) {
             revision &+= 1
@@ -22,6 +36,29 @@ final class PDFEditorDocument: ReferenceFileDocument {
 
         fileprivate func markSaved() {
             hasUnsavedChanges = false
+        }
+
+        fileprivate func annotationColorDidChange(
+            reference: PDFAnnotationReference,
+            color: PDFAnnotationColor
+        ) {
+            hasUnsavedChanges = true
+            annotationColorGeneration &+= 1
+            annotationColorUpdate = PDFAnnotationColorUpdateEvent(
+                generation: annotationColorGeneration,
+                reference: reference,
+                color: color
+            )
+        }
+
+        fileprivate func annotationBackgroundDidFail(_ error: Error) {
+            annotationFailureGeneration &+= 1
+            annotationBackgroundFailure = PDFAnnotationBackgroundFailureEvent(
+                generation: annotationFailureGeneration,
+                message: error.localizedDescription,
+                requiresDigitalSignatureConsent:
+                    (error as? PDFEditingError) == .digitalSignatureConsentRequired
+            )
         }
     }
 
@@ -34,6 +71,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private(set) var removesPasswordProtectionOnSave = false
 
     private var editingSession: (any PDFEditingSession)?
+    private var interactionPreparationTask: Task<PreparedPDFEditingSession, Error>?
+    private var interactionPreparationRevision = 0
+    private var interactionPreparationID = 0
+    private var commentColorSyncGeneration = 0
+    private var pendingCommentColorSyncs: [PDFAnnotationReference: Int] = [:]
     private var sourceData: Data
     private var persistedData: Data
     private var authorizedPassword: String?
@@ -180,6 +222,70 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }, onCancel: {
             inspectionTask.cancel()
         })
+    }
+
+    /// Opens the immutable source snapshot away from the main actor so the first
+    /// interactive annotation edit does not pay PDFium's document-open cost.
+    func prepareEditingSessionForInteraction() async {
+        guard editingSession == nil, !pdfDocument.isLocked else { return }
+        _ = try? await preparedEditingSessionForInteraction()
+    }
+
+    private func preparedEditingSessionForInteraction() async throws
+        -> any PDFEditingSession {
+        if let editingSession { return editingSession }
+
+        let preparationTask: Task<PreparedPDFEditingSession, Error>
+        let preparationRevision: Int
+        let preparationID: Int
+        if let existing = interactionPreparationTask {
+            preparationTask = existing
+            preparationRevision = interactionPreparationRevision
+            preparationID = interactionPreparationID
+        } else {
+            let data = sourceData
+            let password = authorizedPassword
+            preparationRevision = editorState.revision
+            interactionPreparationRevision = preparationRevision
+            interactionPreparationID &+= 1
+            preparationID = interactionPreparationID
+            preparationTask = Task.detached(priority: .userInitiated) {
+                try Self.prepareEditingSession(data: data, password: password)
+            }
+            interactionPreparationTask = preparationTask
+        }
+
+        do {
+            let prepared = try await preparationTask.value
+            if interactionPreparationID == preparationID {
+                interactionPreparationTask = nil
+            }
+            if let editingSession { return editingSession }
+            guard editorState.revision == preparationRevision else {
+                throw PDFObjectEditingError.objectMutationFailed
+            }
+            editingSession = prepared.session
+            return prepared.session
+        } catch {
+            if interactionPreparationID == preparationID {
+                interactionPreparationTask = nil
+            }
+            throw error
+        }
+    }
+
+    nonisolated private static func prepareEditingSession(
+        data: Data,
+        password: String?
+    ) throws -> PreparedPDFEditingSession {
+        pdfiumAccessLock.lock()
+        defer { pdfiumAccessLock.unlock() }
+        return PreparedPDFEditingSession(
+            session: try PDFiumEditingEngine().makeSession(
+                data: data,
+                password: password
+            )
+        )
     }
 
     nonisolated private static func inspectPageObjects(
@@ -526,28 +632,288 @@ final class PDFEditorDocument: ReferenceFileDocument {
         undoManager: UndoManager?
     ) throws -> PDFAnnotationSnapshot {
         let service = PDFAnnotationService()
-        try mutate(
+        let current = try annotationSnapshot(reference)
+        let effectiveUpdate = update.changes(from: current)
+        guard !effectiveUpdate.isEmpty else { return current }
+
+        // A note color change is supported directly by both live document models.
+        // Keep it in memory so Apply does not serialize and reopen the entire PDF.
+        if current.kind == .note,
+           let color = effectiveUpdate.color,
+           effectiveUpdate.bounds == nil,
+           effectiveUpdate.contents == nil,
+           effectiveUpdate.fontColor == nil,
+           effectiveUpdate.fontSize == nil,
+           effectiveUpdate.lineWidth == nil {
+            if editingSession == nil {
+                return try stageCommentColorWhilePreparingSession(
+                    reference,
+                    current: current,
+                    color: color,
+                    undoManager: undoManager
+                )
+            }
+            return try updateCommentColor(
+                reference,
+                current: current,
+                color: color,
+                undoManager: undoManager
+            )
+        }
+
+        let updated = try mutate(
             undoManager: undoManager,
             actionName: "修改註解",
             refreshesPDFKitDocument: false
         ) {
-            _ = try service.update(reference, with: update, in: pdfDocument)
+            let updated = try service.update(
+                reference,
+                with: effectiveUpdate,
+                in: pdfDocument
+            )
             guard let data = pdfDocument.dataRepresentation(),
                   PDFDocument(data: data) != nil else {
                 throw PDFEditingError.exportFailed
             }
             editingSession = try makeVerifiedAnnotationSession(
                 data: data,
-                expected: allAnnotationSnapshots(),
-                colorOverrides: update.color.map { [reference: $0] } ?? [:]
+                expected: [updated],
+                colorOverrides: effectiveUpdate.color.map { [reference: $0] } ?? [:]
+            )
+            return updated
+        }
+        return updated
+    }
+
+    private func stageCommentColorWhilePreparingSession(
+        _ reference: PDFAnnotationReference,
+        current: PDFAnnotationSnapshot,
+        color: PDFAnnotationColor,
+        undoManager: UndoManager?
+    ) throws -> PDFAnnotationSnapshot {
+        var updated = try PDFAnnotationService().update(
+            reference,
+            with: PDFAnnotationUpdate(color: color),
+            in: pdfDocument
+        )
+        updated.color = color
+        editorState.annotationColorDidChange(reference: reference, color: color)
+
+        commentColorSyncGeneration &+= 1
+        let generation = commentColorSyncGeneration
+        pendingCommentColorSyncs[reference] = generation
+        Task { @MainActor [weak self] in
+            await self?.finishStagedCommentColor(
+                reference,
+                current: current,
+                color: color,
+                generation: generation
             )
         }
-        let resolved = try service.resolve(reference, in: pdfDocument)
-        guard let snapshot = service.snapshots(
-            on: resolved.page,
-            pageIndex: reference.pageIndex
-        ).first(where: { $0.reference == reference }) else {
-            throw PDFAnnotationServiceError.annotationNotFound
+
+        if let undoManager {
+            undoManager.registerUndo(withTarget: self) { document in
+                _ = try? document.updateAnnotation(
+                    reference,
+                    with: PDFAnnotationUpdate(color: current.color),
+                    undoManager: undoManager
+                )
+            }
+            undoManager.setActionName("修改註解")
+        }
+        return updated
+    }
+
+    @MainActor
+    private func finishStagedCommentColor(
+        _ reference: PDFAnnotationReference,
+        current: PDFAnnotationSnapshot,
+        color: PDFAnnotationColor,
+        generation: Int
+    ) async {
+        var annotationSessionForRollback: PreparedPDFAnnotationSession?
+        do {
+            let session = try await preparedEditingSessionForInteraction()
+            guard pendingCommentColorSyncs[reference] == generation else { return }
+            if (session as? any PDFObjectEditingSession)?.hasDigitalSignatures == true,
+               !allowsInvalidatingDigitalSignatures {
+                throw PDFEditingError.digitalSignatureConsentRequired
+            }
+            guard let annotationSession = session as? any PDFAnnotationEditingSession else {
+                throw PDFObjectEditingError.objectMutationFailed
+            }
+            let preparedAnnotationSession = PreparedPDFAnnotationSession(
+                session: annotationSession
+            )
+            annotationSessionForRollback = preparedAnnotationSession
+            let actual = try Self.synchronizeCommentColor(
+                session: preparedAnnotationSession,
+                reference: reference,
+                color: color
+            )
+            guard abs(actual.red - color.red) < 0.01,
+                  abs(actual.green - color.green) < 0.01,
+                  abs(actual.blue - color.blue) < 0.01,
+                  abs(actual.alpha - color.alpha) < 0.01 else {
+                throw PDFAnnotationServiceError.roundTripVerificationFailed
+            }
+            guard pendingCommentColorSyncs[reference] == generation else { return }
+            pendingCommentColorSyncs[reference] = nil
+            if actual != color {
+                editorState.annotationColorDidChange(reference: reference, color: actual)
+            }
+        } catch {
+            guard pendingCommentColorSyncs[reference] == generation else { return }
+            pendingCommentColorSyncs[reference] = nil
+            if let annotationSessionForRollback {
+                Self.rollbackCommentColor(
+                    session: annotationSessionForRollback,
+                    reference: reference,
+                    color: current.color
+                )
+            }
+            _ = try? PDFAnnotationService().update(
+                reference,
+                with: PDFAnnotationUpdate(color: current.color),
+                in: pdfDocument
+            )
+            editorState.annotationColorDidChange(
+                reference: reference,
+                color: current.color
+            )
+            editorState.annotationBackgroundDidFail(error)
+        }
+    }
+
+    nonisolated private static func synchronizeCommentColor(
+        session: PreparedPDFAnnotationSession,
+        reference: PDFAnnotationReference,
+        color: PDFAnnotationColor
+    ) throws -> PDFAnnotationColor {
+        pdfiumAccessLock.lock()
+        defer { pdfiumAccessLock.unlock() }
+        try session.session.setAnnotationColor(
+            pageIndex: reference.pageIndex,
+            annotationIndex: reference.annotationIndex,
+            color: color
+        )
+        return try session.session.annotationColor(
+            pageIndex: reference.pageIndex,
+            annotationIndex: reference.annotationIndex
+        )
+    }
+
+    nonisolated private static func rollbackCommentColor(
+        session: PreparedPDFAnnotationSession,
+        reference: PDFAnnotationReference,
+        color: PDFAnnotationColor
+    ) {
+        pdfiumAccessLock.lock()
+        defer { pdfiumAccessLock.unlock() }
+        try? session.session.setAnnotationColor(
+            pageIndex: reference.pageIndex,
+            annotationIndex: reference.annotationIndex,
+            color: color
+        )
+    }
+
+    private func updateCommentColor(
+        _ reference: PDFAnnotationReference,
+        current: PDFAnnotationSnapshot,
+        color: PDFAnnotationColor,
+        undoManager: UndoManager?
+    ) throws -> PDFAnnotationSnapshot {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+
+        let session = try prepareEditingSessionIfNeeded()
+        if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
+            throw PDFEditingError.digitalSignatureConsentRequired
+        }
+        guard let annotationSession = session as? any PDFAnnotationEditingSession else {
+            throw PDFObjectEditingError.objectMutationFailed
+        }
+
+        let service = PDFAnnotationService()
+        var changedPDFium = false
+        var changedPDFKit = false
+        do {
+            try annotationSession.setAnnotationColor(
+                pageIndex: reference.pageIndex,
+                annotationIndex: reference.annotationIndex,
+                color: color
+            )
+            changedPDFium = true
+            var updated = try service.update(
+                reference,
+                with: PDFAnnotationUpdate(color: color),
+                in: pdfDocument
+            )
+            changedPDFKit = true
+
+            let actual = try annotationSession.annotationColor(
+                pageIndex: reference.pageIndex,
+                annotationIndex: reference.annotationIndex
+            )
+            guard abs(actual.red - color.red) < 0.01,
+                  abs(actual.green - color.green) < 0.01,
+                  abs(actual.blue - color.blue) < 0.01,
+                  abs(actual.alpha - color.alpha) < 0.01 else {
+                throw PDFAnnotationServiceError.roundTripVerificationFailed
+            }
+            updated.color = actual
+            editorState.annotationColorDidChange(reference: reference, color: actual)
+
+            if let undoManager {
+                undoManager.registerUndo(withTarget: self) { document in
+                    _ = try? document.updateAnnotation(
+                        reference,
+                        with: PDFAnnotationUpdate(color: current.color),
+                        undoManager: undoManager
+                    )
+                }
+                undoManager.setActionName("修改註解")
+            }
+            return updated
+        } catch {
+            if changedPDFKit {
+                _ = try? service.update(
+                    reference,
+                    with: PDFAnnotationUpdate(color: current.color),
+                    in: pdfDocument
+                )
+            }
+            if changedPDFium {
+                try? annotationSession.setAnnotationColor(
+                    pageIndex: reference.pageIndex,
+                    annotationIndex: reference.annotationIndex,
+                    color: current.color
+                )
+            }
+            throw error
+        }
+    }
+
+    private func annotationSnapshot(
+        _ reference: PDFAnnotationReference
+    ) throws -> PDFAnnotationSnapshot {
+        var snapshot = try PDFAnnotationService().snapshot(
+            for: reference,
+            in: pdfDocument
+        )
+        guard let annotationSession = editingSession as? any PDFAnnotationEditingSession,
+              Self.pdfiumAccessLock.try() else {
+            return snapshot
+        }
+        defer { Self.pdfiumAccessLock.unlock() }
+        if let color = try? annotationSession.annotationColor(
+            pageIndex: reference.pageIndex,
+            annotationIndex: reference.annotationIndex
+        ) {
+            snapshot.color = color
+            if snapshot.fontColor != nil {
+                snapshot.fontColor?.alpha = color.alpha
+            }
         }
         return snapshot
     }
@@ -588,16 +954,21 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFEditingError.invalidDocument
         }
         let service = PDFAnnotationService()
-        let serializedAnnotations = Dictionary(uniqueKeysWithValues:
-            (0..<serializedDocument.pageCount).flatMap { pageIndex in
-                guard let page = serializedDocument.page(at: pageIndex) else {
-                    return [(PDFAnnotationReference, PDFAnnotationSnapshot)]()
-                }
-                return service.snapshots(on: page, pageIndex: pageIndex).map {
-                    ($0.reference, $0)
-                }
-            }
+        let relevantReferences = Set(expected.map(\.reference))
+            .union(colorOverrides.keys)
+        let referencesByPage = Dictionary(
+            grouping: relevantReferences,
+            by: \.pageIndex
         )
+        var serializedAnnotations: [PDFAnnotationReference: PDFAnnotationSnapshot] = [:]
+        for (pageIndex, references) in referencesByPage {
+            guard let page = serializedDocument.page(at: pageIndex) else { continue }
+            let references = Set(references)
+            for snapshot in service.snapshots(on: page, pageIndex: pageIndex)
+            where references.contains(snapshot.reference) {
+                serializedAnnotations[snapshot.reference] = snapshot
+            }
+        }
         for (reference, color) in colorOverrides
         where serializedAnnotations[reference].map({
             !$0.hasAppearanceStream || $0.kind == .note || $0.kind == .highlight

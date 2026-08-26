@@ -144,6 +144,15 @@ bool PEPDFPageObjectCopyPath(
     int32_t** outputIndices,
     size_t* outputLength
 );
+bool PEPDFPageObjectCopyDisplayList(
+    PEPDFDocumentRef document,
+    int32_t pageIndex,
+    int32_t** outputPathIndices,
+    int32_t** outputPathOffsets,
+    PEPDFObjectInfo** outputInfos,
+    size_t* outputObjectCount,
+    size_t* outputPathIndexCount
+);
 bool PEPDFPageObjectInfoAtPath(
     PEPDFDocumentRef document,
     int32_t pageIndex,
