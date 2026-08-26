@@ -3,8 +3,107 @@ import CoreText
 import QuartzCore
 import SwiftUI
 
+private struct PDFHighlightActionBar: View {
+    let annotation: PDFAnnotationSnapshot
+    let onChangeColor: (PDFAnnotationColor) -> Void
+    let onDelete: () -> Void
+
+    @State private var showsColorPicker = false
+
+    private let colorChoices: [(name: String, color: PDFAnnotationColor)] = [
+        ("Yellow", .yellow),
+        ("Red", PDFAnnotationColor(red: 0.93, green: 0.18, blue: 0.18, alpha: 1)),
+        ("Orange", PDFAnnotationColor(red: 1, green: 0.5, blue: 0.05, alpha: 1)),
+        ("Green", PDFAnnotationColor(red: 0.16, green: 0.68, blue: 0.32, alpha: 1)),
+        ("Blue", .blue),
+        ("Indigo", PDFAnnotationColor(red: 0.29, green: 0.25, blue: 0.78, alpha: 1)),
+        ("Purple", PDFAnnotationColor(red: 0.63, green: 0.25, blue: 0.82, alpha: 1)),
+    ]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                showsColorPicker.toggle()
+            } label: {
+                Circle()
+                    .fill(opaqueSwiftUIColor(annotation.color))
+                    .frame(width: 18, height: 18)
+                    .padding(2)
+            }
+            .buttonStyle(.plain)
+            .help("Change color")
+            .accessibilityLabel("Change color")
+            .accessibilityHint("Choose a new color for this highlight")
+            .popover(isPresented: $showsColorPicker, arrowEdge: .bottom) {
+                HStack(spacing: 10) {
+                    ForEach(availableColorChoices.indices, id: \.self) { index in
+                        let choice = availableColorChoices[index]
+                        Button {
+                            showsColorPicker = false
+                            onChangeColor(choice.color.withAlpha(annotation.color.alpha))
+                        } label: {
+                            Circle()
+                                .fill(opaqueSwiftUIColor(choice.color))
+                                .frame(width: 22, height: 22)
+                                .padding(3)
+                        }
+                        .buttonStyle(.plain)
+                        .help(choice.name)
+                        .accessibilityLabel("Change color to \(choice.name)")
+                    }
+                }
+                .padding(10)
+                .presentationCompactAdaptation(.popover)
+            }
+
+            Divider()
+                .frame(height: 18)
+
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "trash")
+                    .frame(width: 18, height: 18)
+            }
+            .help("Delete")
+            .accessibilityLabel("Delete")
+            .accessibilityHint("Delete this highlight")
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.6), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+    }
+
+    private func opaqueSwiftUIColor(_ color: PDFAnnotationColor) -> Color {
+        Color(
+            red: Double(color.red),
+            green: Double(color.green),
+            blue: Double(color.blue)
+        )
+    }
+
+    private var availableColorChoices: [(name: String, color: PDFAnnotationColor)] {
+        colorChoices.filter { !approximatelySameRGB(annotation.color, $0.color) }
+    }
+
+    private func approximatelySameRGB(
+        _ lhs: PDFAnnotationColor,
+        _ rhs: PDFAnnotationColor
+    ) -> Bool {
+        abs(lhs.red - rhs.red) < 0.01 &&
+            abs(lhs.green - rhs.green) < 0.01 &&
+            abs(lhs.blue - rhs.blue) < 0.01
+    }
+}
+
 #if os(macOS)
 import AppKit
+
+private final class PDFHighlightActionContainerView: NSView {}
 
 private protocol PDFInteractionMouseHandling: AnyObject {
     func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
@@ -36,6 +135,9 @@ private final class PDFInteractionPDFView: PDFView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let defaultHit = super.hitTest(point)
+        if defaultHit?.isInsideHighlightActionBar == true {
+            return defaultHit
+        }
         guard NSApp.currentEvent?.type == .leftMouseDown else {
             return defaultHit
         }
@@ -100,6 +202,17 @@ private final class PDFInteractionPDFView: PDFView {
     private func removeToolTipsRecursively(from view: NSView) {
         view.removeAllToolTips()
         view.subviews.forEach(removeToolTipsRecursively)
+    }
+}
+
+private extension NSView {
+    var isInsideHighlightActionBar: Bool {
+        var candidate: NSView? = self
+        while let view = candidate {
+            if view is PDFHighlightActionContainerView { return true }
+            candidate = view.superview
+        }
+        return false
     }
 }
 
@@ -555,6 +668,8 @@ extension PDFKitView {
         private var inlineEditingTextStyle: InlineTextStyle?
         private var inlineEditingPDFStyle: PDFTextStyle = []
         private var inlineStyleBar: NSStackView?
+        private var highlightActionContainer: PDFHighlightActionContainerView?
+        private var highlightActionHost: NSHostingView<PDFHighlightActionBar>?
         private var stagedTextByObjectID: [String: StagedTextEdit] = [:]
         private var stagedTextStylesByObjectID: [String: InlineTextStyle] = [:]
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
@@ -575,6 +690,8 @@ extension PDFKitView {
         private var transientStagedTextFallback: TransientStagedTextFallback?
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
+        private var highlightActionContainer: UIView?
+        private var highlightActionHostingController: UIHostingController<PDFHighlightActionBar>?
         private var inlineTextField: UITextField?
         private var inlineEditingBaseFont: UIFont?
         private var inlineEditingPDFStyle: PDFTextStyle = []
@@ -733,6 +850,7 @@ extension PDFKitView {
 #endif
             outlineLayer.removeFromSuperlayer()
             handleLayers.forEach { $0.removeFromSuperlayer() }
+            removeHighlightActionBar()
             if let pdfView {
 #if os(macOS)
                 closeCommentPopover()
@@ -842,6 +960,11 @@ extension PDFKitView {
                 layer.path = CGPath(ellipseIn: layer.bounds, transform: nil)
             }
             CATransaction.commit()
+            updateHighlightActionBar(
+                for: selectedAnnotation.wrappedValue,
+                above: displayBounds,
+                in: pdfView
+            )
         }
 
         private func minimumVisibleSelectionRect(_ rect: CGRect) -> CGRect {
@@ -890,6 +1013,130 @@ extension PDFKitView {
         private func setOverlayHidden(_ hidden: Bool) {
             outlineLayer.isHidden = hidden
             handleLayers.forEach { $0.isHidden = hidden }
+            if hidden { removeHighlightActionBar() }
+        }
+
+        private func updateHighlightActionBar(
+            for annotation: PDFAnnotationSnapshot?,
+            above highlightBounds: CGRect,
+            in pdfView: PDFView
+        ) {
+            guard let annotation, annotation.kind == .highlight else {
+                removeHighlightActionBar()
+                return
+            }
+
+            let actionBar = PDFHighlightActionBar(
+                annotation: annotation,
+                onChangeColor: { [weak self] color in
+                    self?.onUpdateAnnotation(
+                        annotation,
+                        PDFAnnotationUpdate(color: color)
+                    )
+                },
+                onDelete: { [weak self] in
+                    self?.onDeleteAnnotation(annotation)
+                }
+            )
+
+#if os(macOS)
+            let container: PDFHighlightActionContainerView
+            let host: NSHostingView<PDFHighlightActionBar>
+            if let existingContainer = highlightActionContainer,
+               let existingHost = highlightActionHost {
+                container = existingContainer
+                host = existingHost
+                host.rootView = actionBar
+            } else {
+                container = PDFHighlightActionContainerView(frame: .zero)
+                host = NSHostingView(rootView: actionBar)
+                container.addSubview(host)
+                pdfView.addSubview(container)
+                highlightActionContainer = container
+                highlightActionHost = host
+            }
+            let fittingSize = host.fittingSize
+            let size = CGSize(width: max(fittingSize.width, 150), height: max(fittingSize.height, 32))
+            host.frame = CGRect(origin: .zero, size: size)
+#else
+            let container: UIView
+            let hostingController: UIHostingController<PDFHighlightActionBar>
+            if let existingContainer = highlightActionContainer,
+               let existingController = highlightActionHostingController {
+                container = existingContainer
+                hostingController = existingController
+                hostingController.rootView = actionBar
+            } else {
+                container = UIView(frame: .zero)
+                container.backgroundColor = .clear
+                hostingController = UIHostingController(rootView: actionBar)
+                hostingController.view.backgroundColor = .clear
+                container.addSubview(hostingController.view)
+                pdfView.addSubview(container)
+                highlightActionContainer = container
+                highlightActionHostingController = hostingController
+            }
+            let fittingSize = hostingController.sizeThatFits(
+                in: CGSize(width: 320, height: 80)
+            )
+            let size = CGSize(width: max(fittingSize.width, 150), height: max(fittingSize.height, 32))
+            hostingController.view.frame = CGRect(origin: .zero, size: size)
+#endif
+
+            let horizontalInset: CGFloat = 8
+            let spacing: CGFloat = 8
+            let availableBounds = pdfView.bounds.insetBy(dx: horizontalInset, dy: horizontalInset)
+            let originX = min(
+                max(highlightBounds.midX - size.width / 2, availableBounds.minX),
+                max(availableBounds.minX, availableBounds.maxX - size.width)
+            )
+#if os(macOS)
+            let preferredY: CGFloat
+            if pdfView.isFlipped {
+                let aboveY = highlightBounds.minY - size.height - spacing
+                preferredY = aboveY >= availableBounds.minY
+                    ? aboveY
+                    : highlightBounds.maxY + spacing
+            } else {
+                let aboveY = highlightBounds.maxY + spacing
+                preferredY = aboveY + size.height <= availableBounds.maxY
+                    ? aboveY
+                    : highlightBounds.minY - size.height - spacing
+            }
+            let originY = min(
+                max(preferredY, availableBounds.minY),
+                max(availableBounds.minY, availableBounds.maxY - size.height)
+            )
+#else
+            let aboveY = highlightBounds.minY - size.height - spacing
+            let preferredY = aboveY >= availableBounds.minY
+                ? aboveY
+                : highlightBounds.maxY + spacing
+            let originY = min(
+                max(preferredY, availableBounds.minY),
+                max(availableBounds.minY, availableBounds.maxY - size.height)
+            )
+#endif
+            container.frame = CGRect(
+                origin: CGPoint(x: originX, y: originY),
+                size: size
+            )
+#if os(macOS)
+            container.wantsLayer = true
+#endif
+        }
+
+        private func removeHighlightActionBar() {
+#if os(macOS)
+            highlightActionContainer?.removeFromSuperview()
+            highlightActionContainer = nil
+            highlightActionHost = nil
+#else
+            highlightActionHostingController?.view.removeFromSuperview()
+            highlightActionHostingController = nil
+            highlightActionContainer?.removeFromSuperview()
+            highlightActionContainer = nil
+#endif
         }
 
         func updateGestureAvailability() {
@@ -3402,7 +3649,13 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelega
         _ gestureRecognizer: UIGestureRecognizer,
         shouldReceive touch: UITouch
     ) -> Bool {
-        guard let inlineTextField, let touchedView = touch.view else { return true }
+        guard let touchedView = touch.view else { return true }
+        if let highlightActionContainer,
+           touchedView === highlightActionContainer ||
+            touchedView.isDescendant(of: highlightActionContainer) {
+            return false
+        }
+        guard let inlineTextField else { return true }
         return touchedView !== inlineTextField && !touchedView.isDescendant(of: inlineTextField)
     }
 

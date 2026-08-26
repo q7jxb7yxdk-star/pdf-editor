@@ -61,8 +61,12 @@ bool PEPDFAnnotationSetColor(
         blue,
         alpha
     );
-    if (!success && annotation != NULL &&
-        FPDFAnnot_GetSubtype(annotation) == FPDF_ANNOT_TEXT &&
+    FPDF_ANNOTATION_SUBTYPE subtype = annotation != NULL
+        ? FPDFAnnot_GetSubtype(annotation)
+        : FPDF_ANNOT_UNKNOWN;
+    bool canRegenerateAppearance = subtype == FPDF_ANNOT_TEXT ||
+        subtype == FPDF_ANNOT_HIGHLIGHT;
+    if (!success && annotation != NULL && canRegenerateAppearance &&
         FPDFAnnot_SetAP(
             annotation,
             FPDF_ANNOT_APPEARANCEMODE_NORMAL,

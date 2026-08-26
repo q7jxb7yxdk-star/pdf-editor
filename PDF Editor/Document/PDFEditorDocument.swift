@@ -600,7 +600,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         )
         for (reference, color) in colorOverrides
         where serializedAnnotations[reference].map({
-            !$0.hasAppearanceStream || $0.kind == .note
+            !$0.hasAppearanceStream || $0.kind == .note || $0.kind == .highlight
         }) == true {
             try annotationSession.setAnnotationColor(
                 pageIndex: reference.pageIndex,

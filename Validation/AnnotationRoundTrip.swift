@@ -148,12 +148,25 @@ struct AnnotationRoundTripValidation {
         )
         precondition(expectedInk.geometryPointCount == ink.geometryPointCount)
         let markup = snapshots[3]
+        let markupColor = PDFAnnotationColor(
+            red: 0.16,
+            green: 0.68,
+            blue: 0.32,
+            alpha: markup.color.alpha
+        )
         let expectedMarkup = try service.update(
             markup.reference,
-            with: .bounds(CGRect(x: 110, y: 330, width: 220, height: 30)),
+            with: PDFAnnotationUpdate(
+                bounds: CGRect(x: 110, y: 330, width: 220, height: 30),
+                color: markupColor
+            ),
             in: document
         )
         precondition(expectedMarkup.geometryPointCount == 8)
+        precondition(abs(expectedMarkup.color.red - markupColor.red) < 0.01)
+        precondition(abs(expectedMarkup.color.green - markupColor.green) < 0.01)
+        precondition(abs(expectedMarkup.color.blue - markupColor.blue) < 0.01)
+        precondition(abs(expectedMarkup.color.alpha - markupColor.alpha) < 0.01)
 
         guard let serialized = document.dataRepresentation(),
               let reopened = PDFDocument(data: serialized) else {
@@ -176,6 +189,9 @@ struct AnnotationRoundTripValidation {
         precondition(abs(snapshots[2].bounds.width - 300) < 0.05)
         precondition(snapshots[2].geometryPointCount == 4)
         precondition(snapshots[3].geometryPointCount == 8)
+        precondition(abs(snapshots[3].color.red - markupColor.red) < 0.01)
+        precondition(abs(snapshots[3].color.green - markupColor.green) < 0.01)
+        precondition(abs(snapshots[3].color.blue - markupColor.blue) < 0.01)
 
         print("Annotation round-trip validation passed (note, free text, ink, highlight geometry and style).")
     }

@@ -91,7 +91,7 @@ There is protocol-based engine separation, but no application-level dependency-i
 | `PDF Editor/Core/PDFAnnotationModel.swift` | Annotation references, kinds, colors, snapshots, and partial updates. |
 | `PDF Editor/Document/PDFEditorDocument.swift` | Persisted/working byte separation, active engine, PDFKit refresh, unsaved-state tracking, mutation transaction boundary, Undo/Redo, security options, OCR insertion, and annotation round-trip verification. |
 | `PDF Editor/Document/PDFExportDocument.swift` | `FileDocument` wrapper for split/export bytes and preferred filenames. |
-| `PDF Editor/Platform/PDFKitView.swift` | AppKit/UIKit `PDFView` bridge, selection synchronization, direct object/annotation manipulation overlays, macOS note-icon hover tracking, and annotation-anchored Comment Editor popover presentation. |
+| `PDF Editor/Platform/PDFKitView.swift` | AppKit/UIKit `PDFView` bridge, selection synchronization, direct object/annotation manipulation overlays, selected-Highlight color/delete action bar and color popover, macOS note-icon hover tracking, and annotation-anchored Comment Editor popover presentation. |
 | `PDF Editor/Platform/PageThumbnailView.swift` | PDFKit thumbnail rendering for the page sidebar. |
 | `PDF Editor/Services/CoreTextShapingService.swift` | Font coverage analysis, complex-script detection, and CoreText PDF overlay creation. |
 | `PDF Editor/Services/ManualPDFSaveCoordinator.swift` | Security-scoped, `NSFileCoordinator`-protected replacement writes plus the focused macOS File → Save command. |
@@ -186,12 +186,13 @@ The fallback is a new searchable vector layer, not preservation of the original 
 - On macOS, moving the pointer over a note annotation removes PDFKit tooltip registrations and opens an `NSPopover` relative to the note's page-space bounds converted into `PDFView` coordinates. The preferred edge is the icon's right side, with AppKit choosing another edge when space requires it. A dedicated tracking area detects departure from the icon and allows 0.8 seconds to enter the SwiftUI-hosted editor. Entering cancels that pending close; leaving a hover-opened editor closes it. Clicking the icon converts the same popover to an explicitly opened editor that remains until Done or Delete. Scrolling closes the popover. iOS continues to present the Comment Editor as a sheet.
 - Add a comment uses a cross-platform sheet with a focused multi-line `TextEditor`, replacing the size-constrained alert text field. On macOS, Return inserts a newline, Shift-Return invokes Add when the trimmed content is nonempty, and Escape cancels both placement and content entry. The shared Comment Editor uses the same multiline visual treatment, a 150-point minimum, and hidden text measurement so its text area grows with content.
 - Highlight remains enabled without an initial selection. When Tools opens, `ContentView` snapshots a valid current `PDFSelection`; otherwise choosing Highlight enables a selection banner without dismissing Tools. Apply Highlight uses Return, Cancel uses Escape, and applying requires non-whitespace selected text with nonempty bounds. `PDFAnnotationService` converts each PDFKit quadrilateral from page coordinates to annotation-local coordinates by subtracting the annotation bounds origin before assigning `quadrilateralPoints`.
+- Selecting an existing Highlight presents a compact SwiftUI action bar anchored to its converted PDF-view bounds. It prefers the space above the annotation and moves below it near the visible top edge. The current-color circle opens a compact popover containing the other supported colors as circular swatches; choosing one preserves the annotation alpha. A trash icon deletes the Highlight. Tooltips and accessibility labels describe both controls and each swatch. Hosted controls are excluded from the surrounding PDF canvas hit-testing paths so their taps reach the SwiftUI buttons.
 - Edit comment in the left Tools panel opens a page-scoped Comment List. Wide layouts place it beside the Tools panel; compact layouts present it as a sheet. It reuses the same annotation editor for content, color, opacity, font size, line width, selection, and deletion.
 - Annotation identity is a page index plus annotation-array index, not a persistent PDF object identifier.
 - Update validation enforces minimum 4-point bounds, 6–144 point font sizes, and 0.5–24 point ink widths.
 - Moving or scaling ink and highlight annotations transforms their path or quadrilateral geometry with their bounds.
-- Fixed appearance streams allow geometry/content handling but reject style changes.
-- After a PDFKit annotation mutation, the document serializes and opens a new PDFium session, applies annotation color through the native bridge when safe, serializes again, and verifies kind, contents, bounds, color, font size, line width, and geometry point count. The successful path retains the visible `PDFDocument` instance to avoid an Apply-time flash; failed mutations restore prior bytes and Undo/Redo continue to rebuild the display document.
+- Fixed appearance streams allow geometry/content handling. For a pure comment or Highlight color change, the service removes the fixed normal appearance stream and appearance state so PDFium can regenerate the color; other fixed-appearance style changes remain rejected.
+- After a PDFKit annotation mutation, the document serializes and opens a new PDFium session, applies annotation color through the native bridge when safe, serializes again, and verifies kind, contents, bounds, color, font size, line width, and geometry point count. If PDFium initially rejects a Text or Highlight color update because a normal appearance stream remains, the bridge clears that stream and retries before exact RGBA verification. The successful path retains the visible `PDFDocument` instance to avoid an Apply-time flash; failed mutations restore prior bytes and Undo/Redo continue to rebuild the display document.
 
 Because references use annotation-array indices, mutations are applied and verified synchronously against the current document. There is no migration or stable-ID layer for external annotation references.
 
@@ -469,7 +470,7 @@ The app opens encrypted PDFs and can remove their encryption dictionary. Export-
 
 `Packages/PDFiumBridge/Tests/CPDFiumBridgeTests/PDFiumBridgeTests.swift` contains XCTest coverage for:
 
-- annotation color and opacity round trips;
+- annotation color and opacity round trips, including replacement of a fixed-appearance Highlight while preserving its alpha and quadrilateral geometry;
 - existing-text rewrite and style/geometry preservation;
 - object movement, addition, deletion, transformation, and z-order;
 - Unicode searchable layers and multilingual regular/bold/italic CoreText overlays;
@@ -484,7 +485,7 @@ The tests exercise the local package and native bridge. They do not launch the a
 
 ### Standalone validations
 
-- `AnnotationRoundTrip.swift`: creates selectable text on two lines, calls the production highlight service, verifies eight annotation-local quadrilateral points, and verifies highlight serialization/reopen properties alongside note, free-text, and ink annotations.
+- `AnnotationRoundTrip.swift`: creates selectable text on two lines, calls the production highlight service, changes the Highlight to green, verifies its alpha and eight annotation-local quadrilateral points, and verifies highlight serialization/reopen properties alongside note, free-text, and ink annotations.
 - `OCRPolicyValidation.swift`: confirms that image-only pages require OCR and pages with real PDF text are skipped.
 - `MakePDFEditorFixtures.swift`: produces nested-Form and top-level-text fixtures.
 - `MakePhase5ProtectedFixture.swift`: produces and verifies a password-protected fixture.
@@ -555,6 +556,7 @@ The following completed successfully on 2026-08-24 with Xcode 26.6 and Apple Swi
 - Unsigned Debug generic iOS Simulator build: succeeded for arm64 and x86_64 with `CODE_SIGNING_ALLOWED=NO` and DerivedData under `/tmp`.
 - Unsigned Debug generic iOS device build: succeeded for arm64 with `CODE_SIGNING_ALLOWED=NO` and DerivedData under `/tmp`.
 - On 2026-08-26, the updated standalone annotation validation passed with selectable two-line highlight text, eight local quadrilateral points, and serialization/reopen verification. The Highlight/Comment interaction changes and annotation-anchored macOS Comment Editor popover also passed `git diff --check` plus unsigned Debug builds for macOS and the generic iOS Simulator destination. Exact popover placement, hover timing, dynamic sizing, keyboard focus, and selection behavior remain manual UI checks.
+- On 2026-08-26, a focused regression test first reproduced PDFium rejecting a color change for a Highlight with a fixed appearance stream, then passed after the scoped appearance-regeneration fix. The complete `PDFiumBridge` suite passed 27 tests with 0 failures, the standalone annotation round trip passed with the Highlight changed to green while preserving alpha and geometry, and the selected-Highlight color/delete action bar passed `git diff --check` plus unsigned Debug builds for macOS and the generic iOS Simulator destination. Exact action-bar placement, color-popover interaction, tooltips, and deletion behavior remain manual UI checks.
 - SHA-256 comparison: all four bundled PDFium binaries matched the values recorded in `Packages/PDFiumBridge/Vendor/NOTICE.md`.
 
 Additional validation completed on 2026-08-25 after the pending-text, Undo, embedded-font, multi-line editor, background-inspection, and scrolling changes:

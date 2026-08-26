@@ -94,7 +94,10 @@ final class PDFAnnotationService {
             let canRegenerateNoteAppearance = annotation.type == "Text" &&
                 update.color != nil && update.fontColor == nil &&
                 update.fontSize == nil && update.lineWidth == nil
-            guard canRegenerateNoteAppearance else {
+            let canRegenerateHighlightAppearance = annotation.type == "Highlight" &&
+                update.color != nil && update.fontColor == nil &&
+                update.fontSize == nil && update.lineWidth == nil
+            guard canRegenerateNoteAppearance || canRegenerateHighlightAppearance else {
                 throw PDFAnnotationServiceError.appearanceStreamStyleUnsupported
             }
             annotation.removeValue(forAnnotationKey: appearanceDictionaryKey)
