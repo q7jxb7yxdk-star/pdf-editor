@@ -579,15 +579,13 @@ struct ContentView: View {
     }
 
     private func toggleToolPanel() {
-        withAnimation {
-            let willShow = !showsToolPanel
-            showsToolPanel = willShow
-            if willShow {
-                showsPagePanel = false
-            }
-            if !showsToolPanel {
-                showsCommentList = false
-            }
+        let willShow = !showsToolPanel
+        showsToolPanel = willShow
+        if willShow {
+            showsPagePanel = false
+        }
+        if !showsToolPanel {
+            showsCommentList = false
         }
     }
 
