@@ -72,19 +72,6 @@ nonisolated struct PDFPageRange: Equatable, Hashable, Sendable {
     }
 }
 
-nonisolated struct PDFPageSize: Equatable, Sendable {
-    let width: Double
-    let height: Double
-
-    static let letter = PDFPageSize(width: 612, height: 792)
-    static let a4 = PDFPageSize(width: 595.276, height: 841.89)
-
-    init(width: Double, height: Double) {
-        self.width = width
-        self.height = height
-    }
-}
-
 nonisolated enum PDFExportSecurityPolicy: Equatable, Sendable {
     /// Uses the PDF implementation's normal export path, which preserves document security when supported.
     case preserve
@@ -99,7 +86,6 @@ nonisolated struct PDFExportOptions: Equatable, Sendable {
 /// All mutating document actions share one command surface so a PDFium-backed session can replace PDFKit later.
 nonisolated enum PDFEditingCommand: Equatable, Sendable {
     case setDocumentInfo(PDFDocumentInfo)
-    case insertBlankPage(at: Int, size: PDFPageSize)
     case deletePage(at: Int)
     case rotatePage(at: Int, byDegrees: Int)
     case movePage(from: Int, to: Int)
@@ -120,7 +106,6 @@ nonisolated enum PDFEditingError: Error, Equatable, Sendable, LocalizedError {
     case documentPermissionDenied(operation: String)
     case invalidPageIndex(index: Int, pageCount: Int)
     case invalidInsertionIndex(index: Int, pageCount: Int)
-    case invalidPageSize(width: Double, height: Double)
     case invalidRotation(degrees: Int)
     case cannotDeleteLastPage
     case invalidPageOrder(expectedPageCount: Int, actualPageCount: Int)
@@ -129,7 +114,6 @@ nonisolated enum PDFEditingError: Error, Equatable, Sendable, LocalizedError {
     case overlappingPageRange(PDFPageRange)
     case sourceDocumentLocked
     case sourceDocumentInvalid
-    case blankPageCreationFailed
     case pageCopyFailed
     case pageMutationFailed
     case exportFailed
@@ -150,8 +134,6 @@ nonisolated enum PDFEditingError: Error, Equatable, Sendable, LocalizedError {
             return "Page index \(index) is outside the valid range 0..<\(pageCount)."
         case let .invalidInsertionIndex(index, pageCount):
             return "Insertion index \(index) is outside the valid range 0...\(pageCount)."
-        case let .invalidPageSize(width, height):
-            return "Page size \(width) by \(height) is invalid."
         case let .invalidRotation(degrees):
             return "Rotation \(degrees) must be a multiple of 90 degrees."
         case .cannotDeleteLastPage:
@@ -168,8 +150,6 @@ nonisolated enum PDFEditingError: Error, Equatable, Sendable, LocalizedError {
             return "The PDF to merge is password-protected and needs a valid password."
         case .sourceDocumentInvalid:
             return "The PDF to merge could not be opened."
-        case .blankPageCreationFailed:
-            return "The editor could not create a blank PDF page."
         case .pageCopyFailed:
             return "The editor could not make an isolated copy of a PDF page."
         case .pageMutationFailed:

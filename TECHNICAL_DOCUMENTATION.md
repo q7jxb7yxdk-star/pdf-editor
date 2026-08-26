@@ -251,7 +251,7 @@ It is not the normal application backend.
 The public header exposes opaque document/font references and operations for:
 
 - lifecycle, page counts, encryption, permissions, and signature count;
-- page insertion, deletion, rotation, movement, import, copy, and serialization;
+- page deletion, rotation, movement, import, copy, and serialization;
 - recursive page-object paths and object metadata;
 - text, transform, z-order, deletion, image, overlay, and embedded-font operations;
 - annotation color access.
@@ -265,7 +265,6 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 - `PDFDocumentInfo`: optional title, author, subject, creator, keywords, creation date, and modification date.
 - `PDFDocumentMetadata`: page count, encryption/lock state, and document info.
 - `PDFPageRange`: inclusive zero-based bounds.
-- `PDFPageSize`: width/height in PDF points, with Letter and A4 constants.
 - `PDFEditingCommand`: page and metadata operations.
 - `PDFEditingCommandResult`: updated metadata or split output bytes.
 - `PDFExportOptions`: preserve or remove security after authorized unlock.
@@ -450,7 +449,7 @@ These are source/build-setting facts. Sandbox enforcement, final entitlements, s
 
 ### PDF permissions
 
-PDFium-backed insertion, deletion, rotation, movement, reordering, and merge operations check permission bit `0x400` before page assembly. This is not a general editing-permission guarantee: no equivalent explicit permission guard was found in the reviewed PDFium object- or annotation-mutation paths. Whether PDFium or PDFKit independently rejects those mutations has not been established by restricted-document runtime testing. Metadata mutation is distinct and checks PDFKit's `allowsDocumentChanges`.
+PDFium-backed deletion, rotation, movement, reordering, and merge operations check permission bit `0x400` before page assembly. This is not a general editing-permission guarantee: no equivalent explicit permission guard was found in the reviewed PDFium object- or annotation-mutation paths. Whether PDFium or PDFKit independently rejects those mutations has not been established by restricted-document runtime testing. Metadata mutation is distinct and checks PDFKit's `allowsDocumentChanges`.
 
 ### Digital signatures
 
@@ -482,7 +481,7 @@ The app opens encrypted PDFs and can remove their encryption dictionary. Export-
 - bitmap insertion/replacement and alpha handling;
 - shared image and nested/shared Form isolation;
 - clipping and marked-content preservation;
-- page insert/delete/rotate/move/reorder/split/merge;
+- page delete/rotate/move/reorder/split/merge;
 - password acceptance/rejection, encryption preservation, and authorized removal;
 - a 120-page workflow and malformed/truncated input rejection.
 

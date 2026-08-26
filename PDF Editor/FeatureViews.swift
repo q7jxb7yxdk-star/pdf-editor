@@ -12,9 +12,6 @@ enum PDFToolAction {
     case movePageLater
     case rotateLeft
     case rotateRight
-    case insertPage
-    case cropPage
-    case numberPages
     case combineFiles
     case splitPDF
     case compressPDF
@@ -37,7 +34,6 @@ struct PDFToolSidebar: View {
     private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
     private static let sectionTitles: Set<String> = [
         "Edit text",
-        "Edit pages",
         "Organize a PDF",
         "Export PDF to",
         "E-sign",
@@ -87,22 +83,6 @@ struct PDFToolSidebar: View {
                         )
                         tool("Highlight", icon: "highlighter", action: .highlight)
                         tool("Draw freehand", icon: "pencil.and.outline", action: .drawFreehand)
-                    }
-
-                    section("Edit pages") {
-                        tool("Delete", icon: "trash", action: .deletePage, enabled: pageCount > 1 && hasSelectedPage)
-                        tool("Extract", icon: "doc.badge.arrow.up", action: .extractPage, enabled: hasSelectedPage)
-                        menuTool("Reorder", icon: "rectangle.2.swap") {
-                            Button("Move page earlier") { onAction(.movePageEarlier) }
-                            Button("Move page later") { onAction(.movePageLater) }
-                        }
-                        menuTool("Rotate", icon: "rotate.right") {
-                            Button("Rotate left") { onAction(.rotateLeft) }
-                            Button("Rotate right") { onAction(.rotateRight) }
-                        }
-                        tool("Insert", icon: "doc.badge.plus", action: .insertPage)
-                        tool("Crop", icon: "crop", action: .cropPage, enabled: hasSelectedPage)
-                        tool("Number Pages", icon: "number.square", action: .numberPages)
                     }
 
                     section("Organize a PDF") {

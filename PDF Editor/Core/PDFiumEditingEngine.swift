@@ -260,34 +260,6 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         case .setDocumentInfo:
             return try applyMetadataCommandWithPDFKit(command)
 
-        case let .insertBlankPage(index, size):
-            try requirePageAssemblyPermission()
-            try validateInsertionIndex(index)
-            guard size.width.isFinite, size.height.isFinite,
-                  size.width > 0, size.height > 0 else {
-                throw PDFEditingError.invalidPageSize(
-                    width: size.width,
-                    height: size.height
-                )
-            }
-            let previousCount = metadata.pageCount
-            try mutateAndReopen {
-                PEPDFDocumentInsertBlankPage(
-                    handle,
-                    Int32(index),
-                    size.width,
-                    size.height
-                )
-            } verify: {
-                guard metadata.pageCount == previousCount + 1,
-                      let page = pageInfo(at: index) else {
-                    return false
-                }
-                return abs(Double(page.width) - size.width) < 0.01 &&
-                    abs(Double(page.height) - size.height) < 0.01
-            }
-            return .updated(metadata)
-
         case let .deletePage(index):
             try requirePageAssemblyPermission()
             try validatePageIndex(index)

@@ -391,24 +391,18 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertTrue(serialized.contains("EMC"))
     }
 
-    func testPageInsertDeleteAndRotationRoundTrip() throws {
+    func testPageDeleteAndRotationRoundTrip() throws {
         let document = try open(makePageAssemblyPDF())
         defer { PEPDFDocumentClose(document) }
 
         XCTAssertEqual(PEPDFDocumentPageCount(document), 3)
-        XCTAssertTrue(PEPDFDocumentInsertBlankPage(document, 1, 420, 594))
-        XCTAssertEqual(PEPDFDocumentPageCount(document), 4)
-        let inserted = try pageInfo(document, pageIndex: 1)
-        XCTAssertEqual(inserted.width, 420, accuracy: 0.01)
-        XCTAssertEqual(inserted.height, 594, accuracy: 0.01)
-
         XCTAssertTrue(PEPDFDocumentDeletePage(document, 1))
-        XCTAssertEqual(PEPDFDocumentPageCount(document), 3)
+        XCTAssertEqual(PEPDFDocumentPageCount(document), 2)
         XCTAssertTrue(PEPDFDocumentSetPageRotation(document, 0, 2))
 
         let reopened = try open(copyData(document))
         defer { PEPDFDocumentClose(reopened) }
-        XCTAssertEqual(PEPDFDocumentPageCount(reopened), 3)
+        XCTAssertEqual(PEPDFDocumentPageCount(reopened), 2)
         XCTAssertEqual(try pageInfo(reopened, pageIndex: 0).rotation, 2)
     }
 
@@ -514,13 +508,14 @@ final class PDFiumBridgeTests: XCTestCase {
         let document = try open(encrypted, password: password)
         defer { PEPDFDocumentClose(document) }
 
-        XCTAssertTrue(PEPDFDocumentInsertBlankPage(document, 3, 612, 792))
+        XCTAssertTrue(PEPDFDocumentSetPageRotation(document, 0, 1))
         let saved = try copyData(document)
         let pdfKitDocument = try XCTUnwrap(PDFDocument(data: saved))
         XCTAssertTrue(pdfKitDocument.isEncrypted)
         XCTAssertTrue(pdfKitDocument.isLocked)
         XCTAssertTrue(pdfKitDocument.unlock(withPassword: password))
-        XCTAssertEqual(pdfKitDocument.pageCount, 4)
+        XCTAssertEqual(pdfKitDocument.pageCount, 3)
+        XCTAssertEqual(pdfKitDocument.page(at: 0)?.rotation, 90)
     }
 
     func testAuthorizedExportCanRemoveEncryption() throws {

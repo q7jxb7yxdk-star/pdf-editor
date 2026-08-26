@@ -1,4 +1,3 @@
-import CoreGraphics
 import Foundation
 import PDFKit
 
@@ -55,12 +54,6 @@ nonisolated final class PDFKitEditingSession: PDFEditingSession {
         case let .setDocumentInfo(info):
             try requirePermission(for: "document metadata changes", isAllowed: document.allowsDocumentChanges)
             setDocumentInfo(info)
-            return .updated(metadata)
-
-        case let .insertBlankPage(index, size):
-            try requirePageAssemblyPermission()
-            try validateInsertionIndex(index)
-            document.insert(try makeBlankPage(size: size), at: index)
             return .updated(metadata)
 
         case let .deletePage(index):
@@ -192,30 +185,6 @@ nonisolated final class PDFKitEditingSession: PDFEditingSession {
         guard (0...document.pageCount).contains(index) else {
             throw PDFEditingError.invalidInsertionIndex(index: index, pageCount: document.pageCount)
         }
-    }
-
-    private func makeBlankPage(size: PDFPageSize) throws -> PDFPage {
-        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
-            throw PDFEditingError.invalidPageSize(width: size.width, height: size.height)
-        }
-
-        let data = NSMutableData()
-        var mediaBox = CGRect(x: 0, y: 0, width: size.width, height: size.height)
-        guard let consumer = CGDataConsumer(data: data as CFMutableData),
-              let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
-            throw PDFEditingError.blankPageCreationFailed
-        }
-
-        context.beginPDFPage(nil)
-        context.endPDFPage()
-        context.closePDF()
-
-        guard let blankDocument = PDFDocument(data: data as Data),
-              let page = blankDocument.page(at: 0) else {
-            throw PDFEditingError.blankPageCreationFailed
-        }
-        retainedPageDocuments.append(blankDocument)
-        return page
     }
 
     private func movePage(from sourceIndex: Int, to destinationIndex: Int) throws {

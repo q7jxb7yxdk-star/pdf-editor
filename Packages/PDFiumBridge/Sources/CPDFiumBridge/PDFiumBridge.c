@@ -748,25 +748,6 @@ bool PEPDFPageInfoAtIndex(
     return true;
 }
 
-bool PEPDFDocumentInsertBlankPage(
-    PEPDFDocumentRef document,
-    int32_t pageIndex,
-    double width,
-    double height
-) {
-    if (document == NULL || document->handle == NULL || pageIndex < 0 ||
-        pageIndex > FPDF_GetPageCount(document->handle) || width <= 0 ||
-        height <= 0) {
-        return false;
-    }
-    FPDF_PAGE page = FPDFPage_New(document->handle, pageIndex, width, height);
-    if (page == NULL) {
-        return false;
-    }
-    FPDF_ClosePage(page);
-    return true;
-}
-
 bool PEPDFDocumentDeletePage(
     PEPDFDocumentRef document,
     int32_t pageIndex

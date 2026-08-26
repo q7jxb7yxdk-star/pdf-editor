@@ -809,10 +809,6 @@ struct ContentView: View {
             rotate(by: -90)
         case .rotateRight:
             rotate(by: 90)
-        case .insertPage:
-            let insertionIndex = min((selectedPageIndex ?? document.pageCount - 1) + 1, document.pageCount)
-            apply(.insertBlankPage(at: insertionIndex, size: .a4), name: "Insert Page")
-            selectedPageIndex = insertionIndex
         case .combineFiles:
             beginFileImport(.mergePDF)
         case .splitPDF:
@@ -828,10 +824,6 @@ struct ContentView: View {
             if !usesInlinePanels {
                 showsToolPanel = false
             }
-        case .cropPage:
-            showUnavailable("Crop")
-        case .numberPages:
-            showUnavailable("Number Pages")
         case .compressPDF:
             showUnavailable("Compress PDF")
         case .exportWord:

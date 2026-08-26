@@ -69,12 +69,6 @@ bool PEPDFPageInfoAtIndex(
     int32_t pageIndex,
     PEPDFPageInfo* outputInfo
 );
-bool PEPDFDocumentInsertBlankPage(
-    PEPDFDocumentRef document,
-    int32_t pageIndex,
-    double width,
-    double height
-);
 bool PEPDFDocumentDeletePage(
     PEPDFDocumentRef document,
     int32_t pageIndex
