@@ -111,6 +111,8 @@ struct ContentView: View {
     @StateObject private var pendingTextEditStore = PendingTextEditStore()
     @State private var selectedPageIndex: Int? = 0
     @State private var pdfSelection: PDFSelection?
+    @State private var highlightSelectionSnapshot: PDFSelection?
+    @State private var highlightModeEnabled = false
     @State private var password = ""
     @State private var annotationText = ""
     @State private var errorMessage: String?
@@ -265,6 +267,8 @@ struct ContentView: View {
             selectedPageIndex = 0
         }
         .onChange(of: selectedPageIndex) { _, _ in
+            highlightSelectionSnapshot = nil
+            highlightModeEnabled = false
             selectedObject = nil
             selectedAnnotation = nil
             loadCanvasObjects()
@@ -348,13 +352,17 @@ struct ContentView: View {
                 onDelete: deleteAnnotation
             )
         }
+#if os(iOS)
         .sheet(item: $commentEditorAnnotation) { annotation in
             PDFCommentEditor(
                 annotation: annotation,
                 onApply: { updateAnnotation(annotation, update: $0) },
-                onDelete: { deleteAnnotation(annotation) }
+                onDelete: { deleteAnnotation(annotation) },
+                onDismiss: { commentEditorAnnotation = nil },
+                onHoverChanged: { _ in }
             )
         }
+#endif
         .sheet(isPresented: $showsCommentPrompt, onDismiss: cancelCommentPlacement) {
             PDFAddCommentView(
                 text: $annotationText,
@@ -481,6 +489,8 @@ struct ContentView: View {
                     onPlaceComment: selectCommentPlacement,
                     onReplaceTextObject: replaceText,
                     onReplaceAnnotationText: replaceAnnotationText,
+                    onUpdateAnnotation: updateAnnotation,
+                    onDeleteAnnotation: deleteAnnotation,
                     onOpenObject: openObject,
                     onOpenAnnotation: openAnnotation,
                     viewerMode: viewerMode,
@@ -496,6 +506,29 @@ struct ContentView: View {
                         )
                         Button("Cancel", action: cancelCommentPlacement)
                             .buttonStyle(.bordered)
+                            .keyboardShortcut(.cancelAction)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 12)
+                    .shadow(radius: 4, y: 2)
+                }
+
+                if highlightModeEnabled {
+                    HStack(spacing: 12) {
+                        Label(
+                            "Select PDF text, then apply the highlight.",
+                            systemImage: "highlighter"
+                        )
+                        Button("Apply Highlight", action: addHighlight)
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(activeHighlightSelection == nil)
+                        Button("Cancel", action: cancelHighlightMode)
+                            .buttonStyle(.bordered)
+                            .keyboardShortcut(.cancelAction)
                     }
                     .font(.callout)
                     .padding(.horizontal, 14)
@@ -512,7 +545,6 @@ struct ContentView: View {
         PDFToolSidebar(
             pageCount: document.pageCount,
             hasSelectedPage: selectedPageIndex != nil,
-            hasTextSelection: pdfSelection != nil,
             onAction: handleToolAction
         )
     }
@@ -580,6 +612,12 @@ struct ContentView: View {
 
     private func toggleToolPanel() {
         let willShow = !showsToolPanel
+        if willShow {
+            highlightSelectionSnapshot = validHighlightSelection(pdfSelection)?
+                .copy() as? PDFSelection
+        } else {
+            highlightSelectionSnapshot = nil
+        }
         showsToolPanel = willShow
         if willShow {
             showsPagePanel = false
@@ -673,7 +711,7 @@ struct ContentView: View {
             }
             showsCommentList = true
         case .highlight:
-            addHighlight()
+            beginHighlight()
         case .deletePage:
             guard let index = selectedPageIndex else { return }
             apply(.deletePage(at: index), name: "Delete Page")
@@ -1269,6 +1307,7 @@ struct ContentView: View {
 
     private func beginCommentPlacement() {
         guard document.pageCount > 0 else { return }
+        cancelHighlightMode()
         selectedObject = nil
         selectedAnnotation = nil
         annotationText = ""
@@ -1297,7 +1336,9 @@ struct ContentView: View {
         commentPlacementEnabled = false
         pendingCommentPlacement = nil
         selectedAnnotation = annotation
+#if os(iOS)
         commentEditorAnnotation = annotation
+#endif
     }
 
     private func openObject(_ object: PDFPageObjectSnapshot) {
@@ -1333,14 +1374,45 @@ struct ContentView: View {
         }
     }
 
+    private func beginHighlight() {
+        cancelCommentPlacement()
+        guard activeHighlightSelection != nil else {
+            highlightModeEnabled = true
+            return
+        }
+        addHighlight()
+    }
+
     private func addHighlight() {
-        guard let selection = pdfSelection else { return }
+        guard let selection = activeHighlightSelection else { return }
         do {
             try document.mutateAnnotations(undoManager: undoManager, actionName: "Highlight Text") {
                 _ = try annotationService.addHighlight(to: selection)
             }
+            highlightSelectionSnapshot = nil
+            highlightModeEnabled = false
             refreshAnnotationsIfNeeded()
         } catch { present(error) }
+    }
+
+    private func cancelHighlightMode() {
+        highlightModeEnabled = false
+        highlightSelectionSnapshot = nil
+    }
+
+    private var activeHighlightSelection: PDFSelection? {
+        validHighlightSelection(pdfSelection) ??
+            validHighlightSelection(highlightSelectionSnapshot)
+    }
+
+    private func validHighlightSelection(_ selection: PDFSelection?) -> PDFSelection? {
+        guard let selection,
+              let text = selection.string,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              selection.pages.contains(where: { !selection.bounds(for: $0).isEmpty }) else {
+            return nil
+        }
+        return selection
     }
 
     private func addSignature(_ strokes: [SignatureStroke]) {

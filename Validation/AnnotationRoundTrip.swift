@@ -1,6 +1,29 @@
 import AppKit
+import CoreText
 import Foundation
 import PDFKit
+
+#if ANNOTATION_STANDALONE_VALIDATION
+nonisolated struct PDFTextStyle: OptionSet {
+    let rawValue: UInt8
+
+    static let bold = PDFTextStyle(rawValue: 1 << 0)
+    static let italic = PDFTextStyle(rawValue: 1 << 1)
+}
+
+nonisolated struct PDFObjectColor {
+    let red: UInt32
+    let green: UInt32
+    let blue: UInt32
+    let alpha: UInt32
+}
+
+nonisolated struct PDFPageObjectSnapshot {
+    let bounds: CGRect
+    let fillColor: PDFObjectColor
+    let fontSize: CGFloat?
+}
+#endif
 
 @main
 struct AnnotationRoundTripValidation {
@@ -10,6 +33,22 @@ struct AnnotationRoundTripValidation {
         let consumer = CGDataConsumer(data: data as CFMutableData)!
         let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil)!
         context.beginPDFPage(nil)
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 18),
+            .foregroundColor: NSColor.black,
+        ]
+        for (text, position) in [
+            ("Highlight this text", CGPoint(x: 90, y: 365)),
+            ("across two lines", CGPoint(x: 90, y: 340)),
+        ] {
+            context.textPosition = position
+            CTLineDraw(
+                CTLineCreateWithAttributedString(
+                    NSAttributedString(string: text, attributes: textAttributes)
+                ),
+                context
+            )
+        }
         context.endPDFPage()
         context.closePDF()
         let document = PDFDocument(data: data as Data)!
@@ -36,16 +75,26 @@ struct AnnotationRoundTripValidation {
             bounds: CGRect(x: 120, y: 450, width: 240, height: 90),
             to: page
         )
-        let highlightBounds = CGRect(x: 90, y: 350, width: 180, height: 24)
-        let highlight = PDFAnnotation(bounds: highlightBounds, forType: .highlight, withProperties: nil)
-        highlight.color = .systemYellow
-        highlight.quadrilateralPoints = [
-            NSValue(point: CGPoint(x: highlightBounds.minX, y: highlightBounds.maxY)),
-            NSValue(point: CGPoint(x: highlightBounds.maxX, y: highlightBounds.maxY)),
-            NSValue(point: CGPoint(x: highlightBounds.minX, y: highlightBounds.minY)),
-            NSValue(point: CGPoint(x: highlightBounds.maxX, y: highlightBounds.minY)),
-        ]
-        page.addAnnotation(highlight)
+        guard let pageText = page.string,
+              let textSelection = page.selection(
+                for: NSRange(location: 0, length: pageText.utf16.count)
+              ) else {
+            throw NSError(
+                domain: "AnnotationValidation",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Could not select generated PDF text"]
+            )
+        }
+        let highlights = try service.addHighlight(to: textSelection)
+        precondition(highlights.count == 1)
+        let highlight = highlights[0]
+        let highlightBounds = highlight.bounds
+        let highlightPoints = highlight.quadrilateralPoints?.map(\.pointValue) ?? []
+        precondition(highlightPoints.count == 8)
+        precondition(highlightPoints.allSatisfy {
+            $0.x >= -0.05 && $0.x <= highlightBounds.width + 0.05 &&
+                $0.y >= -0.05 && $0.y <= highlightBounds.height + 0.05
+        })
 
         var snapshots = service.snapshots(on: page, pageIndex: 0)
         guard snapshots.count == 4 else {
@@ -104,7 +153,7 @@ struct AnnotationRoundTripValidation {
             with: .bounds(CGRect(x: 110, y: 330, width: 220, height: 30)),
             in: document
         )
-        precondition(expectedMarkup.geometryPointCount == 4)
+        precondition(expectedMarkup.geometryPointCount == 8)
 
         guard let serialized = document.dataRepresentation(),
               let reopened = PDFDocument(data: serialized) else {
@@ -126,7 +175,7 @@ struct AnnotationRoundTripValidation {
         precondition(abs(snapshots[1].fontSize! - 24) < 0.05)
         precondition(abs(snapshots[2].bounds.width - 300) < 0.05)
         precondition(snapshots[2].geometryPointCount == 4)
-        precondition(snapshots[3].geometryPointCount == 4)
+        precondition(snapshots[3].geometryPointCount == 8)
 
         print("Annotation round-trip validation passed (note, free text, ink, highlight geometry and style).")
     }

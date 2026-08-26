@@ -330,10 +330,10 @@ final class PDFAnnotationService {
                 .flatMap { lineSelection -> [NSValue] in
                     let line = lineSelection.bounds(for: page)
                     return [
-                        CGPoint(x: line.minX, y: line.maxY),
-                        CGPoint(x: line.maxX, y: line.maxY),
-                        CGPoint(x: line.minX, y: line.minY),
-                        CGPoint(x: line.maxX, y: line.minY),
+                        CGPoint(x: line.minX - bounds.minX, y: line.maxY - bounds.minY),
+                        CGPoint(x: line.maxX - bounds.minX, y: line.maxY - bounds.minY),
+                        CGPoint(x: line.minX - bounds.minX, y: line.minY - bounds.minY),
+                        CGPoint(x: line.maxX - bounds.minX, y: line.minY - bounds.minY),
                     ].map(pointValue)
                 }
             page.addAnnotation(annotation)

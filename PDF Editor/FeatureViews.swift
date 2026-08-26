@@ -47,7 +47,6 @@ struct PDFToolSidebar: View {
 
     let pageCount: Int
     let hasSelectedPage: Bool
-    let hasTextSelection: Bool
     let onAction: (PDFToolAction) -> Void
 
     @State private var expandedSections: Set<String>
@@ -55,12 +54,10 @@ struct PDFToolSidebar: View {
     init(
         pageCount: Int,
         hasSelectedPage: Bool,
-        hasTextSelection: Bool,
         onAction: @escaping (PDFToolAction) -> Void
     ) {
         self.pageCount = pageCount
         self.hasSelectedPage = hasSelectedPage
-        self.hasTextSelection = hasTextSelection
         self.onAction = onAction
         _expandedSections = State(initialValue: Self.loadExpandedSections())
     }
@@ -89,7 +86,7 @@ struct PDFToolSidebar: View {
                             action: .editComments,
                             enabled: hasSelectedPage
                         )
-                        tool("Highlight", icon: "highlighter", action: .highlight, enabled: hasTextSelection)
+                        tool("Highlight", icon: "highlighter", action: .highlight)
                         tool("Draw freehand", icon: "pencil.and.outline", action: .drawFreehand)
                         tool("Erase a drawing", icon: "eraser", action: .eraseDrawing)
                     }
@@ -864,8 +861,8 @@ struct PDFCommentEditor: View {
     let annotation: PDFAnnotationSnapshot
     let onApply: (PDFAnnotationUpdate) -> Void
     let onDelete: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
+    let onDismiss: () -> Void
+    let onHoverChanged: (Bool) -> Void
 
     var body: some View {
         NavigationStack {
@@ -877,19 +874,23 @@ struct PDFCommentEditor: View {
                     onApply: onApply,
                     onDelete: {
                         onDelete()
-                        dismiss()
-                    }
+                        onDismiss()
+                    },
+                    usesExpandedContentsEditor: true
                 )
                 .padding()
             }
             .navigationTitle("Comment Editor")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Done", action: onDismiss)
                 }
             }
         }
         .frame(minWidth: 360, minHeight: 320)
+#if os(macOS)
+        .onHover(perform: onHoverChanged)
+#endif
     }
 }
 
@@ -915,6 +916,14 @@ struct PDFAddCommentView: View {
                 TextEditor(text: $text)
                     .font(.body)
                     .focused($isEditorFocused)
+                    .onKeyPress(.return, phases: .down) { keyPress in
+                        guard keyPress.modifiers.contains(.shift), canAdd else {
+                            return .ignored
+                        }
+                        onAdd()
+                        dismiss()
+                        return .handled
+                    }
                     .scrollContentBackground(.hidden)
                     .padding(8)
                     .frame(minHeight: 150)
@@ -934,6 +943,7 @@ struct PDFAddCommentView: View {
                         onCancel()
                         dismiss()
                     }
+                    .keyboardShortcut(.cancelAction)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
@@ -955,6 +965,7 @@ private struct AnnotationEditorRow: View {
     let onSelect: () -> Void
     let onApply: (PDFAnnotationUpdate) -> Void
     let onDelete: () -> Void
+    let usesExpandedContentsEditor: Bool
 
     @State private var contents: String
     @State private var color: PDFAnnotationColor
@@ -967,13 +978,15 @@ private struct AnnotationEditorRow: View {
         isSelected: Bool,
         onSelect: @escaping () -> Void,
         onApply: @escaping (PDFAnnotationUpdate) -> Void,
-        onDelete: @escaping () -> Void
+        onDelete: @escaping () -> Void,
+        usesExpandedContentsEditor: Bool = false
     ) {
         self.annotation = annotation
         self.isSelected = isSelected
         self.onSelect = onSelect
         self.onApply = onApply
         self.onDelete = onDelete
+        self.usesExpandedContentsEditor = usesExpandedContentsEditor
         _contents = State(initialValue: annotation.contents)
         _color = State(initialValue: annotation.color)
         _opacity = State(initialValue: Double(annotation.color.alpha))
@@ -997,8 +1010,31 @@ private struct AnnotationEditorRow: View {
             }
 
             if annotation.kind == .note || annotation.kind == .freeText {
-                TextField("Contents", text: $contents, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
+                if usesExpandedContentsEditor {
+                    ZStack(alignment: .topLeading) {
+                        Text(contents.isEmpty ? " " : contents)
+                            .font(.body)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .hidden()
+
+                        TextEditor(text: $contents)
+                            .font(.body)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(minHeight: 150)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.separator, lineWidth: 1)
+                    }
+                } else {
+                    TextField("Contents", text: $contents, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
 
             HStack(spacing: 12) {

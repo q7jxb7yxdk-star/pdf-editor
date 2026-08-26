@@ -9,11 +9,30 @@ import AppKit
 private protocol PDFInteractionMouseHandling: AnyObject {
     func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool
+    func handleMouseMoved(_ event: NSEvent, in pdfView: PDFView)
+    func handleAnnotationHoverEnded(in pdfView: PDFView)
     func handleScrollWillBegin(in pdfView: PDFView)
 }
 
 private final class PDFInteractionPDFView: PDFView {
     weak var interactionHandler: PDFInteractionMouseHandling?
+    private var hoverTrackingArea: NSTrackingArea?
+    private var annotationHoverTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let defaultHit = super.hitTest(point)
@@ -37,9 +56,50 @@ private final class PDFInteractionPDFView: PDFView {
         super.mouseDown(with: event)
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        interactionHandler?.handleMouseMoved(event, in: self)
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if event.trackingArea === annotationHoverTrackingArea {
+            clearAnnotationHoverTrackingArea()
+            interactionHandler?.handleAnnotationHoverEnded(in: self)
+        }
+        super.mouseExited(with: event)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         interactionHandler?.handleScrollWillBegin(in: self)
         super.scrollWheel(with: event)
+    }
+
+    fileprivate func removeAnnotationToolTips() {
+        removeToolTipsRecursively(from: self)
+    }
+
+    fileprivate func trackAnnotationHover(in rect: CGRect) {
+        clearAnnotationHoverTrackingArea()
+        let trackingArea = NSTrackingArea(
+            rect: rect,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        annotationHoverTrackingArea = trackingArea
+    }
+
+    fileprivate func clearAnnotationHoverTrackingArea() {
+        if let annotationHoverTrackingArea {
+            removeTrackingArea(annotationHoverTrackingArea)
+            self.annotationHoverTrackingArea = nil
+        }
+    }
+
+    private func removeToolTipsRecursively(from view: NSView) {
+        view.removeAllToolTips()
+        view.subviews.forEach(removeToolTipsRecursively)
     }
 }
 
@@ -138,6 +198,8 @@ struct PDFKitView: NSViewRepresentable {
     let onPlaceComment: (Int, CGPoint) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+    let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
+    let onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
     let viewerMode: PDFViewerMode
@@ -200,6 +262,8 @@ struct PDFKitView: UIViewRepresentable {
     let onPlaceComment: (Int, CGPoint) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+    let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
+    let onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
     let viewerMode: PDFViewerMode
@@ -244,6 +308,8 @@ private extension PDFKitView {
             onPlaceComment: onPlaceComment,
             onReplaceTextObject: onReplaceTextObject,
             onReplaceAnnotationText: onReplaceAnnotationText,
+            onUpdateAnnotation: onUpdateAnnotation,
+            onDeleteAnnotation: onDeleteAnnotation,
             onOpenObject: onOpenObject,
             onOpenAnnotation: onOpenAnnotation
         )
@@ -295,6 +361,8 @@ private extension PDFKitView {
         coordinator.onPlaceComment = onPlaceComment
         coordinator.onReplaceTextObject = onReplaceTextObject
         coordinator.onReplaceAnnotationText = onReplaceAnnotationText
+        coordinator.onUpdateAnnotation = onUpdateAnnotation
+        coordinator.onDeleteAnnotation = onDeleteAnnotation
         coordinator.onOpenObject = onOpenObject
         coordinator.onOpenAnnotation = onOpenAnnotation
         coordinator.updateGestureAvailability()
@@ -400,6 +468,8 @@ extension PDFKitView {
         var onPlaceComment: (Int, CGPoint) -> Void
         var onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
         var onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+        var onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
+        var onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
         var onOpenObject: (PDFPageObjectSnapshot) -> Void
         var onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
         var lastViewerCommandID: UUID?
@@ -425,6 +495,7 @@ extension PDFKitView {
             var keepsSelectionVisible = true
         }
         private var pendingTextActivation: PendingTextActivation?
+        private var hoveredCommentReference: PDFAnnotationReference?
 
 #if os(macOS)
         private struct InlineTextStyle {
@@ -490,6 +561,11 @@ extension PDFKitView {
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
         private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
         private var scrollWheelEventMonitor: Any?
+        private var commentPopover: NSPopover?
+        private var commentPopoverReference: PDFAnnotationReference?
+        private var commentPopoverOpenedByHover = false
+        private var hasEnteredCommentPopover = false
+        private var commentPopoverCloseWorkItem: DispatchWorkItem?
         private struct TransientStagedTextFallback {
             let objectID: String
             let pageIndex: Int
@@ -527,6 +603,8 @@ extension PDFKitView {
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
             onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void,
             onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String) -> Void,
+            onUpdateAnnotation: @escaping (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void,
+            onDeleteAnnotation: @escaping (PDFAnnotationSnapshot) -> Void,
             onOpenObject: @escaping (PDFPageObjectSnapshot) -> Void,
             onOpenAnnotation: @escaping (PDFAnnotationSnapshot) -> Void
         ) {
@@ -546,6 +624,8 @@ extension PDFKitView {
             self.onPlaceComment = onPlaceComment
             self.onReplaceTextObject = onReplaceTextObject
             self.onReplaceAnnotationText = onReplaceAnnotationText
+            self.onUpdateAnnotation = onUpdateAnnotation
+            self.onDeleteAnnotation = onDeleteAnnotation
             self.onOpenObject = onOpenObject
             self.onOpenAnnotation = onOpenAnnotation
             super.init()
@@ -642,6 +722,7 @@ extension PDFKitView {
         func stopObserving() {
             finishInlineTextEditing(commit: false)
             pendingTextActivation = nil
+            hoveredCommentReference = nil
             observers.forEach(NotificationCenter.default.removeObserver)
             observers.removeAll()
 #if os(macOS)
@@ -654,6 +735,8 @@ extension PDFKitView {
             handleLayers.forEach { $0.removeFromSuperlayer() }
             if let pdfView {
 #if os(macOS)
+                closeCommentPopover()
+                (pdfView as? PDFInteractionPDFView)?.clearAnnotationHoverTrackingArea()
                 (pdfView as? PDFInteractionPDFView)?.interactionHandler = nil
                 pdfView.pageOverlayViewProvider = nil
                 removeTransientStagedTextFallback()
@@ -860,7 +943,20 @@ extension PDFKitView {
                 selectedObject.wrappedValue = nil
                 selectedAnnotation.wrappedValue = annotation
                 selectedPageIndex.wrappedValue = pageIndex
+#if os(macOS)
+                if annotation.kind == .note {
+                    presentCommentPopover(
+                        for: annotation,
+                        on: page,
+                        in: pdfView,
+                        openedByHover: false
+                    )
+                } else {
+                    onOpenAnnotation(annotation)
+                }
+#else
                 onOpenAnnotation(annotation)
+#endif
                 updateGestureAvailability()
                 return
             }
@@ -920,7 +1016,20 @@ extension PDFKitView {
                         self?.beginInlineTextEditing(annotation)
                     }
                 } else {
+#if os(macOS)
+                    if annotation.kind == .note {
+                        presentCommentPopover(
+                            for: annotation,
+                            on: page,
+                            in: pdfView,
+                            openedByHover: false
+                        )
+                    } else {
+                        onOpenAnnotation(annotation)
+                    }
+#else
                     onOpenAnnotation(annotation)
+#endif
                 }
                 return
             }
@@ -2911,7 +3020,139 @@ extension PDFKitView.Coordinator: PDFPageOverlayViewProvider {
 }
 
 extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
+    func handleMouseMoved(_ event: NSEvent, in pdfView: PDFView) {
+        let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
+        guard let page = pdfView.page(for: viewPoint, nearest: false),
+              let document = pdfView.document else {
+            endAnnotationHover(in: pdfView)
+            return
+        }
+        let pageIndex = document.index(for: page)
+        let pagePoint = pdfView.convert(viewPoint, to: page)
+        guard let annotation = annotation(at: pagePoint, pageIndex: pageIndex),
+              annotation.kind == .note else {
+            endAnnotationHover(in: pdfView)
+            return
+        }
+        guard hoveredCommentReference != annotation.reference else { return }
+        if hoveredCommentReference != nil { scheduleCommentPopoverClose() }
+        hoveredCommentReference = annotation.reference
+        if let interactionView = pdfView as? PDFInteractionPDFView {
+            interactionView.removeAnnotationToolTips()
+            interactionView.trackAnnotationHover(
+                in: pdfView.convert(annotation.bounds, from: page)
+            )
+        }
+        selectedAnnotation.wrappedValue = annotation
+        selectedPageIndex.wrappedValue = pageIndex
+        onOpenAnnotation(annotation)
+        presentCommentPopover(
+            for: annotation,
+            on: page,
+            in: pdfView,
+            openedByHover: true
+        )
+    }
+
+    func handleAnnotationHoverEnded(in pdfView: PDFView) {
+        endAnnotationHover(in: pdfView)
+    }
+
+    private func endAnnotationHover(in pdfView: PDFView) {
+        guard hoveredCommentReference != nil else { return }
+        hoveredCommentReference = nil
+        (pdfView as? PDFInteractionPDFView)?.clearAnnotationHoverTrackingArea()
+        scheduleCommentPopoverClose()
+    }
+
+    private func presentCommentPopover(
+        for annotation: PDFAnnotationSnapshot,
+        on page: PDFPage,
+        in pdfView: PDFView,
+        openedByHover: Bool
+    ) {
+        if commentPopoverReference == annotation.reference,
+           commentPopover?.isShown == true {
+            if !openedByHover {
+                commentPopoverOpenedByHover = false
+                cancelCommentPopoverClose()
+            }
+            return
+        }
+
+        closeCommentPopover()
+        commentPopoverReference = annotation.reference
+        commentPopoverOpenedByHover = openedByHover
+        hasEnteredCommentPopover = false
+
+        let popover = NSPopover()
+        popover.behavior = .applicationDefined
+        popover.animates = false
+        let rootView = PDFCommentEditor(
+            annotation: annotation,
+            onApply: { [weak self] update in
+                self?.onUpdateAnnotation(annotation, update)
+            },
+            onDelete: { [weak self] in
+                self?.onDeleteAnnotation(annotation)
+            },
+            onDismiss: { [weak self] in
+                self?.closeCommentPopover()
+            },
+            onHoverChanged: { [weak self] isHovering in
+                self?.handleCommentPopoverHover(isHovering)
+            }
+        )
+        let hostingController = NSHostingController(rootView: rootView)
+        hostingController.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = hostingController
+        popover.contentSize = NSSize(width: 360, height: 320)
+        commentPopover = popover
+
+        let anchorRect = pdfView.convert(annotation.bounds, from: page).standardized
+        popover.show(relativeTo: anchorRect, of: pdfView, preferredEdge: .maxX)
+    }
+
+    private func handleCommentPopoverHover(_ isHovering: Bool) {
+        guard commentPopoverOpenedByHover else { return }
+        cancelCommentPopoverClose()
+        if isHovering {
+            hasEnteredCommentPopover = true
+        } else if hasEnteredCommentPopover {
+            closeCommentPopover()
+        }
+    }
+
+    private func scheduleCommentPopoverClose() {
+        guard commentPopoverOpenedByHover,
+              !hasEnteredCommentPopover else { return }
+        cancelCommentPopoverClose()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.commentPopoverOpenedByHover,
+                  !self.hasEnteredCommentPopover else { return }
+            self.closeCommentPopover()
+        }
+        commentPopoverCloseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: workItem)
+    }
+
+    private func cancelCommentPopoverClose() {
+        commentPopoverCloseWorkItem?.cancel()
+        commentPopoverCloseWorkItem = nil
+    }
+
+    private func closeCommentPopover() {
+        cancelCommentPopoverClose()
+        commentPopover?.performClose(nil)
+        commentPopover = nil
+        commentPopoverReference = nil
+        commentPopoverOpenedByHover = false
+        hasEnteredCommentPopover = false
+    }
+
     func handleScrollWillBegin(in pdfView: PDFView) {
+        closeCommentPopover()
         if inlineTextField != nil {
             finishInlineTextEditing(commit: true)
             clearStagedTextSelection()
