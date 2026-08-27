@@ -366,22 +366,71 @@ final class PDFAnnotationService {
         bounds: CGRect,
         to page: PDFPage
     ) throws -> PDFAnnotation {
-        let drawableStrokes = strokes.filter { $0.points.count > 1 }
+        let placementBounds = bounds.standardized
+        let drawableStrokes = strokes.filter {
+            $0.points.count > 1 && $0.points.allSatisfy { $0.x.isFinite && $0.y.isFinite }
+        }
         guard !drawableStrokes.isEmpty else {
             throw PDFAnnotationServiceError.emptySignature
         }
 
+        // Signature strokes are normalized to their requested placement container.
+        // Keep that visual mapping, but make the annotation itself hug the actual ink
+        // so selection and editing controls do not include unused canvas whitespace.
+        let pageStrokes = drawableStrokes.map { stroke in
+            stroke.points.map { point in
+                CGPoint(
+                    x: placementBounds.minX + min(max(point.x, 0), 1) * placementBounds.width,
+                    y: placementBounds.minY + (1 - min(max(point.y, 0), 1)) * placementBounds.height
+                )
+            }
+        }
+        let pagePoints = pageStrokes.flatMap { $0 }
+        guard let minimumX = pagePoints.map(\.x).min(),
+              let maximumX = pagePoints.map(\.x).max(),
+              let minimumY = pagePoints.map(\.y).min(),
+              let maximumY = pagePoints.map(\.y).max() else {
+            throw PDFAnnotationServiceError.emptySignature
+        }
+        let lineWidth: CGFloat = 2
+        let padding = max(lineWidth, 2)
+        var tightBounds = CGRect(
+            x: minimumX - padding,
+            y: minimumY - padding,
+            width: maximumX - minimumX + padding * 2,
+            height: maximumY - minimumY + padding * 2
+        ).standardized
+        if tightBounds.width < 4 {
+            tightBounds = tightBounds.insetBy(dx: -(4 - tightBounds.width) / 2, dy: 0)
+        }
+        if tightBounds.height < 4 {
+            tightBounds = tightBounds.insetBy(dx: 0, dy: -(4 - tightBounds.height) / 2)
+        }
+
         let annotation = PDFAnnotation(
-            bounds: bounds,
+            bounds: tightBounds,
             forType: .ink,
             withProperties: nil
         )
-        setPrimaryColor(components(of: labelColor), on: annotation)
+        setPrimaryColor(.black, on: annotation)
         annotation.border = PDFBorder()
-        annotation.border?.lineWidth = 2
+        annotation.border?.lineWidth = lineWidth
 
-        for stroke in drawableStrokes {
-            annotation.add(makePath(from: stroke.points, in: bounds))
+        for stroke in pageStrokes {
+            let localPoints = stroke.map {
+                CGPoint(x: $0.x - tightBounds.minX, y: $0.y - tightBounds.minY)
+            }
+            let path = PlatformBezierPath()
+            path.move(to: localPoints[0])
+            for point in localPoints.dropFirst() {
+#if os(macOS)
+                path.line(to: point)
+#else
+                path.addLine(to: point)
+#endif
+            }
+            path.lineWidth = lineWidth
+            annotation.add(path)
         }
 
         page.addAnnotation(annotation)
@@ -483,34 +532,6 @@ final class PDFAnnotationService {
             throw PDFAnnotationServiceError.emptyText
         }
         return text
-    }
-
-    private func makePath(
-        from normalizedPoints: [CGPoint],
-        in bounds: CGRect
-    ) -> PlatformBezierPath {
-        let points = normalizedPoints.map { point in
-            CGPoint(
-                x: min(max(point.x, 0), 1) * bounds.width,
-                y: (1 - min(max(point.y, 0), 1)) * bounds.height
-            )
-        }
-        let path = PlatformBezierPath()
-
-        guard let first = points.first else {
-            return path
-        }
-
-        path.move(to: first)
-        for point in points.dropFirst() {
-            #if os(macOS)
-            path.line(to: point)
-            #else
-            path.addLine(to: point)
-            #endif
-        }
-        path.lineWidth = 2
-        return path
     }
 
     private func snapshot(

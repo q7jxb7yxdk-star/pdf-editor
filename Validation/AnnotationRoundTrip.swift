@@ -188,6 +188,43 @@ struct AnnotationRoundTripValidation {
         precondition(abs(expectedMarkup.color.blue - markupColor.blue) < 0.01)
         precondition(abs(expectedMarkup.color.alpha - markupColor.alpha) < 0.01)
 
+        let signatureContainers = [
+            CGRect(x: 48, y: 210, width: 200, height: 80),
+            CGRect(x: 310, y: 120, width: 180, height: 72),
+        ]
+        for bounds in signatureContainers {
+            _ = try service.addSignature(
+                strokes: [
+                    SignatureStroke(points: [
+                        CGPoint(x: 0.32, y: 0.58),
+                        CGPoint(x: 0.46, y: 0.36),
+                        CGPoint(x: 0.58, y: 0.61),
+                    ]),
+                    SignatureStroke(points: [
+                        CGPoint(x: 0.48, y: 0.48),
+                        CGPoint(x: 0.61, y: 0.42),
+                        CGPoint(x: 0.68, y: 0.53),
+                    ]),
+                ],
+                bounds: bounds,
+                to: page
+            )
+        }
+        let signatureSnapshots = Array(service.snapshots(on: page, pageIndex: 0).suffix(2))
+        precondition(signatureSnapshots.count == 2)
+        for (signature, container) in zip(signatureSnapshots, signatureContainers) {
+            precondition(signature.kind == .ink)
+            precondition(signature.bounds.width < container.width * 0.5)
+            precondition(signature.bounds.height < container.height * 0.5)
+            precondition(signature.geometryPointCount == 6)
+            precondition(abs(signature.color.alpha - 1) < 0.01)
+            try requireInkPathsInsideAnnotationBounds(
+                signature.reference,
+                in: document,
+                service: service
+            )
+        }
+
         guard let serialized = document.dataRepresentation(),
               let reopened = PDFDocument(data: serialized) else {
             throw CocoaError(.fileWriteUnknown)
@@ -200,6 +237,9 @@ struct AnnotationRoundTripValidation {
         try service.verify(expectedText, in: reopened)
         try service.verify(expectedInk, in: reopened)
         try service.verify(expectedMarkup, in: reopened)
+        for signature in signatureSnapshots {
+            try service.verify(signature, in: reopened)
+        }
 
         let reopenedPage = reopened.page(at: 0)!
         precondition(reopenedPage.annotations[0].iconType == .comment)
@@ -212,24 +252,28 @@ struct AnnotationRoundTripValidation {
         precondition(abs(snapshots[3].color.red - markupColor.red) < 0.01)
         precondition(abs(snapshots[3].color.green - markupColor.green) < 0.01)
         precondition(abs(snapshots[3].color.blue - markupColor.blue) < 0.01)
+        precondition(snapshots.count == 6)
+        precondition(snapshots[4].geometryPointCount == 6)
+        precondition(snapshots[5].geometryPointCount == 6)
 
-        let reopenedInk = try service.update(
-            snapshots[2].reference,
+        let restyledSignature = try service.update(
+            snapshots[5].reference,
             with: PDFAnnotationUpdate(color: .blue, lineWidth: 6),
             in: reopened
         )
+        precondition(abs(restyledSignature.color.alpha - 1) < 0.01)
         guard let restyledData = reopened.dataRepresentation(),
               let restyledDocument = PDFDocument(data: restyledData) else {
             throw CocoaError(.fileWriteUnknown)
         }
-        try service.verify(reopenedInk, in: restyledDocument)
+        try service.verify(restyledSignature, in: restyledDocument)
         try requireInkPathsInsideAnnotationBounds(
-            reopenedInk.reference,
+            restyledSignature.reference,
             in: restyledDocument,
             service: service
         )
 
-        print("Annotation round-trip validation passed (note, free text, freehand ink, highlight geometry and style).")
+        print("Annotation round-trip validation passed (note, free text, freehand ink, highlight, and multiple signatures).")
     }
 
     private static func requireInkPathsInsideAnnotationBounds(

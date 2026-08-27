@@ -136,6 +136,68 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(color.blueComponent, 0.15, accuracy: 0.01)
     }
 
+    func testDenseMultiStrokeInkStyleSurvivesPDFiumSaveAsCopy() throws {
+        let document = PDFDocument()
+        let page = PDFPage()
+        document.insert(page, at: 0)
+
+        let bounds = CGRect(x: 90.125, y: 140.375, width: 164.75, height: 58.5)
+        let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
+        annotation.color = .labelColor
+        annotation.border = PDFBorder()
+        annotation.border?.lineWidth = 2
+        for strokeIndex in 0..<3 {
+            let path = NSBezierPath()
+            for pointIndex in 0..<320 {
+                let progress = CGFloat(pointIndex) / 319
+                let point = CGPoint(
+                    x: 3 + progress * (bounds.width - 6),
+                    y: 8 + CGFloat(strokeIndex) * 16 + sin(progress * .pi * 8) * 6
+                )
+                if pointIndex == 0 {
+                    path.move(to: point)
+                } else {
+                    path.line(to: point)
+                }
+            }
+            path.lineWidth = 2
+            annotation.add(path)
+        }
+        page.addAnnotation(annotation)
+
+        let initiallySerialized = try XCTUnwrap(document.dataRepresentation())
+        let styledDocument = try XCTUnwrap(PDFDocument(data: initiallySerialized))
+        let styledAnnotation = try XCTUnwrap(styledDocument.page(at: 0)?.annotations.first)
+        styledAnnotation.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP"))
+        styledAnnotation.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AS"))
+        styledAnnotation.color = .systemBlue
+        styledAnnotation.border?.lineWidth = 6
+        let styledData = try XCTUnwrap(styledDocument.dataRepresentation())
+        let expectedDocument = try XCTUnwrap(PDFDocument(data: styledData))
+        let expected = try XCTUnwrap(expectedDocument.page(at: 0)?.annotations.first)
+
+        let pdfiumDocument = try open(styledData)
+        defer { PEPDFDocumentClose(pdfiumDocument) }
+        let saved = try copyData(pdfiumDocument)
+        let reopenedDocument = try XCTUnwrap(PDFDocument(data: saved))
+        let actual = try XCTUnwrap(reopenedDocument.page(at: 0)?.annotations.first)
+
+        XCTAssertEqual(actual.bounds.minX, expected.bounds.minX, accuracy: 0.05)
+        XCTAssertEqual(actual.bounds.minY, expected.bounds.minY, accuracy: 0.05)
+        XCTAssertEqual(actual.bounds.width, expected.bounds.width, accuracy: 0.05)
+        XCTAssertEqual(actual.bounds.height, expected.bounds.height, accuracy: 0.05)
+        XCTAssertEqual(actual.border?.lineWidth, expected.border?.lineWidth)
+        XCTAssertEqual(
+            actual.paths?.reduce(0) { $0 + $1.elementCount },
+            expected.paths?.reduce(0) { $0 + $1.elementCount }
+        )
+        let expectedColor = try XCTUnwrap(expected.color.usingColorSpace(.deviceRGB))
+        let actualColor = try XCTUnwrap(actual.color.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(actualColor.redComponent, expectedColor.redComponent, accuracy: 0.01)
+        XCTAssertEqual(actualColor.greenComponent, expectedColor.greenComponent, accuracy: 0.01)
+        XCTAssertEqual(actualColor.blueComponent, expectedColor.blueComponent, accuracy: 0.01)
+    }
+
     func testExistingTextObjectCanBeRewrittenAndPreservesStyleGeometry() throws {
         let document = try open(makeTextPDF())
         defer { PEPDFDocumentClose(document) }

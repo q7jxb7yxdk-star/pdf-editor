@@ -151,7 +151,9 @@ struct ContentView: View {
     @State private var fileImportPurpose: FileImportPurpose = .mergePDF
     @State private var imageReplacementTarget: PDFPageObjectSnapshot?
     @State private var showsObjectInspector = false
-    @State private var showsSignaturePad = false
+    @StateObject private var signatureLibraryStore = SignatureLibraryStore()
+    @State private var showsSignatureLibrary = false
+    @State private var selectedSignatureTemplate: SignatureLibraryTemplate?
     @State private var showsOCRResult = false
     @State private var showsSignatureWarning = false
     @State private var showsPasswordRemovalConfirmation = false
@@ -385,8 +387,11 @@ struct ContentView: View {
                 onDelete: deleteObject
             )
         }
-        .sheet(isPresented: $showsSignaturePad) {
-            SignaturePadView(onSave: addSignature)
+        .sheet(isPresented: $showsSignatureLibrary) {
+            SignatureLibraryView(
+                store: signatureLibraryStore,
+                onSelect: beginSignaturePlacement
+            )
         }
         .sheet(isPresented: $showsAnnotationInspector) {
             AnnotationInspectorView(
@@ -557,6 +562,9 @@ struct ContentView: View {
                     onSetAnnotationBounds: setAnnotationBounds,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
+                    signaturePlacementEnabled: selectedSignatureTemplate != nil,
+                    signaturePlacementStrokes: selectedSignatureTemplate?.normalizedStrokes,
+                    onPlaceSignature: placeSelectedSignature,
                     freehandDrawingEnabled: freehandDrawingEnabled,
                     onAddFreehand: addFreehandStroke,
                     onReplaceTextObject: replaceText,
@@ -577,6 +585,24 @@ struct ContentView: View {
                             systemImage: "note.text.badge.plus"
                         )
                         Button("Cancel", action: cancelCommentPlacement)
+                            .buttonStyle(.bordered)
+                            .keyboardShortcut(.cancelAction)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 12)
+                    .shadow(radius: 4, y: 2)
+                }
+
+                if let selectedSignatureTemplate {
+                    HStack(spacing: 12) {
+                        Label(
+                            "Click a location in the PDF to add \(selectedSignatureTemplate.displayName ?? "the signature")",
+                            systemImage: "signature"
+                        )
+                        Button("Cancel", action: cancelSignaturePlacement)
                             .buttonStyle(.bordered)
                             .keyboardShortcut(.cancelAction)
                     }
@@ -819,6 +845,9 @@ struct ContentView: View {
         if action != .drawFreehand {
             freehandDrawingEnabled = false
         }
+        if action != .addSignature {
+            cancelSignaturePlacement()
+        }
         switch action {
         case .addComment:
             beginCommentPlacement()
@@ -845,7 +874,12 @@ struct ContentView: View {
         case .combineFiles:
             beginFileImport(.mergePDF)
         case .addSignature:
-            showsSignaturePad = true
+            cancelSignaturePlacement()
+            cancelCommentPlacement()
+            cancelHighlightMode()
+            selectedObject = nil
+            selectedAnnotation = nil
+            showsSignatureLibrary = true
         case .drawFreehand:
             commentPlacementEnabled = false
             highlightModeEnabled = false
@@ -857,14 +891,6 @@ struct ContentView: View {
             }
         case .exportImage:
             beginImageExport()
-        case .createSignTemplate:
-            showUnavailable("Create e-sign template")
-        case .createWebForm:
-            showUnavailable("Create a web form")
-        case .sendInBulk:
-            showUnavailable("Send in bulk")
-        case .addSignBranding:
-            showUnavailable("Add e-sign branding")
         case .protectPDF:
             showUnavailable("Protect PDF")
         case .redactPDF:
@@ -1613,19 +1639,56 @@ struct ContentView: View {
         return selection
     }
 
-    private func addSignature(_ strokes: [SignatureStroke]) {
-        guard let page = selectedPage else { return }
+    private func beginSignaturePlacement(_ template: SignatureLibraryTemplate) {
+        showsSignatureLibrary = false
+        selectedObject = nil
+        selectedAnnotation = nil
+        selectedSignatureTemplate = template
+        if !usesInlinePanels {
+            showsToolPanel = false
+        }
+    }
+
+    private func cancelSignaturePlacement() {
+        selectedSignatureTemplate = nil
+    }
+
+    private func placeSelectedSignature(pageIndex: Int, point: CGPoint) {
+        guard let template = selectedSignatureTemplate,
+              let page = document.pdfDocument.page(at: pageIndex) else { return }
+        var newReference: PDFAnnotationReference?
         do {
             try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Signature") {
-                let bounds = page.bounds(for: .cropBox)
-                _ = try annotationService.addSignature(
-                    strokes: strokes,
-                    bounds: CGRect(x: bounds.midX - 100, y: bounds.midY - 40, width: 200, height: 80),
+                let annotation = try annotationService.addSignature(
+                    strokes: template.normalizedStrokes.map(SignatureStroke.init(points:)),
+                    bounds: signatureBounds(centeredAt: point, on: page),
                     to: page
                 )
+                guard let annotationIndex = page.annotations.firstIndex(where: {
+                    $0 === annotation
+                }) else {
+                    throw PDFAnnotationServiceError.annotationNotFound
+                }
+                newReference = PDFAnnotationReference(
+                    pageIndex: pageIndex,
+                    annotationIndex: annotationIndex
+                )
             }
-            refreshAnnotationsIfNeeded()
+            guard let newReference else {
+                throw PDFAnnotationServiceError.annotationNotFound
+            }
+            selectedSignatureTemplate = nil
+            selectedPageIndex = pageIndex
+            loadCanvasAnnotations()
+            selectedAnnotation = pageAnnotations.first { $0.reference == newReference }
         } catch { present(error) }
+    }
+
+    private func signatureBounds(centeredAt point: CGPoint, on page: PDFPage) -> CGRect {
+        SignaturePlacementGeometry.bounds(
+            centeredAt: point,
+            pageBounds: page.bounds(for: .cropBox)
+        )
     }
 
     private func addFreehandStroke(pageIndex: Int, points: [CGPoint]) {

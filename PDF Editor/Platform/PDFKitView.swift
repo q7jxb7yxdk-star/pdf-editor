@@ -49,7 +49,9 @@ private struct PDFAnnotationActionBar: View {
                         let choice = availableColorChoices[index]
                         Button {
                             showsColorPicker = false
-                            onChangeColor(choice.color.withAlpha(annotation.color.alpha))
+                            onChangeColor(choice.color.withAlpha(
+                                annotation.kind == .ink ? 1 : annotation.color.alpha
+                            ))
                         } label: {
                             Circle()
                                 .fill(opaqueSwiftUIColor(choice.color))
@@ -168,6 +170,7 @@ private protocol PDFInteractionMouseHandling: AnyObject {
     func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool
     func handleMouseMoved(_ event: NSEvent, in pdfView: PDFView)
+    func handlePointerExited(in pdfView: PDFView)
     func handleAnnotationHoverEnded(in pdfView: PDFView)
     func handleScrollWillBegin(in pdfView: PDFView)
 }
@@ -183,7 +186,7 @@ private final class PDFInteractionPDFView: PDFView {
         }
         let trackingArea = NSTrackingArea(
             rect: .zero,
-            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -223,6 +226,9 @@ private final class PDFInteractionPDFView: PDFView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        if event.trackingArea === hoverTrackingArea {
+            interactionHandler?.handlePointerExited(in: self)
+        }
         if event.trackingArea === annotationHoverTrackingArea {
             clearAnnotationHoverTrackingArea()
             interactionHandler?.handleAnnotationHoverEnded(in: self)
@@ -368,6 +374,9 @@ struct PDFKitView: NSViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let signaturePlacementEnabled: Bool
+    let signaturePlacementStrokes: [[CGPoint]]?
+    let onPlaceSignature: (Int, CGPoint) -> Void
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
@@ -434,6 +443,9 @@ struct PDFKitView: UIViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let signaturePlacementEnabled: Bool
+    let signaturePlacementStrokes: [[CGPoint]]?
+    let onPlaceSignature: (Int, CGPoint) -> Void
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
@@ -482,6 +494,9 @@ private extension PDFKitView {
             onSetAnnotationBounds: onSetAnnotationBounds,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
+            signaturePlacementEnabled: signaturePlacementEnabled,
+            signaturePlacementStrokes: signaturePlacementStrokes,
+            onPlaceSignature: onPlaceSignature,
             freehandDrawingEnabled: freehandDrawingEnabled,
             onAddFreehand: onAddFreehand,
             onReplaceTextObject: onReplaceTextObject,
@@ -537,6 +552,9 @@ private extension PDFKitView {
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
+        coordinator.signaturePlacementEnabled = signaturePlacementEnabled
+        coordinator.signaturePlacementStrokes = signaturePlacementStrokes
+        coordinator.onPlaceSignature = onPlaceSignature
         coordinator.freehandDrawingEnabled = freehandDrawingEnabled
         coordinator.onAddFreehand = onAddFreehand
         coordinator.onReplaceTextObject = onReplaceTextObject
@@ -646,6 +664,28 @@ extension PDFKitView {
             }
         }
         var onPlaceComment: (Int, CGPoint) -> Void
+        var signaturePlacementEnabled: Bool {
+            didSet {
+                guard oldValue != signaturePlacementEnabled else { return }
+#if os(macOS)
+                if signaturePlacementEnabled {
+                    refreshSignaturePreviewAtCurrentMouseLocation()
+                } else {
+                    hideSignaturePreview()
+                }
+#endif
+                updateGestureAvailability()
+            }
+        }
+        var signaturePlacementStrokes: [[CGPoint]]? {
+            didSet {
+                guard oldValue != signaturePlacementStrokes else { return }
+#if os(macOS)
+                refreshSignaturePreviewAtCurrentMouseLocation()
+#endif
+            }
+        }
+        var onPlaceSignature: (Int, CGPoint) -> Void
         var freehandDrawingEnabled: Bool {
             didSet {
                 guard oldValue != freehandDrawingEnabled else { return }
@@ -692,6 +732,9 @@ extension PDFKitView {
         private var freehandViewPoints: [CGPoint] = []
 
 #if os(macOS)
+        private let signaturePreviewLayer = CAShapeLayer()
+        private var lastSignaturePreviewViewPoint: CGPoint?
+
         private struct InlineTextStyle {
             let fontDescriptor: NSFontDescriptor
             let pointSize: CGFloat
@@ -799,6 +842,9 @@ extension PDFKitView {
             onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
+            signaturePlacementEnabled: Bool,
+            signaturePlacementStrokes: [[CGPoint]]?,
+            onPlaceSignature: @escaping (Int, CGPoint) -> Void,
             freehandDrawingEnabled: Bool,
             onAddFreehand: @escaping (Int, [CGPoint]) -> Void,
             onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void,
@@ -822,6 +868,9 @@ extension PDFKitView {
             self.onSetAnnotationBounds = onSetAnnotationBounds
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
+            self.signaturePlacementEnabled = signaturePlacementEnabled
+            self.signaturePlacementStrokes = signaturePlacementStrokes
+            self.onPlaceSignature = onPlaceSignature
             self.freehandDrawingEnabled = freehandDrawingEnabled
             self.onAddFreehand = onAddFreehand
             self.onReplaceTextObject = onReplaceTextObject
@@ -843,6 +892,7 @@ extension PDFKitView {
             pdfView.layer?.addSublayer(outlineLayer)
             handleLayers.forEach { pdfView.layer?.addSublayer($0) }
             pdfView.layer?.addSublayer(freehandPreviewLayer)
+            pdfView.layer?.addSublayer(signaturePreviewLayer)
             synchronizeStagedTextEdits()
 #else
             pdfView.layer.addSublayer(outlineLayer)
@@ -938,6 +988,10 @@ extension PDFKitView {
             outlineLayer.removeFromSuperlayer()
             handleLayers.forEach { $0.removeFromSuperlayer() }
             freehandPreviewLayer.removeFromSuperlayer()
+#if os(macOS)
+            signaturePreviewLayer.removeFromSuperlayer()
+            lastSignaturePreviewViewPoint = nil
+#endif
             removeAnnotationActionBar()
             if let pdfView {
 #if os(macOS)
@@ -963,6 +1017,7 @@ extension PDFKitView {
             finishInlineTextEditing(commit: false)
             pendingTextActivation = nil
 #if os(macOS)
+            hideSignaturePreview()
             removeTransientStagedTextFallback()
             stagedTextByObjectID.removeAll()
             stagedTextStylesByObjectID.removeAll()
@@ -1073,12 +1128,27 @@ extension PDFKitView {
                 guard let self else { return }
                 overlayRefreshScheduled = false
                 refreshOverlay()
+#if os(macOS)
+                if let viewPoint = lastSignaturePreviewViewPoint,
+                   signaturePlacementEnabled {
+                    updateSignaturePreview(at: viewPoint)
+                }
+#endif
             }
         }
 
         private func configureOverlay() {
 #if os(macOS)
             let accent = NSColor.controlAccentColor.cgColor
+            signaturePreviewLayer.strokeColor = NSColor.labelColor
+                .withAlphaComponent(0.68)
+                .cgColor
+            signaturePreviewLayer.fillColor = nil
+            signaturePreviewLayer.lineWidth = 2
+            signaturePreviewLayer.lineCap = .round
+            signaturePreviewLayer.lineJoin = .round
+            signaturePreviewLayer.zPosition = 10_003
+            signaturePreviewLayer.isHidden = true
 #else
             let accent = UIColor.systemBlue.cgColor
 #endif
@@ -1273,6 +1343,7 @@ extension PDFKitView {
                     gesture.isEnabled = false
                 } else if gesture is UITapGestureRecognizer {
                     gesture.isEnabled = commentPlacementEnabled ||
+                        signaturePlacementEnabled ||
                         objectEditingEnabled || annotationEditingEnabled
                 } else {
                     gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
@@ -1375,6 +1446,17 @@ extension PDFKitView {
                 updateGestureAvailability()
                 return
             }
+            if signaturePlacementEnabled {
+                selectedObject.wrappedValue = nil
+                selectedAnnotation.wrappedValue = nil
+                selectedPageIndex.wrappedValue = pageIndex
+#if os(macOS)
+                hideSignaturePreview()
+#endif
+                onPlaceSignature(pageIndex, pagePoint)
+                updateGestureAvailability()
+                return
+            }
             if annotationEditingEnabled,
                let annotation = annotation(at: pagePoint, pageIndex: pageIndex) {
                 pdfView.clearSelection()
@@ -1431,6 +1513,7 @@ extension PDFKitView {
         private func activateTarget(at viewPoint: CGPoint) {
             guard prepareForCanvasInteraction(at: viewPoint),
                   !commentPlacementEnabled,
+                  !signaturePlacementEnabled,
                   let pdfView,
                   let page = pdfView.page(for: viewPoint, nearest: false),
                   let document = pdfView.document else { return }
@@ -3307,6 +3390,73 @@ extension PDFKitView {
         }
 
 #if os(macOS)
+        private func refreshSignaturePreviewAtCurrentMouseLocation() {
+            guard signaturePlacementEnabled,
+                  signaturePlacementStrokes?.isEmpty == false,
+                  let pdfView,
+                  let window = pdfView.window else {
+                hideSignaturePreview()
+                return
+            }
+            let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+            updateSignaturePreview(at: pdfView.convert(windowPoint, from: nil))
+        }
+
+        private func updateSignaturePreview(at viewPoint: CGPoint) {
+            guard signaturePlacementEnabled,
+                  let strokes = signaturePlacementStrokes,
+                  !strokes.isEmpty,
+                  let pdfView,
+                  let page = pdfView.page(for: viewPoint, nearest: false) else {
+                hideSignaturePreview()
+                return
+            }
+            let pagePoint = pdfView.convert(viewPoint, to: page)
+            let bounds = SignaturePlacementGeometry.bounds(
+                centeredAt: pagePoint,
+                pageBounds: page.bounds(for: .cropBox)
+            )
+            guard bounds.width > 0, bounds.height > 0 else {
+                hideSignaturePreview()
+                return
+            }
+
+            let path = CGMutablePath()
+            for stroke in strokes {
+                guard let first = stroke.first else { continue }
+                let firstPagePoint = CGPoint(
+                    x: bounds.minX + first.x * bounds.width,
+                    y: bounds.minY + (1 - first.y) * bounds.height
+                )
+                path.move(to: pdfView.convert(firstPagePoint, from: page))
+                for point in stroke.dropFirst() {
+                    let pageStrokePoint = CGPoint(
+                        x: bounds.minX + point.x * bounds.width,
+                        y: bounds.minY + (1 - point.y) * bounds.height
+                    )
+                    path.addLine(to: pdfView.convert(pageStrokePoint, from: page))
+                }
+            }
+
+            lastSignaturePreviewViewPoint = viewPoint
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            signaturePreviewLayer.frame = pdfView.bounds
+            signaturePreviewLayer.path = path
+            signaturePreviewLayer.lineWidth = max(1, 2 * pdfView.scaleFactor)
+            signaturePreviewLayer.isHidden = path.isEmpty
+            CATransaction.commit()
+        }
+
+        private func hideSignaturePreview() {
+            lastSignaturePreviewViewPoint = nil
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            signaturePreviewLayer.path = nil
+            signaturePreviewLayer.isHidden = true
+            CATransaction.commit()
+        }
+
         private func installGestures(on pdfView: PDFView) {
             let pan = NSPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             let freehandPan = NSPanGestureRecognizer(
@@ -3524,6 +3674,11 @@ extension PDFKitView.Coordinator: PDFPageOverlayViewProvider {
 extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     func handleMouseMoved(_ event: NSEvent, in pdfView: PDFView) {
         let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
+        if signaturePlacementEnabled {
+            endAnnotationHover(in: pdfView)
+            updateSignaturePreview(at: viewPoint)
+            return
+        }
         guard let page = pdfView.page(for: viewPoint, nearest: false),
               let document = pdfView.document else {
             endAnnotationHover(in: pdfView)
@@ -3557,6 +3712,11 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     }
 
     func handleAnnotationHoverEnded(in pdfView: PDFView) {
+        endAnnotationHover(in: pdfView)
+    }
+
+    func handlePointerExited(in pdfView: PDFView) {
+        hideSignaturePreview()
         endAnnotationHover(in: pdfView)
     }
 
@@ -3655,6 +3815,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
     func handleScrollWillBegin(in pdfView: PDFView) {
         closeCommentPopover()
+        hideSignaturePreview()
         if inlineTextField != nil {
             finishInlineTextEditing(commit: true)
             clearStagedTextSelection()
@@ -3692,6 +3853,9 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
             return true
         }
         if commentPlacementEnabled {
+            return true
+        }
+        if signaturePlacementEnabled {
             return true
         }
         if annotationEditingEnabled,
@@ -3733,7 +3897,9 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
         let pageIndex = document.index(for: page)
         let pagePoint = pdfView.convert(viewPoint, to: page)
 
-        if event.clickCount >= 2, !commentPlacementEnabled {
+        if event.clickCount >= 2,
+           !commentPlacementEnabled,
+           !signaturePlacementEnabled {
             let hasEditableAnnotation = annotationEditingEnabled &&
                 annotation(at: pagePoint, pageIndex: pageIndex) != nil
             let hasEditableContent = objectEditingEnabled && (
@@ -3746,7 +3912,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
             }
         }
 
-        if commentPlacementEnabled {
+        if commentPlacementEnabled || signaturePlacementEnabled {
             selectTarget(at: viewPoint)
             return true
         }
@@ -3936,7 +4102,8 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelega
         }
         if freehandDrawingEnabled { return false }
         if gestureRecognizer is UITapGestureRecognizer {
-            return commentPlacementEnabled || objectEditingEnabled || annotationEditingEnabled
+            return commentPlacementEnabled || signaturePlacementEnabled ||
+                objectEditingEnabled || annotationEditingEnabled
         }
         if gestureRecognizer is UIRotationGestureRecognizer,
            selectedAnnotation.wrappedValue != nil {

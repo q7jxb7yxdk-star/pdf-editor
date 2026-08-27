@@ -14,10 +14,6 @@ enum PDFToolAction {
     case combineFiles
     case exportImage
     case addSignature
-    case createSignTemplate
-    case createWebForm
-    case sendInBulk
-    case addSignBranding
     case protectPDF
     case redactPDF
 }
@@ -87,10 +83,6 @@ struct PDFToolSidebar: View {
 
                     section("E-sign") {
                         tool("Add a signature", icon: "signature", action: .addSignature)
-                        tool("Create e-sign template", icon: "doc.badge.gearshape", action: .createSignTemplate)
-                        tool("Create a web form", icon: "network", action: .createWebForm)
-                        tool("Send in bulk", icon: "person.3", action: .sendInBulk)
-                        tool("Add e-sign branding", icon: "paintpalette", action: .addSignBranding)
                     }
 
                     section("Secure PDF") {
@@ -960,6 +952,160 @@ struct PageObjectInspectorView: View {
     }
 }
 
+struct SignatureLibraryView: View {
+    @ObservedObject var store: SignatureLibraryStore
+    let onSelect: (SignatureLibraryTemplate) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var showsSignaturePad = false
+    @State private var signaturePendingDeletion: SignatureLibraryTemplate?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if store.templates.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Saved Signatures", systemImage: "signature")
+                    } description: {
+                        Text("Create a signature once, then reuse it in any PDF.")
+                    } actions: {
+                        Button("Create Signature") { showsSignaturePad = true }
+                            .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    List(store.templates) { template in
+                        HStack(spacing: 14) {
+                            Button {
+                                onSelect(template)
+                                dismiss()
+                            } label: {
+                                HStack(spacing: 14) {
+                                    SignaturePreview(strokes: template.normalizedStrokes)
+                                        .frame(width: 140, height: 72)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(template.displayName ?? "Saved Signature")
+                                            .font(.headline)
+                                        Text(template.createdAt, format: .dateTime.year().month().day())
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Text("Use")
+                                        .font(.callout.weight(.semibold))
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(role: .destructive) {
+                                signaturePendingDeletion = template
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Delete signature")
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Signatures")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("New Signature", systemImage: "plus") {
+                        showsSignaturePad = true
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showsSignaturePad) {
+            SignaturePadView(onSave: saveSignature)
+        }
+        .confirmationDialog(
+            "Delete Signature?",
+            isPresented: Binding(
+                get: { signaturePendingDeletion != nil },
+                set: { if !$0 { signaturePendingDeletion = nil } }
+            ),
+            presenting: signaturePendingDeletion
+        ) { template in
+            Button("Delete Signature", role: .destructive) {
+                signaturePendingDeletion = nil
+                delete(template)
+            }
+            Button("Cancel", role: .cancel) {
+                signaturePendingDeletion = nil
+            }
+        } message: { _ in
+            Text("This saved signature cannot be recovered after deletion.")
+        }
+        .alert("Signature Library", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+        .onAppear {
+            store.load()
+            if let loadError = store.lastLoadError {
+                errorMessage = loadError
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 520, minHeight: 360)
+#else
+        .frame(minHeight: 360)
+#endif
+    }
+
+    private func saveSignature(_ strokes: [SignatureStroke]) {
+        do {
+            let template = try SignatureLibraryTemplate(
+                normalizedStrokes: strokes.map(\.points)
+            )
+            try store.add(template)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func delete(_ template: SignatureLibraryTemplate) {
+        do {
+            try store.delete(id: template.id)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct SignaturePreview: View {
+    let strokes: [[CGPoint]]
+
+    var body: some View {
+        Canvas { context, size in
+            for stroke in strokes {
+                guard let first = stroke.first else { continue }
+                var path = Path()
+                path.move(to: CGPoint(x: first.x * size.width, y: first.y * size.height))
+                for point in stroke.dropFirst() {
+                    path.addLine(to: CGPoint(x: point.x * size.width, y: point.y * size.height))
+                }
+                context.stroke(path, with: .color(.primary), lineWidth: 2)
+            }
+        }
+        .padding(8)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.35)))
+        .accessibilityHidden(true)
+    }
+}
+
 struct SignaturePadView: View {
     let onSave: ([SignatureStroke]) -> Void
 
@@ -1005,10 +1151,13 @@ struct SignaturePadView: View {
             .navigationTitle("Handwritten Signature")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button("Clear") { strokes.removeAll() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add to PDF") {
+                    Button("Save Signature") {
                         onSave(strokes.map(SignatureStroke.init(points:)))
                         dismiss()
                     }
@@ -1016,7 +1165,11 @@ struct SignaturePadView: View {
                 }
             }
         }
+#if os(macOS)
         .frame(minWidth: 420, minHeight: 260)
+#else
+        .frame(minHeight: 260)
+#endif
     }
 }
 
