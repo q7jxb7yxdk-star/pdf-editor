@@ -13,8 +13,6 @@ enum PDFToolAction {
     case rotateRight
     case combineFiles
     case exportImage
-    case fillAndSign
-    case requestSignatures
     case addSignature
     case createSignTemplate
     case createWebForm
@@ -88,8 +86,6 @@ struct PDFToolSidebar: View {
                     }
 
                     section("E-sign") {
-                        tool("Fill & Sign", icon: "pencil.and.scribble", action: .fillAndSign)
-                        tool("Request e-signatures", icon: "paperplane", action: .requestSignatures)
                         tool("Add a signature", icon: "signature", action: .addSignature)
                         tool("Create e-sign template", icon: "doc.badge.gearshape", action: .createSignTemplate)
                         tool("Create a web form", icon: "network", action: .createWebForm)

@@ -844,7 +844,7 @@ struct ContentView: View {
             rotate(by: 90)
         case .combineFiles:
             beginFileImport(.mergePDF)
-        case .fillAndSign, .addSignature:
+        case .addSignature:
             showsSignaturePad = true
         case .drawFreehand:
             commentPlacementEnabled = false
@@ -857,8 +857,6 @@ struct ContentView: View {
             }
         case .exportImage:
             beginImageExport()
-        case .requestSignatures:
-            showUnavailable("Request e-signatures")
         case .createSignTemplate:
             showUnavailable("Create e-sign template")
         case .createWebForm:
