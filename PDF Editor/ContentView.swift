@@ -131,7 +131,14 @@ struct ContentView: View {
     @State private var showsOCRProgress = false
     @State private var splitExportDocument: PDFExportDocument?
     @State private var showsSinglePageExporter = false
-    @State private var splitExportDocuments: [PDFExportDocument] = []
+    @State private var showsImageExportOptions = false
+    @State private var showsImageFileExporter = false
+    @State private var imageExportDocuments: [ImageExportDocument] = []
+    @State private var imageExportContentType: UTType = .png
+    @State private var imageExportTask: Task<Void, Never>?
+    @State private var imageExportProgressCompleted = 0
+    @State private var imageExportProgressTotal = 0
+    @State private var isExportingImages = false
     @State private var manualSaveExportDocument: PDFExportDocument?
     @State private var pendingManualSaveData: Data?
     @State private var saveURL: URL?
@@ -194,6 +201,7 @@ struct ContentView: View {
             }
             .onDisappear {
                 ocrBatchTask?.cancel()
+                imageExportTask?.cancel()
                 pageObjectLoadTask?.cancel()
             }
     }
@@ -217,7 +225,7 @@ struct ContentView: View {
                     if showsPagePanel {
                         Divider()
                         pageSidebar
-                            .frame(width: 220)
+                            .frame(width: 180)
                     }
                     Divider()
                     rightPanel
@@ -233,7 +241,7 @@ struct ContentView: View {
                         Divider()
                         pageSidebar
                             .frame(
-                                width: min(220, max(160, proxy.size.width * 0.45))
+                                width: min(180, max(160, proxy.size.width * 0.45))
                             )
                     }
                     Divider()
@@ -407,6 +415,34 @@ struct ContentView: View {
             )
         }
         .sheet(isPresented: $showsOCRResult) { ocrResultView }
+        .sheet(isPresented: $showsImageExportOptions) {
+            PDFImageExportOptionsView(
+                hasCurrentPage: selectedPageIndex != nil,
+                pageCount: document.pageCount,
+                onExport: startImageExport
+            )
+        }
+        .sheet(isPresented: $isExportingImages) {
+            NavigationStack {
+                VStack(spacing: 18) {
+                    ProgressView(
+                        value: Double(imageExportProgressCompleted),
+                        total: Double(max(imageExportProgressTotal, 1))
+                    )
+                    Text("Exported \(imageExportProgressCompleted) of \(imageExportProgressTotal) pages")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(28)
+                .navigationTitle("Exporting Images")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { imageExportTask?.cancel() }
+                    }
+                }
+            }
+            .frame(minWidth: 400, minHeight: 200)
+            .interactiveDismissDisabled()
+        }
         .modifier(
             PhaseFiveWorkflowModifier(
                 ocrBatchResult: $ocrBatchResult,
@@ -455,15 +491,15 @@ struct ContentView: View {
             splitExportDocument = nil
         }
         .fileExporter(
-            isPresented: Binding(
-                get: { !splitExportDocuments.isEmpty },
-                set: { if !$0 { splitExportDocuments = [] } }
-            ),
-            documents: splitExportDocuments,
-            contentType: .pdf
+            isPresented: $showsImageFileExporter,
+            documents: imageExportDocuments,
+            contentType: imageExportContentType
         ) { result in
-            if case let .failure(error) = result { present(error) }
-            splitExportDocuments = []
+            if case let .failure(error) = result,
+               !Self.isUserCancellation(error) {
+                present(error)
+            }
+            imageExportDocuments = []
         }
     }
 
@@ -808,8 +844,6 @@ struct ContentView: View {
             rotate(by: 90)
         case .combineFiles:
             beginFileImport(.mergePDF)
-        case .splitPDF:
-            splitEveryPage()
         case .fillAndSign, .addSignature:
             showsSignaturePad = true
         case .drawFreehand:
@@ -821,16 +855,8 @@ struct ContentView: View {
             if !usesInlinePanels {
                 showsToolPanel = false
             }
-        case .compressPDF:
-            showUnavailable("Compress PDF")
-        case .exportWord:
-            showUnavailable("Microsoft Word export")
-        case .exportExcel:
-            showUnavailable("Microsoft Excel export")
-        case .exportPowerPoint:
-            showUnavailable("Microsoft PowerPoint export")
         case .exportImage:
-            showUnavailable("Image format export")
+            beginImageExport()
         case .requestSignatures:
             showUnavailable("Request e-signatures")
         case .createSignTemplate:
@@ -850,6 +876,84 @@ struct ContentView: View {
 
     private func showUnavailable(_ tool: String) {
         unavailableTool = tool
+    }
+
+    private func beginImageExport() {
+        guard document.pageCount > 0 else {
+            present(PDFPageImageExportError.noPages)
+            return
+        }
+        guard !document.isLocked else {
+            present(PDFEditingError.documentLocked)
+            return
+        }
+        if !usesInlinePanels {
+            showsToolPanel = false
+        }
+        Task { @MainActor in
+            await Task.yield()
+            showsImageExportOptions = true
+        }
+    }
+
+    private func startImageExport(
+        format: PDFPageImageFormat,
+        dpi: PDFPageImageDPI,
+        pageScope: PDFImageExportPageScope
+    ) {
+        guard imageExportTask == nil else { return }
+        let pageIndices: [Int]
+        switch pageScope {
+        case .currentPage:
+            guard let selectedPageIndex else { return }
+            pageIndices = [selectedPageIndex]
+        case .allPages:
+            pageIndices = Array(0..<document.pageCount)
+        }
+
+        imageExportProgressCompleted = 0
+        imageExportProgressTotal = pageIndices.count
+        imageExportTask = Task { @MainActor in
+            await Task.yield()
+            isExportingImages = true
+            do {
+                try commitPendingTextEdits()
+                let outputs = try await PDFPageImageExporter().exportPages(
+                    in: document.pdfDocument,
+                    pageIndices: pageIndices,
+                    options: PDFPageImageExportOptions(format: format, dpi: dpi)
+                ) { completed, total in
+                    imageExportProgressCompleted = completed
+                    imageExportProgressTotal = total
+                }
+                try Task.checkCancellation()
+                imageExportContentType = format.contentType
+                imageExportDocuments = outputs.map(ImageExportDocument.init)
+                isExportingImages = false
+                imageExportTask = nil
+                await Task.yield()
+                showsImageFileExporter = !imageExportDocuments.isEmpty
+            } catch is CancellationError {
+                finishImageExport()
+            } catch {
+                finishImageExport()
+                present(error)
+            }
+        }
+    }
+
+    private func finishImageExport() {
+        isExportingImages = false
+        imageExportTask = nil
+        imageExportDocuments = []
+        imageExportProgressCompleted = 0
+        imageExportProgressTotal = 0
+    }
+
+    private static func isUserCancellation(_ error: Error) -> Bool {
+        let cocoaError = error as NSError
+        return cocoaError.domain == NSCocoaErrorDomain
+            && cocoaError.code == CocoaError.userCancelled.rawValue
     }
 
     private func toggleFullScreen() {
@@ -1023,22 +1127,6 @@ struct ContentView: View {
         }
     }
 #endif
-
-    private func splitEveryPage() {
-        guard document.pageCount > 0 else { return }
-        do {
-            let ranges = (0..<document.pageCount).map { PDFPageRange($0, through: $0) }
-            let result = try document.apply(
-                .split(ranges: ranges),
-                undoManager: nil,
-                actionName: "Split PDF"
-            )
-            guard case let .split(documents) = result else { return }
-            splitExportDocuments = documents.enumerated().map {
-                PDFExportDocument(data: $0.element, filename: "Page \($0.offset + 1).pdf")
-            }
-        } catch { present(error) }
-    }
 
     private func importPDFForMerge(_ result: Result<URL, Error>) {
         do {

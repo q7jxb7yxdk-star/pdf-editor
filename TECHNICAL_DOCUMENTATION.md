@@ -8,7 +8,7 @@ PDF Editor is a SwiftUI `DocumentGroup` application for iOS, iPadOS, and macOS. 
 - A local `PDFiumBridge` Swift package for the primary editing session and page-object mutations.
 - CoreText for complex or missing-glyph replacement text overlays.
 - Vision for on-device text recognition.
-- ImageIO for bounded, orientation-aware image decoding.
+- ImageIO for bounded, orientation-aware image decoding and PNG/JPEG page-export encoding.
 
 The app has no reviewed first-party networking, account, cloud-sync, analytics, or backend path. That is a source observation, not runtime proof that the bundled native library never performs I/O.
 
@@ -23,6 +23,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
 | Full page-order UI | Implemented | The toggleable Pages panel exposes selection, per-thumbnail extraction, full-list drag reordering, 90-degree rotation, and deletion except for the final page. |
+| PDF page image export | Implemented | The Tools panel exports the current page or all pages as separate PNG/JPEG files at 72, 144, or 300 DPI with progress and cancellation. |
 | Document metadata UI | Inactive | Metadata commands exist in the engine surface, but `ContentView` does not expose them directly. |
 | Remote or hosted service mode | Not implemented | No configuration or adapter exists in the reviewed source. |
 
@@ -84,19 +85,21 @@ There is protocol-based engine separation, but no application-level dependency-i
 | --- | --- |
 | `PDF Editor/PDF_EditorApp.swift` | Application entry point and document scene. |
 | `PDF Editor/ContentView.swift` | Main editor UI, hidden/toggleable Tools and Pages panels, narrow right-side viewing rail composition, Highlight selection state, Comment List integration, separate Save/Tools/OCR toolbar items, imports/exports, OCR workflow, protected merge flow, and transient view state. |
-| `PDF Editor/FeatureViews.swift` | Pages panel and narrow viewing rail with display, zoom, direct page-number, total-page, and separate previous/next controls; English tool panels; multi-line Add Comment and Comment Editor views; Comment List; protected-PDF password sheet; OCR result views; object inspector; signature pad; and annotation inspector. |
+| `PDF Editor/FeatureViews.swift` | Pages panel and narrow viewing rail with display, zoom, direct page-number, total-page, and separate previous/next controls; English tool panels; compact cross-platform PDF-image export options; multi-line Add Comment and Comment Editor views; Comment List; protected-PDF password sheet; OCR result views; object inspector; signature pad; and annotation inspector. |
 | `PDF Editor/Core/PDFEditingEngine.swift` | Engine/session protocols, page command model, metadata model, export policy, and shared errors. |
 | `PDF Editor/Core/PDFiumEditingEngine.swift` | Primary page and page-object engine, native handle management, batch display-object decoding, verification, rollback, permissions, text fallback, images, and annotation-color bridge. |
 | `PDF Editor/Core/PDFKitEditingEngine.swift` | Page-level PDFKit implementation and metadata mutation helper. |
 | `PDF Editor/Core/PDFAnnotationModel.swift` | Annotation references, kinds, colors, snapshots, and partial updates. |
 | `PDF Editor/Document/PDFEditorDocument.swift` | Persisted/working byte separation, active engine, PDFKit refresh, unsaved-state tracking, mutation transaction boundary, Undo/Redo, security options, OCR insertion, and annotation round-trip verification. |
-| `PDF Editor/Document/PDFExportDocument.swift` | `FileDocument` wrapper for split/export bytes and preferred filenames. |
+| `PDF Editor/Document/PDFExportDocument.swift` | `FileDocument` wrapper for exported PDF bytes and preferred filenames. |
+| `PDF Editor/Document/ImageExportDocument.swift` | `FileDocument` wrapper for per-page PNG/JPEG bytes, content type, and preferred filename. |
 | `PDF Editor/Platform/PDFKitView.swift` | AppKit/UIKit `PDFView` bridge, selection synchronization, direct object/annotation manipulation overlays, freehand gesture preview/commit, selected-Highlight/Ink action bars and popovers, zoom-aware Ink hit testing, macOS note-icon hover tracking, and annotation-anchored Comment Editor popover presentation. |
 | `PDF Editor/Platform/PageThumbnailView.swift` | PDFKit thumbnail rendering for the page sidebar. |
 | `PDF Editor/Services/CoreTextShapingService.swift` | Font coverage analysis, complex-script detection, and CoreText PDF overlay creation. |
 | `PDF Editor/Services/ManualPDFSaveCoordinator.swift` | Security-scoped, `NSFileCoordinator`-protected replacement writes plus the focused macOS File → Save command. |
 | `PDF Editor/Services/PDFAnnotationService.swift` | Annotation creation, resolution, mutation, geometry transformation, snapshotting, and verification. |
 | `PDF Editor/Services/PlatformImageConverter.swift` | ImageIO decode, size limiting, orientation handling, BGRA conversion, and alpha unpremultiplication. |
+| `PDF Editor/Services/PDFPageImageExporter.swift` | Sequential crop-box page rendering, rotation-aware DPI sizing, PNG/JPEG encoding, cancellation, progress, and per-page resource limits. |
 | `PDF Editor/Services/VisionOCRService.swift` | Selectable-text policy, rendering, Vision recognition, batch processing, and rotation-aware coordinate conversion. |
 
 ### Local package and validation
@@ -139,8 +142,8 @@ The in-memory `sourceData` supports unlock and rollback bookkeeping. Non-text wo
 - Delete, rotate, move, reorder, and merge execute in the PDFium session. After merge imports existing pages, the first serialization preserves their embedded font programs by omitting PDFium's experimental new-font subsetting flag; ordinary serialization keeps that flag enabled for newly generated text.
 - Page-assembly mutations require PDF permission bit `0x400`.
 - Each mutating native call is followed by serialization, handle replacement, and a narrow verification such as page-count, size, or rotation equality.
-- Split is nonmutating with respect to the open document. It validates nonoverlapping zero-based ranges, copies selected pages into new PDF bytes, preserves their existing embedded font programs without applying PDFium's experimental new-font subsetting flag, and verifies the expected page count after reopening without a password.
-- Each Pages thumbnail exposes Extract immediately before Rotate left. macOS presents an `NSSavePanel` for the resulting one-page PDF, while iOS uses a SwiftUI file exporter. The split-all-pages action continues to export one document per page through the SwiftUI multi-document exporter.
+- Extract is nonmutating with respect to the open document. Its internal page-copy command validates the selected zero-based page range, copies that page into new PDF bytes, preserves its existing embedded font programs without applying PDFium's experimental new-font subsetting flag, and verifies the expected page count after reopening without a password.
+- Each Pages thumbnail exposes Extract immediately before Rotate left. macOS presents an `NSSavePanel` for the resulting one-page PDF, while iOS uses a SwiftUI file exporter.
 
 ### 4.3 Page-object inspection and editing
 
@@ -178,7 +181,15 @@ The fallback is a new searchable vector layer, not preservation of the original 
 4. PDFium inserts or replaces the bitmap.
 5. The session serializes/reopens and verifies object count, object kind, transform preservation, and pixel dimensions as appropriate.
 
-### 4.6 Annotation flow
+### 4.6 PDF page image export
+
+The Tools workspace exposes only Image format under “Export PDF to”. The options sheet selects PNG or JPEG, current page or all pages, and 72, 144, or 300 DPI; 300 DPI is the initial selection. macOS uses a compact custom sheet with a fixed label column and a shared leading-aligned control column, while iOS retains the native navigation-form presentation. Before rendering, `ContentView` commits pending inline text replacements so exported images match the current working document. Locked documents are rejected until unlocked.
+
+`PDFPageImageExporter` processes selected pages in index order. It derives pixel dimensions from the crop box, swaps width and height for quarter-turn page rotation, and asks PDFKit for a crop-box thumbnail at that exact size. ImageIO then encodes one PNG or JPEG payload per page. Output uses sortable `page-0001.png` or `page-0001.jpg` names and SwiftUI's multi-document file exporter. Cancellation is checked before sizing, rendering, encoding, and each following page; the progress sheet reports completed pages and prevents interactive dismissal while work is active.
+
+Each page fails closed above a 16,384-pixel dimension, 67,108,864 pixels, or 256 MiB estimated decoded RGBA memory. Rendering is sequential, but encoded payloads remain retained until the multi-file exporter completes; the limits therefore bound one decoded page rather than total encoded output memory.
+
+### 4.7 Annotation flow
 
 - PDFKit creates notes, free text, highlights, signatures, and freehand Ink annotations. Draw freehand enables a dedicated pan gesture on the PDF canvas, renders an immediate red `CAShapeLayer` preview in view coordinates, converts the completed points into page coordinates, creates one red Ink annotation, exits drawing mode, and selects the new annotation. The Edit text tool list has no separate Erase a drawing action; deletion is available from the selected-Ink action bar.
 - Annotation and page-object selection are simultaneously available without toolbar mode switches. Comment placement takes precedence, followed by annotation hit testing and then page-object hit testing; selecting one target clears the other.
@@ -197,7 +208,7 @@ The fallback is a new searchable vector layer, not preservation of the original 
 
 Because references use annotation-array indices, mutations are applied and verified synchronously against the current document. There is no migration or stable-ID layer for external annotation references.
 
-### 4.7 OCR flow
+### 4.8 OCR flow
 
 1. `VisionOCRService` treats any page with nonempty `PDFPage.string` as already containing selectable text and skips recognition for that page.
 2. A page requiring OCR is rendered from its crop box. Its longest rendered dimension is scaled to at least the page's point size and normally up to 3,000 pixels.
@@ -214,7 +225,7 @@ Cancellation is checked before rendering, inside the detached recognition task, 
 ### `PDFEditorDocument`
 
 - **Inputs**: file bytes, passwords, editing commands, page-object/annotation operations, OCR observations, save policy.
-- **Outputs**: PDFKit display document, nested editor revision/unsaved state, explicit-save bytes, metadata properties, split documents, typed errors.
+- **Outputs**: PDFKit display document, nested editor revision/unsaved state, explicit-save bytes, metadata properties, extracted-page documents, typed errors.
 - **Dependencies**: PDFKit, `PDFiumEditingEngine`, `PDFAnnotationService`, bundled font, SwiftUI document APIs, UndoManager.
 - **Ownership**: active session, display document, source bytes, last explicitly persisted bytes, authorized password, signature-consent flag, save security flag.
 
@@ -266,7 +277,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 - `PDFDocumentMetadata`: page count, encryption/lock state, and document info.
 - `PDFPageRange`: inclusive zero-based bounds.
 - `PDFEditingCommand`: page and metadata operations.
-- `PDFEditingCommandResult`: updated metadata or split output bytes.
+- `PDFEditingCommandResult`: updated metadata or copied-page output bytes.
 - `PDFExportOptions`: preserve or remove security after authorized unlock.
 
 ### Page-object models
@@ -284,7 +295,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 
 ### View state
 
-`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, split exports, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The wide-layout Tools toggle changes visibility without an animation transaction so the central PDF receives one layout-size change instead of a sequence of animated width changes; this avoids driving repeated PDFKit auto-scaling and intermediate page redraws. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. `PDFRightPanel` binds to `selectedPageIndex`, derives one-based display values, and keeps a local numeric text-field draft. Valid input selects the matching page immediately, submit or focus loss clamps an invalid range to the document bounds, and PDFKit-originated page changes refresh the field while it is not focused. The page-number field and total-page display each occupy a 44-point-high rail slot; Previous page and Next page are separate 44-point buttons and disable at their respective boundaries. Direct object and annotation selection remain continuously available outside comment placement. This state is transient except for the `PDFToolSidebar` disclosure state: it is restored from app preferences, rather than from a document or a live view instance.
+`ContentView` holds transient state for selected page/text/object/annotation, revision-scoped page-object cache/loading, the observable `PendingTextEditStore`, comment placement, Tools/Pages/Comment List visibility, save URL/export progress, sheets and alerts, import purpose, single-page PDF extraction export, page-image options/progress/output documents, pending protected merge bytes, OCR task/progress/results, draft text, and errors. The wide-layout Tools toggle changes visibility without an animation transaction so the central PDF receives one layout-size change instead of a sequence of animated width changes; this avoids driving repeated PDFKit auto-scaling and intermediate page redraws. The Pages panel remains immediately left of the 52-point viewing rail in both wide and narrow layouts; its narrow-layout width is clamped to 160–220 points. `PDFRightPanel` binds to `selectedPageIndex`, derives one-based display values, and keeps a local numeric text-field draft. Valid input selects the matching page immediately, submit or focus loss clamps an invalid range to the document bounds, and PDFKit-originated page changes refresh the field while it is not focused. The page-number field and total-page display each occupy a 44-point-high rail slot; Previous page and Next page are separate 44-point buttons and disable at their respective boundaries. Direct object and annotation selection remain continuously available outside comment placement. This state is transient except for the `PDFToolSidebar` disclosure state: it is restored from app preferences, rather than from a document or a live view instance.
 
 ### Persistence and storage boundaries
 
@@ -292,7 +303,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 - Existing PDFs are written only by an explicit Save through coordinated atomic replacement. A new document's first Save uses a SwiftUI file exporter, after which later Saves target the selected URL.
 - Committed document mutations use complete serialized PDF `Data` snapshots for Undo/Redo. Pending inline replacements use value-level store actions until Save applies them.
 - Passwords and pending protected-merge bytes are held in memory for the active view/document.
-- `PDFToolSidebar` stores its six disclosure titles in bundle `UserDefaults` under the versioned `com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1` key. The value is a sorted `[String]` because `Set<String>` cannot be stored directly with `@AppStorage`; unrecognized titles are discarded on load. With no value for this key, all six sections initially expand. Each disclosure binding writes the updated selection after a user expand/collapse action. This app-scoped preference survives closing/reopening Tools, changing documents, and app relaunches; it is not PDF document state. These are source-level persistence facts; this documentation task does not add runtime UI validation.
+- `PDFToolSidebar` stores its five disclosure titles in bundle `UserDefaults` under the versioned `com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1` key. The value is a sorted `[String]` because `Set<String>` cannot be stored directly with `@AppStorage`; unrecognized titles are discarded on load. With no value for this key, all five sections initially expand. Each disclosure binding writes the updated selection after a user expand/collapse action. This app-scoped preference survives closing/reopening Tools, changing documents, and app relaunches; it is not PDF document state. These are source-level persistence facts; this documentation task does not add runtime UI validation.
 - No database, cache directory, Keychain item, cloud state, migration, or application data-version field exists.
 - The bundled PDFium and font are immutable app resources from the application's perspective.
 
@@ -304,7 +315,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 - A PDF cannot delete its last page.
 - Rotation must be a multiple of 90 degrees.
 - Reorder input must contain every page exactly once.
-- Split ranges must be in bounds and nonoverlapping.
+- Internal page-copy ranges used by Extract must be in bounds and nonoverlapping.
 - Page sizes and transforms must contain finite, positive dimensions where required.
 - Bitmap sizes and stride arithmetic are checked before crossing into C.
 - Most native mutations retain prior bytes and restore them if the native call, serialization, reopen, or postcondition fails.
@@ -404,6 +415,7 @@ No environment variables, feature-flag files, runtime modes, API keys, secret fi
 - `PDFObjectEditingError` covers object inspection/mutation, unsupported text, invalid types/bitmaps, and replacement verification.
 - `PDFAnnotationServiceError` covers empty input, missing selection/annotation, unsafe appearance streams, invalid bounds, and round-trip failure.
 - `VisionOCRError` covers rendering, existing text layers, missing font resources, and invalid page indices.
+- `PDFPageImageExportError` covers missing/invalid pages or options, invalid crop bounds, dimension/pixel/memory limits, rendering failures, and ImageIO encoding failures.
 - CoreText shaping has explicit font/PDF creation errors.
 
 `ContentView` presents most failures in a generic operation alert using localized error descriptions. Protected merge keeps its error in the sheet and clears the password field after an attempt. Signature consent uses a dedicated warning and requires the user to retry the original mutation.
@@ -445,7 +457,7 @@ These are source/build-setting facts. Sandbox enforcement, final entitlements, s
 - Explicit Saves request security preservation by default.
 - Password removal requires separate confirmation for an unlocked encrypted document. PDFium uses `FPDF_REMOVE_SECURITY`, and the output is rejected if PDFKit still reports it encrypted.
 - The removal flag persists for the open document until the user disables it; it is not automatically reset after one save.
-- Split documents are newly assembled outputs opened without a password, so they are not governed by the save-time password-removal confirmation.
+- Extracted pages are newly assembled outputs opened without a password, so they are not governed by the save-time password-removal confirmation.
 
 ### PDF permissions
 
@@ -453,7 +465,7 @@ PDFium-backed deletion, rotation, movement, reordering, and merge operations che
 
 ### Digital signatures
 
-The editor checks whether PDFium reports one or more signature objects. It requires confirmation before the first in-place mutation, then permits signature-invalidating mutations for the remaining lifetime of that open `PDFEditorDocument`. The consent is not per operation or per save. Split is derived-output generation and bypasses the mutation gate.
+The editor checks whether PDFium reports one or more signature objects. It requires confirmation before the first in-place mutation, then permits signature-invalidating mutations for the remaining lifetime of that open `PDFEditorDocument`. The consent is not per operation or per save. Extract is derived-output generation and bypasses the mutation gate.
 
 This is presence detection only. The app does not validate signer identity, certificate chains, trust, signed byte ranges, timestamps, or cryptographic signature validity.
 
@@ -481,7 +493,7 @@ The app opens encrypted PDFs and can remove their encryption dictionary. Export-
 - bitmap insertion/replacement and alpha handling;
 - shared image and nested/shared Form isolation;
 - clipping and marked-content preservation;
-- page delete/rotate/move/reorder/split/merge, including preservation of page resources and embedded fonts during extraction and merge;
+- page delete/rotate/move/reorder/copy/merge, including preservation of page resources and embedded fonts during extraction and merge;
 - password acceptance/rejection, encryption preservation, and authorized removal;
 - a 120-page workflow and malformed/truncated input rejection.
 
@@ -491,6 +503,7 @@ The tests exercise the local package and native bridge. They do not launch the a
 
 - `AnnotationRoundTrip.swift`: creates selectable text on two lines, calls the production highlight service, changes the Highlight to green, verifies its alpha and eight annotation-local quadrilateral points, and verifies highlight serialization/reopen properties alongside note, free-text, and annotation-local Ink geometry through creation, resizing, reopen, recoloring, and line-width changes.
 - `OCRPolicyValidation.swift`: confirms that image-only pages require OCR and pages with real PDF text are skipped.
+- `ImageExportValidation.swift`: creates two pages, rotates one by 90 degrees, verifies PNG/JPEG type and 72/144/300 DPI-derived pixel dimensions, sortable filenames, progress, and fail-closed dimension limits.
 - `MakePDFEditorFixtures.swift`: produces nested-Form and top-level-text fixtures.
 - `MakePhase5ProtectedFixture.swift`: produces and verifies a password-protected fixture.
 - `PhaseSixCorpus.swift`: produces 120-page, mixed-content, rotated, protected, and truncated PDFs.
@@ -530,6 +543,13 @@ xcrun swiftc -parse-as-library Validation/OCRPolicyValidation.swift "PDF Editor/
 /tmp/PDFEditor-OCRPolicyValidation
 ```
 
+Image export:
+
+```sh
+xcrun swiftc -parse-as-library "PDF Editor/Services/PDFPageImageExporter.swift" Validation/ImageExportValidation.swift -o /tmp/PDFEditor-ImageExportValidation
+/tmp/PDFEditor-ImageExportValidation
+```
+
 Protected fixture self-validation:
 
 ```sh
@@ -565,6 +585,7 @@ The following completed successfully on 2026-08-24 with Xcode 26.6 and Apple Swi
 - On 2026-08-26, per-thumbnail Extract was verified in the macOS UI with its control immediately before Rotate left and a native save panel. The PDFium page-copy path was then verified against `OBM Timetable 2026.08.24.pdf`: the extracted page retained identical content-stream and text hashes, identical embedded-font names and byte sizes, and a pixel-identical rendered PNG compared with the source page. The complete PDFiumBridge suite passed 28 tests with 0 failures, and Debug builds succeeded for macOS and the generic iOS Simulator destination.
 - On 2026-08-26, Combine files selectively disabled experimental new-font subsetting for the first serialization after importing existing pages. An actual merge using `OBM Timetable 2026.08.24.pdf` preserved both imported pages' content-stream and text hashes plus their embedded-font names and byte sizes; the source first page and corresponding merged page also produced pixel-identical rendered PNGs. The complete PDFiumBridge suite passed 28 tests with 0 failures, and Debug builds succeeded for macOS and the generic iOS Simulator destination.
 - On 2026-08-26, freehand Ink drawing with a red preview/default stroke, removal of the separate Erase a drawing action, annotation-local path serialization, appearance regeneration for color and line width, the selected-Ink color/thickness/delete action bar, zoom-aware page hit testing, and the expanded 12-point macOS/22-point iOS invisible thickness-choice hit shapes passed `git diff --check`, the standalone annotation round trip, the complete 28-test PDFiumBridge suite, and Debug builds for macOS and the generic iOS Simulator destination. Rendering the standalone validation PDF also showed the expected Ink stroke. Exact drawing feel, action-bar placement, popover interaction, and hit-target behavior remain manual UI checks.
+- On 2026-08-27, Image format replaced the unavailable Office/image placeholders with PNG/JPEG export for the current page or all pages at 72, 144, or 300 DPI, with 300 DPI selected initially. The standalone image-export validation passed encoded-type, DPI-derived dimensions, 90-degree rotation, progress, sortable filenames, and fail-closed size-limit checks. The macOS options sheet was also exercised in a Debug build while correcting its compact spacing and common control-column alignment. Unsigned Debug builds succeeded for macOS and the generic iOS Simulator destination. Actual multi-file destination selection, progress-sheet interaction, cancellation timing during a long page render, generated-output comparison, and complete iOS visual inspection remain manual checks.
 - SHA-256 comparison: all four bundled PDFium binaries matched the values recorded in `Packages/PDFiumBridge/Vendor/NOTICE.md`.
 
 Additional validation completed on 2026-08-25 after the pending-text, Undo, embedded-font, multi-line editor, background-inspection, and scrolling changes:
@@ -633,6 +654,7 @@ The builds establish compilation and bundle construction for those destinations.
 - Physical iPhone/iPad execution and file-provider behavior.
 - Signed macOS application behavior, sandbox enforcement, Hardened Runtime, entitlements, signing, notarization, and App Store behavior.
 - Broad manual UI workflows, accessibility text sizes, semantic Undo/Redo verification, confirmation that Undo/Redo has no visible blank frame or SwiftUI publish-during-update warning, save/close/reopen, real password-restricted permission combinations, and visual inspection of generated pages. A scoped macOS comment Apply workflow was manually exercised on 2026-08-25.
+- Image-export options/progress/file-destination interaction, multi-file behavior with third-party file providers, and visual comparison of PNG/JPEG output against representative PDFs on macOS and iOS.
 - OCR quality on representative scanned documents and all languages/scripts.
 - PDFium reproducibility from the recorded source revision and local patches.
 - Complete transitive notices, font-license exposure in the final bundle, export-compliance classification, and vulnerability status.
@@ -653,7 +675,7 @@ The builds establish compilation and bundle construction for those destinations.
 - Explicit permission enforcement covers page assembly and PDFKit metadata, but not visibly every object/annotation mutation.
 - Signature invalidation consent lasts for the open document rather than one operation.
 - Passwords remain in ordinary process memory for the active encrypted-document session.
-- The password-removal option remains enabled until manually disabled, and split output has a separate security policy.
+- The password-removal option remains enabled until manually disabled, and extracted-page output has a separate security policy.
 - The checked-in development team, bundle identifier, version/build number, and document-handler rank are release-sensitive configuration. `RELEASE_CHECKLIST.md` still marks final selection as pending.
 - The bundled PDFium notice set is incomplete for distribution according to repository documentation.
 - There is no project-wide license declaration.
@@ -695,7 +717,7 @@ The following are recommended extension directions based on existing seams; none
 
 - **Recommended: app-level testability.** Inject `PDFEditingEngine`, OCR, annotation, and image services into `PDFEditorDocument`/`ContentView`, preserving the platform-neutral engine boundary and avoiding native/global dependencies in document tests.
 - **Recommended: permission-policy consolidation.** Add a provider-neutral mutation permission policy covering page, metadata, object, and annotation operations, while retaining fail-closed behavior and tests for distinct PDF permission combinations.
-- **Recommended: scoped security consent.** Revisit signature-consent lifetime, password-memory handling, password-removal reset behavior, and split-output security policy before release.
+- **Recommended: scoped security consent.** Revisit signature-consent lifetime, password-memory handling, password-removal reset behavior, and extracted-page output security policy before release.
 - **Recommended: OCR revision safety.** Introduce a document revision token or immutable recognition snapshot so page reordering/content edits can invalidate stale results before insertion.
 - **Recommended: validation automation.** Add an app test target or repository script/CI workflow for package tests, standalone validations, unsigned builds, fixture rendering, and Markdown checks without requiring credentials or production services.
 - **Recommended: broader layout fallback.** Extend the shaping service behind its existing boundary for multiline layout, bidirectional text, vertical writing, and more complete font fallback while continuing semantic-text verification.

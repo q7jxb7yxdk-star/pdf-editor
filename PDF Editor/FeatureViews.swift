@@ -12,11 +12,6 @@ enum PDFToolAction {
     case rotateLeft
     case rotateRight
     case combineFiles
-    case splitPDF
-    case compressPDF
-    case exportWord
-    case exportExcel
-    case exportPowerPoint
     case exportImage
     case fillAndSign
     case requestSignatures
@@ -86,14 +81,9 @@ struct PDFToolSidebar: View {
 
                     section("Organize a PDF") {
                         tool("Combine files", icon: "doc.on.doc", action: .combineFiles)
-                        tool("Split a PDF", icon: "square.split.2x1", action: .splitPDF, enabled: pageCount > 0)
-                        tool("Compress PDF", icon: "arrow.down.right.and.arrow.up.left", action: .compressPDF)
                     }
 
                     section("Export PDF to") {
-                        tool("Microsoft Word", icon: "doc.text", action: .exportWord)
-                        tool("Microsoft Excel", icon: "tablecells", action: .exportExcel)
-                        tool("Microsoft PowerPoint", icon: "rectangle.on.rectangle", action: .exportPowerPoint)
                         tool("Image format", icon: "photo", action: .exportImage)
                     }
 
@@ -179,6 +169,236 @@ struct PDFToolSidebar: View {
         }
         .menuStyle(.borderlessButton)
         .disabled(!hasSelectedPage)
+    }
+}
+
+enum PDFImageExportPageScope: String, CaseIterable, Identifiable {
+    case currentPage
+    case allPages
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .currentPage: "Current page"
+        case .allPages: "All pages"
+        }
+    }
+}
+
+struct PDFImageExportOptionsView: View {
+    private enum FormatChoice: String, CaseIterable, Identifiable {
+        case png
+        case jpeg
+
+        var id: Self { self }
+        var title: String { rawValue.uppercased() }
+    }
+
+    let hasCurrentPage: Bool
+    let pageCount: Int
+    let onExport: (PDFPageImageFormat, PDFPageImageDPI, PDFImageExportPageScope) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var format: FormatChoice = .png
+    @State private var dpi: PDFPageImageDPI = .dpi300
+    @State private var pageScope: PDFImageExportPageScope = .currentPage
+
+    var body: some View {
+        Group {
+#if os(macOS)
+            macOSSheetContent
+#else
+            iOSSheetContent
+#endif
+        }
+        .frame(minWidth: minimumSheetWidth, minHeight: 340)
+        .onAppear {
+            if !hasCurrentPage {
+                pageScope = .allPages
+            }
+        }
+    }
+
+#if os(macOS)
+    private var macOSSheetContent: some View {
+        VStack(spacing: 0) {
+            Text("Export PDF to Images")
+                .font(.title2.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, horizontalContentMargin)
+                .padding(.vertical, 18)
+
+            Divider()
+            macOSOptionsContent
+            Divider()
+
+            HStack(spacing: 12) {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Export", action: exportImages)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(exportDisabled)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var macOSOptionsContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: optionColumnSpacing) {
+                    optionLabel("Format")
+                    optionControl {
+                        Picker("Format", selection: $format) {
+                            ForEach(FormatChoice.allCases) { choice in
+                                Text(choice.title).tag(choice)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
+                }
+
+                HStack(spacing: optionColumnSpacing) {
+                    optionLabel("Pages")
+                    optionControl {
+                        Picker("Pages", selection: $pageScope) {
+                            ForEach(PDFImageExportPageScope.allCases) { scope in
+                                Text(scope.title).tag(scope)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
+                }
+
+                HStack(spacing: optionColumnSpacing) {
+                    optionLabel("Resolution")
+                    optionControl {
+                        Picker("Resolution", selection: $dpi) {
+                            ForEach(PDFPageImageDPI.allCases, id: \.self) { value in
+                                Text("\(value.rawValue) DPI").tag(value)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+
+                HStack(alignment: .top, spacing: optionColumnSpacing) {
+                    Color.clear
+                        .frame(width: optionLabelWidth, height: 1)
+                    Text(exportSummary)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 620, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, horizontalContentMargin)
+            .padding(.vertical, 20)
+        }
+    }
+
+    private func optionLabel(_ title: String) -> some View {
+        Text(title)
+            .frame(width: optionLabelWidth, alignment: .trailing)
+    }
+
+    private func optionControl<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ZStack(alignment: .leading) {
+            content()
+        }
+        .frame(width: optionControlColumnWidth, alignment: .leading)
+    }
+
+    private var optionLabelWidth: CGFloat { 100 }
+    private var optionColumnSpacing: CGFloat { 20 }
+    private var optionControlColumnWidth: CGFloat { 200 }
+#else
+    private var iOSSheetContent: some View {
+        NavigationStack {
+            Form {
+                Picker("Format", selection: $format) {
+                    ForEach(FormatChoice.allCases) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Pages", selection: $pageScope) {
+                    ForEach(PDFImageExportPageScope.allCases) { scope in
+                        Text(scope.title).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Resolution", selection: $dpi) {
+                    ForEach(PDFPageImageDPI.allCases, id: \.self) { value in
+                        Text("\(value.rawValue) DPI").tag(value)
+                    }
+                }
+
+                Section {
+                    Text(exportSummary)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .contentMargins(.horizontal, horizontalContentMargin, for: .scrollContent)
+            .contentMargins(.vertical, 20, for: .scrollContent)
+            .navigationTitle("Export PDF to Images")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Export", action: exportImages)
+                        .disabled(exportDisabled)
+                }
+            }
+        }
+    }
+#endif
+
+    private var exportDisabled: Bool {
+        pageCount == 0 || (pageScope == .currentPage && !hasCurrentPage)
+    }
+
+    private func exportImages() {
+        let imageFormat: PDFPageImageFormat = switch format {
+        case .png: .png
+        case .jpeg: .jpeg
+        }
+        dismiss()
+        onExport(imageFormat, dpi, pageScope)
+    }
+
+    private var exportSummary: String {
+        let pages = pageScope == .currentPage ? "the current page" : "all \(pageCount) pages"
+        return "Exports \(pages) as \(format.title) at \(dpi.rawValue) DPI. Each PDF page becomes a separate image file."
+    }
+
+    private var minimumSheetWidth: CGFloat {
+#if os(macOS)
+        400
+#else
+        320
+#endif
+    }
+
+    private var horizontalContentMargin: CGFloat {
+#if os(macOS)
+        28
+#else
+        20
+#endif
     }
 }
 
@@ -508,6 +728,7 @@ struct PDFPagesPanel: View {
             }
             .buttonStyle(.borderless)
         }
+        .frame(maxWidth: .infinity, alignment: .center)
         .contextMenu {
             Button("Rotate Left") { onRotate(index, -90) }
             Button("Rotate Right") { onRotate(index, 90) }
