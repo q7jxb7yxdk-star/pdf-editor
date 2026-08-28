@@ -376,6 +376,8 @@ struct PDFKitView: NSViewRepresentable {
     let onPlaceComment: (Int, CGPoint) -> Void
     let signaturePlacementEnabled: Bool
     let signaturePlacementStrokes: [[CGPoint]]?
+    let signaturePlacementSize: CGSize
+    let signaturePlacementLineWidth: CGFloat
     let onPlaceSignature: (Int, CGPoint) -> Void
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
@@ -445,6 +447,8 @@ struct PDFKitView: UIViewRepresentable {
     let onPlaceComment: (Int, CGPoint) -> Void
     let signaturePlacementEnabled: Bool
     let signaturePlacementStrokes: [[CGPoint]]?
+    let signaturePlacementSize: CGSize
+    let signaturePlacementLineWidth: CGFloat
     let onPlaceSignature: (Int, CGPoint) -> Void
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
@@ -496,6 +500,8 @@ private extension PDFKitView {
             onPlaceComment: onPlaceComment,
             signaturePlacementEnabled: signaturePlacementEnabled,
             signaturePlacementStrokes: signaturePlacementStrokes,
+            signaturePlacementSize: signaturePlacementSize,
+            signaturePlacementLineWidth: signaturePlacementLineWidth,
             onPlaceSignature: onPlaceSignature,
             freehandDrawingEnabled: freehandDrawingEnabled,
             onAddFreehand: onAddFreehand,
@@ -554,6 +560,8 @@ private extension PDFKitView {
         coordinator.onPlaceComment = onPlaceComment
         coordinator.signaturePlacementEnabled = signaturePlacementEnabled
         coordinator.signaturePlacementStrokes = signaturePlacementStrokes
+        coordinator.signaturePlacementSize = signaturePlacementSize
+        coordinator.signaturePlacementLineWidth = signaturePlacementLineWidth
         coordinator.onPlaceSignature = onPlaceSignature
         coordinator.freehandDrawingEnabled = freehandDrawingEnabled
         coordinator.onAddFreehand = onAddFreehand
@@ -680,6 +688,22 @@ extension PDFKitView {
         var signaturePlacementStrokes: [[CGPoint]]? {
             didSet {
                 guard oldValue != signaturePlacementStrokes else { return }
+#if os(macOS)
+                refreshSignaturePreviewAtCurrentMouseLocation()
+#endif
+            }
+        }
+        var signaturePlacementSize: CGSize {
+            didSet {
+                guard oldValue != signaturePlacementSize else { return }
+#if os(macOS)
+                refreshSignaturePreviewAtCurrentMouseLocation()
+#endif
+            }
+        }
+        var signaturePlacementLineWidth: CGFloat {
+            didSet {
+                guard oldValue != signaturePlacementLineWidth else { return }
 #if os(macOS)
                 refreshSignaturePreviewAtCurrentMouseLocation()
 #endif
@@ -855,6 +879,8 @@ extension PDFKitView {
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
             signaturePlacementEnabled: Bool,
             signaturePlacementStrokes: [[CGPoint]]?,
+            signaturePlacementSize: CGSize,
+            signaturePlacementLineWidth: CGFloat,
             onPlaceSignature: @escaping (Int, CGPoint) -> Void,
             freehandDrawingEnabled: Bool,
             onAddFreehand: @escaping (Int, [CGPoint]) -> Void,
@@ -881,6 +907,8 @@ extension PDFKitView {
             self.onPlaceComment = onPlaceComment
             self.signaturePlacementEnabled = signaturePlacementEnabled
             self.signaturePlacementStrokes = signaturePlacementStrokes
+            self.signaturePlacementSize = signaturePlacementSize
+            self.signaturePlacementLineWidth = signaturePlacementLineWidth
             self.onPlaceSignature = onPlaceSignature
             self.freehandDrawingEnabled = freehandDrawingEnabled
             self.onAddFreehand = onAddFreehand
@@ -3564,7 +3592,8 @@ extension PDFKitView {
             let pagePoint = pdfView.convert(viewPoint, to: page)
             let bounds = SignaturePlacementGeometry.bounds(
                 centeredAt: pagePoint,
-                pageBounds: page.bounds(for: .cropBox)
+                pageBounds: page.bounds(for: .cropBox),
+                preferredSize: signaturePlacementSize
             )
             guard bounds.width > 0, bounds.height > 0 else {
                 hideSignaturePreview()
@@ -3593,7 +3622,10 @@ extension PDFKitView {
             CATransaction.setDisableActions(true)
             signaturePreviewLayer.frame = pdfView.bounds
             signaturePreviewLayer.path = path
-            signaturePreviewLayer.lineWidth = max(1, 2 * pdfView.scaleFactor)
+            signaturePreviewLayer.lineWidth = max(
+                1,
+                signaturePlacementLineWidth * pdfView.scaleFactor
+            )
             signaturePreviewLayer.isHidden = path.isEmpty
             CATransaction.commit()
         }

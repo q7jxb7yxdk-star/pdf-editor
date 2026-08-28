@@ -225,6 +225,39 @@ struct AnnotationRoundTripValidation {
             )
         }
 
+        let markContainers = [
+            CGRect(origin: CGPoint(x: 500, y: 230), size: ESignMark.preferredSize),
+            CGRect(origin: CGPoint(x: 500, y: 150), size: ESignMark.preferredSize),
+        ]
+        for (mark, bounds) in zip(ESignMark.allCases, markContainers) {
+            _ = try service.addSignature(
+                strokes: mark.normalizedStrokes.map(SignatureStroke.init(points:)),
+                bounds: bounds,
+                lineWidth: ESignMark.lineWidth,
+                minimumPadding: ESignMark.annotationPadding,
+                to: page
+            )
+        }
+        let markSnapshots = Array(service.snapshots(on: page, pageIndex: 0).suffix(2))
+        precondition(markSnapshots.count == 2)
+        let expectedMarkPointCounts = [3, 4]
+        for ((mark, container), pointCount) in zip(
+            zip(markSnapshots, markContainers),
+            expectedMarkPointCounts
+        ) {
+            precondition(mark.kind == .ink)
+            precondition(mark.bounds.width < container.width)
+            precondition(mark.bounds.height < container.height)
+            precondition(mark.geometryPointCount == pointCount)
+            precondition(abs(mark.lineWidth - ESignMark.lineWidth) < 0.01)
+            precondition(abs(mark.color.alpha - 1) < 0.01)
+            try requireInkPathsInsideAnnotationBounds(
+                mark.reference,
+                in: document,
+                service: service
+            )
+        }
+
         guard let serialized = document.dataRepresentation(),
               let reopened = PDFDocument(data: serialized) else {
             throw CocoaError(.fileWriteUnknown)
@@ -240,6 +273,9 @@ struct AnnotationRoundTripValidation {
         for signature in signatureSnapshots {
             try service.verify(signature, in: reopened)
         }
+        for mark in markSnapshots {
+            try service.verify(mark, in: reopened)
+        }
 
         let reopenedPage = reopened.page(at: 0)!
         precondition(reopenedPage.annotations[0].iconType == .comment)
@@ -252,9 +288,13 @@ struct AnnotationRoundTripValidation {
         precondition(abs(snapshots[3].color.red - markupColor.red) < 0.01)
         precondition(abs(snapshots[3].color.green - markupColor.green) < 0.01)
         precondition(abs(snapshots[3].color.blue - markupColor.blue) < 0.01)
-        precondition(snapshots.count == 6)
+        precondition(snapshots.count == 8)
         precondition(snapshots[4].geometryPointCount == 6)
         precondition(snapshots[5].geometryPointCount == 6)
+        precondition(snapshots[6].geometryPointCount == 3)
+        precondition(snapshots[7].geometryPointCount == 4)
+        precondition(abs(snapshots[6].lineWidth - ESignMark.lineWidth) < 0.01)
+        precondition(abs(snapshots[7].lineWidth - ESignMark.lineWidth) < 0.01)
 
         let restyledSignature = try service.update(
             snapshots[5].reference,
@@ -273,7 +313,7 @@ struct AnnotationRoundTripValidation {
             service: service
         )
 
-        print("Annotation round-trip validation passed (note, free text, freehand ink, highlight, and multiple signatures).")
+        print("Annotation round-trip validation passed (note, free text, freehand ink, highlight, signatures, checkmark, and crossmark).")
     }
 
     private static func requireInkPathsInsideAnnotationBounds(

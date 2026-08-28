@@ -33,6 +33,63 @@ private struct PendingTextEdit {
     let style: PDFTextStyle
 }
 
+private enum ESignPlacement {
+    case signature(SignatureLibraryTemplate)
+    case mark(ESignMark)
+
+    var normalizedStrokes: [[CGPoint]] {
+        switch self {
+        case let .signature(template): template.normalizedStrokes
+        case let .mark(mark): mark.normalizedStrokes
+        }
+    }
+
+    var preferredSize: CGSize {
+        switch self {
+        case .signature: SignaturePlacementGeometry.preferredSize
+        case .mark: ESignMark.preferredSize
+        }
+    }
+
+    var lineWidth: CGFloat {
+        switch self {
+        case .signature: 2
+        case .mark: ESignMark.lineWidth
+        }
+    }
+
+    var annotationPadding: CGFloat {
+        switch self {
+        case .signature: 2
+        case .mark: ESignMark.annotationPadding
+        }
+    }
+
+    var promptName: String {
+        switch self {
+        case let .signature(template): template.displayName ?? "the signature"
+        case .mark(.checkmark): "a checkmark"
+        case .mark(.crossmark): "a crossmark"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .signature: "signature"
+        case .mark(.checkmark): "checkmark"
+        case .mark(.crossmark): "xmark"
+        }
+    }
+
+    var undoActionName: String {
+        switch self {
+        case .signature: "Add Signature"
+        case .mark(.checkmark): "Add Checkmark"
+        case .mark(.crossmark): "Add Crossmark"
+        }
+    }
+}
+
 @MainActor
 private final class PendingTextEditStore: ObservableObject {
     @Published private(set) var edits: [String: PendingTextEdit] = [:]
@@ -153,7 +210,7 @@ struct ContentView: View {
     @State private var showsObjectInspector = false
     @StateObject private var signatureLibraryStore = SignatureLibraryStore()
     @State private var showsSignatureLibrary = false
-    @State private var selectedSignatureTemplate: SignatureLibraryTemplate?
+    @State private var selectedESignPlacement: ESignPlacement?
     @State private var showsOCRResult = false
     @State private var showsSignatureWarning = false
     @State private var showsPasswordRemovalConfirmation = false
@@ -562,9 +619,12 @@ struct ContentView: View {
                     onSetAnnotationBounds: setAnnotationBounds,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
-                    signaturePlacementEnabled: selectedSignatureTemplate != nil,
-                    signaturePlacementStrokes: selectedSignatureTemplate?.normalizedStrokes,
-                    onPlaceSignature: placeSelectedSignature,
+                    signaturePlacementEnabled: selectedESignPlacement != nil,
+                    signaturePlacementStrokes: selectedESignPlacement?.normalizedStrokes,
+                    signaturePlacementSize: selectedESignPlacement?.preferredSize
+                        ?? SignaturePlacementGeometry.preferredSize,
+                    signaturePlacementLineWidth: selectedESignPlacement?.lineWidth ?? 2,
+                    onPlaceSignature: placeSelectedESign,
                     freehandDrawingEnabled: freehandDrawingEnabled,
                     onAddFreehand: addFreehandStroke,
                     onReplaceTextObject: replaceText,
@@ -596,13 +656,13 @@ struct ContentView: View {
                     .shadow(radius: 4, y: 2)
                 }
 
-                if let selectedSignatureTemplate {
+                if let selectedESignPlacement {
                     HStack(spacing: 12) {
                         Label(
-                            "Click a location in the PDF to add \(selectedSignatureTemplate.displayName ?? "the signature")",
-                            systemImage: "signature"
+                            "Click a location in the PDF to add \(selectedESignPlacement.promptName)",
+                            systemImage: selectedESignPlacement.systemImage
                         )
-                        Button("Cancel", action: cancelSignaturePlacement)
+                        Button("Cancel", action: cancelESignPlacement)
                             .buttonStyle(.bordered)
                             .keyboardShortcut(.cancelAction)
                     }
@@ -852,8 +912,8 @@ struct ContentView: View {
         if action != .drawFreehand {
             freehandDrawingEnabled = false
         }
-        if action != .addSignature {
-            cancelSignaturePlacement()
+        if !action.isESignAction {
+            cancelESignPlacement()
         }
         switch action {
         case .addComment:
@@ -881,12 +941,16 @@ struct ContentView: View {
         case .combineFiles:
             beginFileImport(.mergePDF)
         case .addSignature:
-            cancelSignaturePlacement()
+            cancelESignPlacement()
             cancelCommentPlacement()
             cancelHighlightMode()
             selectedObject = nil
             selectedAnnotation = nil
             showsSignatureLibrary = true
+        case .addCheckmark:
+            beginESignPlacement(.mark(.checkmark))
+        case .addCrossmark:
+            beginESignPlacement(.mark(.crossmark))
         case .drawFreehand:
             commentPlacementEnabled = false
             highlightModeEnabled = false
@@ -1647,28 +1711,43 @@ struct ContentView: View {
     }
 
     private func beginSignaturePlacement(_ template: SignatureLibraryTemplate) {
+        beginESignPlacement(.signature(template))
+    }
+
+    private func beginESignPlacement(_ placement: ESignPlacement) {
         showsSignatureLibrary = false
+        cancelCommentPlacement()
+        cancelHighlightMode()
         selectedObject = nil
         selectedAnnotation = nil
-        selectedSignatureTemplate = template
+        selectedESignPlacement = placement
         if !usesInlinePanels {
             showsToolPanel = false
         }
     }
 
-    private func cancelSignaturePlacement() {
-        selectedSignatureTemplate = nil
+    private func cancelESignPlacement() {
+        selectedESignPlacement = nil
     }
 
-    private func placeSelectedSignature(pageIndex: Int, point: CGPoint) {
-        guard let template = selectedSignatureTemplate,
+    private func placeSelectedESign(pageIndex: Int, point: CGPoint) {
+        guard let placement = selectedESignPlacement,
               let page = document.pdfDocument.page(at: pageIndex) else { return }
         var newReference: PDFAnnotationReference?
         do {
-            try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Signature") {
+            try document.mutateAnnotations(
+                undoManager: undoManager,
+                actionName: placement.undoActionName
+            ) {
                 let annotation = try annotationService.addSignature(
-                    strokes: template.normalizedStrokes.map(SignatureStroke.init(points:)),
-                    bounds: signatureBounds(centeredAt: point, on: page),
+                    strokes: placement.normalizedStrokes.map(SignatureStroke.init(points:)),
+                    bounds: eSignBounds(
+                        centeredAt: point,
+                        preferredSize: placement.preferredSize,
+                        on: page
+                    ),
+                    lineWidth: placement.lineWidth,
+                    minimumPadding: placement.annotationPadding,
                     to: page
                 )
                 guard let annotationIndex = page.annotations.firstIndex(where: {
@@ -1684,17 +1763,22 @@ struct ContentView: View {
             guard let newReference else {
                 throw PDFAnnotationServiceError.annotationNotFound
             }
-            selectedSignatureTemplate = nil
+            selectedESignPlacement = nil
             selectedPageIndex = pageIndex
             loadCanvasAnnotations()
             selectedAnnotation = pageAnnotations.first { $0.reference == newReference }
         } catch { present(error) }
     }
 
-    private func signatureBounds(centeredAt point: CGPoint, on page: PDFPage) -> CGRect {
+    private func eSignBounds(
+        centeredAt point: CGPoint,
+        preferredSize: CGSize,
+        on page: PDFPage
+    ) -> CGRect {
         SignaturePlacementGeometry.bounds(
             centeredAt: point,
-            pageBounds: page.bounds(for: .cropBox)
+            pageBounds: page.bounds(for: .cropBox),
+            preferredSize: preferredSize
         )
     }
 

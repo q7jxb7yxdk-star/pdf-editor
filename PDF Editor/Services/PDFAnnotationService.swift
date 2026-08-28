@@ -364,6 +364,8 @@ final class PDFAnnotationService {
     func addSignature(
         strokes: [SignatureStroke],
         bounds: CGRect,
+        lineWidth requestedLineWidth: CGFloat = 2,
+        minimumPadding: CGFloat = 2,
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let placementBounds = bounds.standardized
@@ -392,8 +394,8 @@ final class PDFAnnotationService {
               let maximumY = pagePoints.map(\.y).max() else {
             throw PDFAnnotationServiceError.emptySignature
         }
-        let lineWidth: CGFloat = 2
-        let padding = max(lineWidth, 2)
+        let lineWidth = min(max(requestedLineWidth, 0.5), 24)
+        let padding = max(lineWidth, minimumPadding)
         var tightBounds = CGRect(
             x: minimumX - padding,
             y: minimumY - padding,

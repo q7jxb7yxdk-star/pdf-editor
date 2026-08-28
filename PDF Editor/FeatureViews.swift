@@ -14,8 +14,19 @@ enum PDFToolAction {
     case combineFiles
     case exportImage
     case addSignature
+    case addCheckmark
+    case addCrossmark
     case protectPDF
     case redactPDF
+}
+
+extension PDFToolAction {
+    var isESignAction: Bool {
+        switch self {
+        case .addSignature, .addCheckmark, .addCrossmark: true
+        default: false
+        }
+    }
 }
 
 struct PDFToolSidebar: View {
@@ -83,6 +94,8 @@ struct PDFToolSidebar: View {
 
                     section("E-sign") {
                         tool("Add a signature", icon: "signature", action: .addSignature)
+                        tool("Add a checkmark", icon: "checkmark", action: .addCheckmark)
+                        tool("Add a crossmark", icon: "xmark", action: .addCrossmark)
                     }
 
                     section("Secure PDF") {

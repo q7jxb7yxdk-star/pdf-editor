@@ -33,6 +33,31 @@ nonisolated enum SignaturePlacementGeometry {
     }
 }
 
+nonisolated enum ESignMark: CaseIterable, Sendable {
+    case checkmark
+    case crossmark
+
+    static let preferredSize = CGSize(width: 11, height: 11)
+    static let lineWidth: CGFloat = 1
+    static let annotationPadding: CGFloat = 1
+
+    var normalizedStrokes: [[CGPoint]] {
+        switch self {
+        case .checkmark:
+            [[
+                CGPoint(x: 0.10, y: 0.52),
+                CGPoint(x: 0.38, y: 0.82),
+                CGPoint(x: 0.90, y: 0.15),
+            ]]
+        case .crossmark:
+            [
+                [CGPoint(x: 0.10, y: 0.10), CGPoint(x: 0.90, y: 0.90)],
+                [CGPoint(x: 0.90, y: 0.10), CGPoint(x: 0.10, y: 0.90)],
+            ]
+        }
+    }
+}
+
 nonisolated enum SignatureLibraryError: LocalizedError, Equatable {
     case invalidPoint
     case strokeTooShort
