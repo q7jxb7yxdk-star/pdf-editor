@@ -689,7 +689,12 @@ extension PDFKitView {
         var freehandDrawingEnabled: Bool {
             didSet {
                 guard oldValue != freehandDrawingEnabled else { return }
-                if !freehandDrawingEnabled { cancelFreehandDrawing() }
+                if !freehandDrawingEnabled {
+                    cancelFreehandDrawing()
+#if os(macOS)
+                    cancelFreehandStraightLine()
+#endif
+                }
                 updateGestureAvailability()
             }
         }
@@ -733,7 +738,12 @@ extension PDFKitView {
 
 #if os(macOS)
         private let signaturePreviewLayer = CAShapeLayer()
+        private let freehandStraightLineAnchorLayer = CAShapeLayer()
         private var lastSignaturePreviewViewPoint: CGPoint?
+        private weak var freehandStraightLinePage: PDFPage?
+        private var freehandStraightLinePageIndex: Int?
+        private var freehandStraightLinePagePoint: CGPoint?
+        private var freehandStraightLineViewPoint: CGPoint?
 
         private struct InlineTextStyle {
             let fontDescriptor: NSFontDescriptor
@@ -800,6 +810,7 @@ extension PDFKitView {
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
         private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
         private var scrollWheelEventMonitor: Any?
+        private var modifierFlagsEventMonitor: Any?
         private var commentPopover: NSPopover?
         private var commentPopoverReference: PDFAnnotationReference?
         private var commentPopoverOpenedByHover = false
@@ -892,6 +903,7 @@ extension PDFKitView {
             pdfView.layer?.addSublayer(outlineLayer)
             handleLayers.forEach { pdfView.layer?.addSublayer($0) }
             pdfView.layer?.addSublayer(freehandPreviewLayer)
+            pdfView.layer?.addSublayer(freehandStraightLineAnchorLayer)
             pdfView.layer?.addSublayer(signaturePreviewLayer)
             synchronizeStagedTextEdits()
 #else
@@ -957,6 +969,21 @@ extension PDFKitView {
                 return event
             }
 
+            if let modifierFlagsEventMonitor {
+                NSEvent.removeMonitor(modifierFlagsEventMonitor)
+            }
+            modifierFlagsEventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .flagsChanged
+            ) { [weak self, weak pdfView] event in
+                guard let self, let pdfView,
+                      event.window === pdfView.window else { return event }
+                self.handleFreehandModifierFlagsChanged(
+                    event.modifierFlags,
+                    in: pdfView
+                )
+                return event
+            }
+
             if let clipView = pdfView.documentView?.enclosingScrollView?.contentView {
                 clipView.postsBoundsChangedNotifications = true
                 observers.append(center.addObserver(
@@ -984,13 +1011,19 @@ extension PDFKitView {
                 NSEvent.removeMonitor(scrollWheelEventMonitor)
                 self.scrollWheelEventMonitor = nil
             }
+            if let modifierFlagsEventMonitor {
+                NSEvent.removeMonitor(modifierFlagsEventMonitor)
+                self.modifierFlagsEventMonitor = nil
+            }
 #endif
             outlineLayer.removeFromSuperlayer()
             handleLayers.forEach { $0.removeFromSuperlayer() }
             freehandPreviewLayer.removeFromSuperlayer()
 #if os(macOS)
+            freehandStraightLineAnchorLayer.removeFromSuperlayer()
             signaturePreviewLayer.removeFromSuperlayer()
             lastSignaturePreviewViewPoint = nil
+            cancelFreehandStraightLine()
 #endif
             removeAnnotationActionBar()
             if let pdfView {
@@ -1018,6 +1051,7 @@ extension PDFKitView {
             pendingTextActivation = nil
 #if os(macOS)
             hideSignaturePreview()
+            cancelFreehandStraightLine()
             removeTransientStagedTextFallback()
             stagedTextByObjectID.removeAll()
             stagedTextStylesByObjectID.removeAll()
@@ -1140,6 +1174,9 @@ extension PDFKitView {
         private func configureOverlay() {
 #if os(macOS)
             let accent = NSColor.controlAccentColor.cgColor
+            freehandStraightLineAnchorLayer.strokeColor = nil
+            freehandStraightLineAnchorLayer.zPosition = 10_003
+            freehandStraightLineAnchorLayer.isHidden = true
             signaturePreviewLayer.strokeColor = NSColor.labelColor
                 .withAlphaComponent(0.68)
                 .cgColor
@@ -1163,6 +1200,9 @@ extension PDFKitView {
                 blue: 0.15,
                 alpha: 1
             )
+#if os(macOS)
+            freehandStraightLineAnchorLayer.fillColor = freehandPreviewLayer.strokeColor
+#endif
             freehandPreviewLayer.fillColor = nil
             freehandPreviewLayer.lineWidth = 2
             freehandPreviewLayer.lineCap = .round
@@ -1429,6 +1469,116 @@ extension PDFKitView {
             freehandPreviewLayer.isHidden = false
             CATransaction.commit()
         }
+
+#if os(macOS)
+        private func beginFreehandStraightLine(at viewPoint: CGPoint) {
+            guard freehandDrawingEnabled,
+                  freehandPage == nil,
+                  freehandStraightLinePage == nil,
+                  let pdfView,
+                  let document = pdfView.document,
+                  let page = pdfView.page(for: viewPoint, nearest: false) else { return }
+            let pageIndex = document.index(for: page)
+            guard pageIndex != NSNotFound else { return }
+
+            finishInlineTextEditing(commit: true)
+            selectedObject.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            pdfView.clearSelection()
+            selection.wrappedValue = nil
+            setOverlayHidden(true)
+
+            freehandStraightLinePage = page
+            freehandStraightLinePageIndex = pageIndex
+            freehandStraightLinePagePoint = pdfView.convert(viewPoint, to: page)
+            freehandStraightLineViewPoint = viewPoint
+            updateFreehandStraightLinePreview(at: viewPoint)
+        }
+
+        private func updateFreehandStraightLinePreview(at viewPoint: CGPoint) {
+            guard let pdfView,
+                  let page = freehandStraightLinePage,
+                  let anchor = freehandStraightLineViewPoint else { return }
+
+            let path = CGMutablePath()
+            path.move(to: anchor)
+            if pdfView.page(for: viewPoint, nearest: false) === page {
+                path.addLine(to: viewPoint)
+            }
+
+            let dotRadius = max(3, freehandPreviewLayer.lineWidth * 1.5)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            freehandPreviewLayer.frame = pdfView.bounds
+            freehandPreviewLayer.path = path
+            freehandPreviewLayer.isHidden = false
+            freehandStraightLineAnchorLayer.frame = pdfView.bounds
+            freehandStraightLineAnchorLayer.path = CGPath(
+                ellipseIn: CGRect(
+                    x: anchor.x - dotRadius,
+                    y: anchor.y - dotRadius,
+                    width: dotRadius * 2,
+                    height: dotRadius * 2
+                ),
+                transform: nil
+            )
+            freehandStraightLineAnchorLayer.isHidden = false
+            CATransaction.commit()
+        }
+
+        @discardableResult
+        private func finishFreehandStraightLine(at viewPoint: CGPoint) -> Bool {
+            guard let pdfView,
+                  let page = freehandStraightLinePage,
+                  pdfView.page(for: viewPoint, nearest: false) === page,
+                  let pageIndex = freehandStraightLinePageIndex,
+                  let startPoint = freehandStraightLinePagePoint else { return false }
+            let endPoint = pdfView.convert(viewPoint, to: page)
+            cancelFreehandStraightLine()
+            guard hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y) >= 0.5 else {
+                return true
+            }
+            onAddFreehand(pageIndex, [startPoint, endPoint])
+            return true
+        }
+
+        private func cancelFreehandStraightLine() {
+            let hadStraightLine = freehandStraightLinePage != nil
+            freehandStraightLinePage = nil
+            freehandStraightLinePageIndex = nil
+            freehandStraightLinePagePoint = nil
+            freehandStraightLineViewPoint = nil
+            if hadStraightLine {
+                freehandPreviewLayer.path = nil
+                freehandPreviewLayer.isHidden = true
+            }
+            freehandStraightLineAnchorLayer.path = nil
+            freehandStraightLineAnchorLayer.isHidden = true
+        }
+
+        private func handleFreehandModifierFlagsChanged(
+            _ modifierFlags: NSEvent.ModifierFlags,
+            in pdfView: PDFView
+        ) {
+            guard freehandDrawingEnabled, modifierFlags.contains(.shift) else {
+                cancelFreehandStraightLine()
+                return
+            }
+            guard freehandPage == nil,
+                  freehandStraightLinePage == nil,
+                  let viewPoint = currentMouseViewPoint(in: pdfView) else { return }
+            beginFreehandStraightLine(at: viewPoint)
+        }
+
+        private func currentMouseViewPoint(in pdfView: PDFView) -> CGPoint? {
+            guard let window = pdfView.window else { return nil }
+            let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+            let viewPoint = pdfView.convert(windowPoint, from: nil)
+            guard pdfView.bounds.contains(viewPoint),
+                  pdfView.page(for: viewPoint, nearest: false) != nil else { return nil }
+            return viewPoint
+        }
+#endif
 
         private func selectTarget(at viewPoint: CGPoint) {
             guard prepareForCanvasInteraction(at: viewPoint),
@@ -3674,6 +3824,19 @@ extension PDFKitView.Coordinator: PDFPageOverlayViewProvider {
 extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     func handleMouseMoved(_ event: NSEvent, in pdfView: PDFView) {
         let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
+        if freehandDrawingEnabled {
+            endAnnotationHover(in: pdfView)
+            if event.modifierFlags.contains(.shift) {
+                if freehandStraightLinePage == nil {
+                    beginFreehandStraightLine(at: viewPoint)
+                } else {
+                    updateFreehandStraightLinePreview(at: viewPoint)
+                }
+            } else {
+                cancelFreehandStraightLine()
+            }
+            return
+        }
         if signaturePlacementEnabled {
             endAnnotationHover(in: pdfView)
             updateSignaturePreview(at: viewPoint)
@@ -3717,6 +3880,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
     func handlePointerExited(in pdfView: PDFView) {
         hideSignaturePreview()
+        cancelFreehandStraightLine()
         endAnnotationHover(in: pdfView)
     }
 
@@ -3816,6 +3980,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     func handleScrollWillBegin(in pdfView: PDFView) {
         closeCommentPopover()
         hideSignaturePreview()
+        cancelFreehandStraightLine()
         if inlineTextField != nil {
             finishInlineTextEditing(commit: true)
             clearStagedTextSelection()
@@ -3887,6 +4052,14 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
         let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
         if inlineEditorContains(viewPoint) {
             return false
+        }
+
+        if freehandDrawingEnabled, freehandStraightLinePage != nil {
+            guard event.modifierFlags.contains(.shift) else {
+                cancelFreehandStraightLine()
+                return false
+            }
+            return finishFreehandStraightLine(at: viewPoint)
         }
 
         guard let page = pdfView.page(for: viewPoint, nearest: false),
@@ -3978,6 +4151,7 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
     ) -> Bool {
         if gestureRecognizer === freehandGesture {
             return freehandDrawingEnabled &&
+                freehandStraightLinePage == nil &&
                 pdfView.page(for: viewPoint, nearest: false) != nil
         }
         if freehandDrawingEnabled { return false }

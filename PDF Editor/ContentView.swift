@@ -616,10 +616,17 @@ struct ContentView: View {
 
                 if freehandDrawingEnabled {
                     HStack(spacing: 12) {
+#if os(macOS)
+                        Label(
+                            "Draw on the PDF, or hold Shift and click another point for a straight line.",
+                            systemImage: "pencil.and.outline"
+                        )
+#else
                         Label(
                             "Draw anywhere on the PDF, then release to finish.",
                             systemImage: "pencil.and.outline"
                         )
+#endif
                         Button("Cancel") {
                             freehandDrawingEnabled = false
                         }
