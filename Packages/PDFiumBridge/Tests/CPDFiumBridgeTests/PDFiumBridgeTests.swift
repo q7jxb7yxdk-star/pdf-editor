@@ -393,6 +393,61 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(try objectText(reopened, index: 1), "掃描文字層")
     }
 
+    func testInvisibleOCRTextLayerRemainsSearchableWithoutChangingRendering() throws {
+        let source = makeTextPDF(text: "")
+        let sourcePixelCount = try nonWhitePixelCount(source)
+        let document = try open(source)
+        defer { PEPDFDocumentClose(document) }
+        let originalObjectCount = PEPDFPageObjectCount(document, 0)
+
+        let fontData = try Data(contentsOf: notoFontURL())
+        let font = fontData.withUnsafeBytes {
+            PEPDFFontCreateEmbedded(
+                document,
+                $0.bindMemory(to: UInt8.self).baseAddress,
+                $0.count
+            )
+        }
+        let unwrappedFont = try XCTUnwrap(font)
+        defer { PEPDFFontClose(unwrappedFont) }
+        let recognizedText = "掃描文字層"
+        let utf16 = Array(recognizedText.utf16)
+        XCTAssertTrue(utf16.withUnsafeBufferPointer {
+            PEPDFPageAddEmbeddedText(
+                document,
+                unwrappedFont,
+                0,
+                $0.baseAddress,
+                $0.count,
+                18,
+                72,
+                500,
+                true
+            )
+        })
+        XCTAssertEqual(PEPDFPageObjectCount(document, 0), originalObjectCount + 1)
+
+        let addedObject = try objectInfo(document, index: originalObjectCount)
+        XCTAssertEqual(addedObject.matrixE, 72, accuracy: 0.01)
+        XCTAssertEqual(addedObject.matrixF, 500, accuracy: 0.01)
+        XCTAssertGreaterThan(addedObject.right, addedObject.left)
+        XCTAssertGreaterThan(addedObject.top, addedObject.bottom)
+
+        let saved = try copyData(document)
+        XCTAssertEqual(try nonWhitePixelCount(saved), sourcePixelCount)
+
+        let reopened = try open(saved)
+        defer { PEPDFDocumentClose(reopened) }
+        XCTAssertEqual(PEPDFDocumentPageCount(reopened), 1)
+        XCTAssertTrue(try recursiveTexts(reopened).contains { $0 == recognizedText })
+
+        let pdfKitDocument = try XCTUnwrap(PDFDocument(data: saved))
+        XCTAssertEqual(pdfKitDocument.pageCount, 1)
+        let matches = pdfKitDocument.findString(recognizedText, withOptions: [])
+        XCTAssertFalse(matches.isEmpty)
+        XCTAssertEqual(matches.first?.string, recognizedText)
+    }
+
     func testBitmapAddReplaceTransformAndZOrderRoundTrip() throws {
         let document = try open(makeTextPDF())
         defer { PEPDFDocumentClose(document) }

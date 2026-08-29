@@ -70,7 +70,7 @@ flowchart TD
 - `PDFEditorDocument` owns an optional, lazily created `any PDFEditingSession` and the corresponding PDFKit `PDFDocument` used by the UI. Initial display does not wait for creation of the mutation session.
 - `PDFiumEditingSession` owns one opaque C document handle. It closes the handle on deinitialization.
 - `PDFiumRuntime.shared` initializes the PDFium library once and destroys it when the process-level singleton is deinitialized.
-- `ContentView` owns OCR tasks. A new document-wide OCR run cancels the previous one, and view disappearance cancels the active batch task.
+- `ContentView` owns OCR tasks and their original page/revision contexts. A new document-wide OCR run cancels the previous one, and view disappearance cancels the active batch task.
 - `PDFKitView.Coordinator` owns notification observers, gesture recognizers, selection overlays, and the current gesture interaction state.
 - `ContentView` owns a cancellable page-object load task, a revision-scoped per-page cache, and an observable pending-text store. The current page is inspected on an independent background PDFium session and the next page is prefetched. Display inspection uses one native page load to batch-copy recursive object paths and lightweight object information instead of reopening and reparsing the page for every object.
 - A process-wide recursive lock in `PDFEditorDocument` serializes PDFium inspection, mutation, export, and annotation-color access across foreground and background handles.
@@ -356,7 +356,7 @@ ImageIO enforces an 8,192-pixel thumbnail cap, but memory use can still be mater
 - Once the display inspector enters the native batch call, the page walk is synchronous and cannot be interrupted; the single-load traversal reduces that non-cancellable interval compared with the previous per-object page reloads.
 - `annotationSnapshots(onPage:)` always obtains the PDFKit snapshot first. If the PDFium lock is busy, it returns that baseline immediately rather than making the main thread wait; PDFium-provided annotation color correction can therefore be temporarily omitted.
 - The source `PDFDocument` is passed to sequential recognition and the document is mutated only after review.
-- There is no document revision token between recognition and insertion. The insertion path mitigates staleness by validating page indices, rejecting duplicate pages, and refusing pages that now contain selectable text, but it does not prove that page ordering or rendered content is unchanged.
+- Single-page OCR captures its original page index instead of consulting the later selection. Single-page and batch runs also capture the editor revision and reject results if that revision differs before presentation or insertion. The insertion path additionally validates page indices, rejects duplicates, and refuses pages that now contain selectable text.
 
 ### Retry, rate limiting, and caching
 
@@ -421,7 +421,7 @@ No environment variables, feature-flag files, runtime modes, API keys, secret fi
 - `PDFEditingError` covers invalid documents/passwords, locks, permissions, indices, sizes, rotations, page orders/ranges, page failures, export failures, and signature consent.
 - `PDFObjectEditingError` covers object inspection/mutation, unsupported text, invalid types/bitmaps, and replacement verification.
 - `PDFAnnotationServiceError` covers empty input, missing selection/annotation, unsafe appearance streams, invalid bounds, and round-trip failure.
-- `VisionOCRError` covers rendering, existing text layers, missing font resources, and invalid page indices.
+- `VisionOCRError` covers rendering, existing text layers, missing font resources, invalid page indices, and documents changed during OCR.
 - `PDFPageImageExportError` covers missing/invalid pages or options, invalid crop bounds, dimension/pixel/memory limits, rendering failures, and ImageIO encoding failures.
 - CoreText shaping has explicit font/PDF creation errors.
 
@@ -496,7 +496,7 @@ The app opens encrypted PDFs, can create password-protected PDFs through PDFKit,
 - existing-text rewrite and style/geometry preservation;
 - object movement, addition, deletion, transformation, and z-order;
 - recursive display-object batch enumeration with path ordering and composed Form matrices;
-- Unicode searchable layers and multilingual regular/bold/italic CoreText overlays;
+- Unicode searchable layers, an invisible OCR-layer serialization/reopen test covering PDFKit search, PDFium extraction, page count, object position, and unchanged rendering, plus multilingual regular/bold/italic CoreText overlays;
 - bitmap insertion/replacement and alpha handling;
 - shared image and nested/shared Form isolation;
 - clipping and marked-content preservation;
@@ -511,7 +511,7 @@ The tests exercise the local package and native bridge. They do not launch the a
 
 - `AnnotationRoundTrip.swift`: creates selectable text on two lines, calls the production highlight service, changes the Highlight to green, verifies its alpha and eight annotation-local quadrilateral points, and verifies highlight serialization/reopen properties alongside note, ordinary user-added free text, annotation-local Ink geometry, two independently placed multi-stroke signature Ink annotations, a checkmark, and a crossmark. It also confirms that E-sign bounds are smaller than their placement containers, every path remains annotation-local, and a signature keeps its blue color and six-point line width after a second serialization/reopen cycle.
 - `SignatureLibraryValidation.swift`: checks template and store round trips, name trimming, point/stroke limits, oversized and corrupt payload rejection, and decode-time normalized-coordinate validation.
-- `OCRPolicyValidation.swift`: confirms that image-only pages require OCR and pages with real PDF text are skipped.
+- `OCRPolicyValidation.swift`: confirms that image-only pages require OCR, pages with real PDF text are skipped, run contexts retain their original page targets and reject stale revisions, and Vision rectangles map correctly at 0°, 90°, 180°, and 270°.
 - `ImageExportValidation.swift`: creates two pages, rotates one by 90 degrees, verifies PNG/JPEG type and 72/144/300 DPI-derived pixel dimensions, sortable filenames, progress, and fail-closed dimension limits.
 - `OBMColorSafetyValidation.swift`: sends a title replacement through the production background Save-preparation path for an OBM page that includes Pattern resources, verifies resource counts and chromatic coverage after reopen, requires searchable replacement text, and confirms that no FreeText annotation is created.
 - `ManualSaveDestinationValidation.swift`: verifies immediate Save As destination adoption, rollback to the previous identity after a simulated failure, snapshot advancement for an explicitly adopted destination, and a subsequent Save that keeps writing the active copy while leaving existing original bytes unchanged.
@@ -606,6 +606,7 @@ The following completed successfully on 2026-08-24 with Xcode 26.6 and Apple Swi
 - On 2026-08-28, the macOS Shift straight-line extension for Draw freehand passed `git diff --check`, the standalone annotation round trip, and unsigned Debug builds for macOS arm64 and the generic iOS Simulator destination. The iOS build emitted only the existing `UIBarButtonItem.Style.done` deprecation warnings in `PDFKitView.swift`. Exact anchor-dot placement, live preview alignment, modifier timing, click handling, and drawing feel remain manual UI checks.
 - On 2026-08-28, Add a checkmark and Add a crossmark passed `git diff --check`, Signature Library validation, a standalone annotation round trip covering their expected point counts, tight annotation-local paths, and serialization/reopen behavior, plus unsigned Debug builds for macOS arm64 and the generic iOS Simulator destination. Exact tool-row appearance, macOS pointer-preview alignment, iOS tap placement, move/resize controls, and interaction feel remain manual UI checks.
 - On 2026-08-29, the protected-PDF open guard passed `git diff --check`. `ContentView` now skips page-object display scanning while `PDFEditorDocument` remains locked and ignores empty main-document password submissions. Opening an actual password-protected PDF and confirming that no invalid-password alert appears before entry remains a manual UI check.
+- On 2026-08-29, standalone OCR policy validation passed page-target retention, stale-revision rejection, and 0°/90°/180°/270° Vision-to-PDF coordinate mappings. A new PDFiumBridge XCTest covers invisible OCR-layer serialization/reopen, PDFKit search, PDFium extraction, page count, object position, and unchanged rendering; it was not run in this task under the manual Xcode/package-test boundary. App-level Undo/Redo, save/reopen, and representative scanned-document quality remain manual checks.
 - On 2026-08-27, Image format replaced the unavailable Office/image placeholders with PNG/JPEG export for the current page or all pages at 72, 144, or 300 DPI, with 300 DPI selected initially. The standalone image-export validation passed encoded-type, DPI-derived dimensions, 90-degree rotation, progress, sortable filenames, and fail-closed size-limit checks. The macOS options sheet was also exercised in a Debug build while correcting its compact spacing and common control-column alignment. Unsigned Debug builds succeeded for macOS and the generic iOS Simulator destination. Actual multi-file destination selection, progress-sheet interaction, cancellation timing during a long page render, generated-output comparison, and complete iOS visual inspection remain manual checks.
 - On 2026-08-27, the reusable local signature library passed persistence, corrupt/oversized data, decode-validation, capacity checks, and centered/left-bottom/right-top placement clamping. The annotation round trip preserved two independently placed multi-stroke signatures, tight ink bounds, annotation-local paths, and a blue/six-point style update across reopen alongside the existing annotation corpus. The macOS pointer-following preview and unchanged iOS tap path compiled in unsigned Debug builds for macOS and the generic iOS Simulator destination. Exact signature-library layout, pointer-preview appearance and alignment, drawing feel, delete interaction, click/tap placement, tight selection outline, color/thickness controls, move/resize, Undo/Redo, and app-level save/reopen behavior remain manual UI checks.
 - SHA-256 comparison: all four bundled PDFium binaries matched the values recorded in `Packages/PDFiumBridge/Vendor/NOTICE.md`.
@@ -692,7 +693,7 @@ The builds establish compilation and bundle construction for those destinations.
 - `PDFEditorDocument` directly constructs engines and services, limiting dependency substitution in app-level tests.
 - Whole-document byte snapshots make rollback simple but can consume significant memory for large PDFs and Undo histories.
 - Batch OCR is sequential and has no capacity-aware queue, partial checkpointing, or recognition cache.
-- OCR stale-task protection checks cancellation and target-page state but has no document revision token.
+- OCR stale-task protection checks cancellation, retains the original target pages, and rejects results whose captured document revision is stale. App-level tests do not yet exercise the complete asynchronous UI workflow.
 - Annotation references are array-index based and are not stable across arbitrary external mutations.
 - The advanced-shaping detector is a fixed Unicode-range/category heuristic, and the fallback is single-line overlay rendering.
 - Object/page postconditions are intentionally narrow; full semantic preservation depends on regression corpora and manual inspection. Pages that cannot pass page-content and resource-preservation checks reject existing-text replacement rather than substituting an annotation.
@@ -742,7 +743,7 @@ The following are recommended extension directions based on existing seams; none
 - **Recommended: app-level testability.** Inject `PDFEditingEngine`, OCR, annotation, and image services into `PDFEditorDocument`/`ContentView`, preserving the platform-neutral engine boundary and avoiding native/global dependencies in document tests.
 - **Recommended: permission-policy consolidation.** Add a provider-neutral mutation permission policy covering page, metadata, object, and annotation operations, while retaining fail-closed behavior and tests for distinct PDF permission combinations.
 - **Recommended: scoped security consent.** Revisit signature-consent lifetime, password-memory handling, password-removal reset behavior, and extracted-page output security policy before release.
-- **Recommended: OCR revision safety.** Introduce a document revision token or immutable recognition snapshot so page reordering/content edits can invalidate stale results before insertion.
+- **Recommended: OCR snapshot hardening.** Consider an immutable rendered-page fingerprint in addition to the current page-index and document-revision context if mutations are later introduced that can bypass the editor revision.
 - **Recommended: validation automation.** Add an app test target or repository script/CI workflow for package tests, standalone validations, unsigned builds, fixture rendering, and Markdown checks without requiring credentials or production services.
 - **Recommended: broader layout fallback.** Extend the shaping service behind its existing boundary for multiline layout, bidirectional text, vertical writing, and more complete font fallback while continuing semantic-text verification.
 - **Recommended: localization.** Move hard-coded UI strings into a string catalog without changing the editing/domain boundaries.

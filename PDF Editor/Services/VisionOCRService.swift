@@ -28,6 +28,30 @@ struct OCRBatchResult: Equatable, Sendable {
     }
 }
 
+struct OCRRunContext: Equatable, Sendable {
+    let pageIndices: [Int]
+    let documentRevision: Int
+
+    init(pageIndex: Int, documentRevision: Int) {
+        pageIndices = [pageIndex]
+        self.documentRevision = documentRevision
+    }
+
+    init(pageIndices: [Int], documentRevision: Int) {
+        self.pageIndices = pageIndices
+        self.documentRevision = documentRevision
+    }
+
+    var singlePageIndex: Int? {
+        guard pageIndices.count == 1 else { return nil }
+        return pageIndices[0]
+    }
+
+    func isCurrent(documentRevision: Int) -> Bool {
+        self.documentRevision == documentRevision
+    }
+}
+
 enum OCRPageResult: Equatable, Sendable {
     case existingText(String)
     case recognized([OCRTextObservation])
@@ -38,6 +62,7 @@ enum VisionOCRError: LocalizedError {
     case textLayerAlreadyExists
     case fontResourceMissing
     case invalidPageIndex(Int)
+    case documentChanged
 
     var errorDescription: String? {
         switch self {
@@ -49,6 +74,8 @@ enum VisionOCRError: LocalizedError {
             "The Unicode OCR font resource is missing from the app bundle."
         case let .invalidPageIndex(index):
             "Page index \(index) is not available for OCR."
+        case .documentChanged:
+            "The document changed during OCR. Run text recognition again before adding a searchable text layer."
         }
     }
 }
@@ -203,7 +230,7 @@ final class VisionOCRService {
         return .recognized(observations)
     }
 
-    nonisolated private static func mapToPage(
+    nonisolated static func mapToPage(
         normalizedBounds: CGRect,
         pageBox: CGRect,
         rotation: Int

@@ -198,7 +198,9 @@ struct ContentView: View {
     @State private var selectedObject: PDFPageObjectSnapshot?
     private let objectEditingEnabled = true
     @State private var ocrResult: OCRPageResult?
+    @State private var ocrRunContext: OCRRunContext?
     @State private var ocrBatchResult: OCRBatchResult?
+    @State private var ocrBatchRunContext: OCRRunContext?
     @State private var ocrBatchTask: Task<Void, Never>?
     @State private var ocrProgressCompleted = 0
     @State private var ocrProgressTotal = 0
@@ -2212,12 +2214,22 @@ struct ContentView: View {
     }
 
     private func runOCR() {
-        guard let page = selectedPage else { return }
+        guard let pageIndex = selectedPageIndex,
+              let page = document.pdfDocument.page(at: pageIndex) else { return }
+        let context = OCRRunContext(
+            pageIndex: pageIndex,
+            documentRevision: editorState.revision
+        )
+        ocrRunContext = context
         isRunningOCR = true
         Task {
             defer { isRunningOCR = false }
             do {
-                ocrResult = try await ocrService.recognizeText(on: page)
+                let result = try await ocrService.recognizeText(on: page)
+                guard context.isCurrent(documentRevision: editorState.revision) else {
+                    throw VisionOCRError.documentChanged
+                }
+                ocrResult = result
                 showsOCRResult = true
             } catch { present(error) }
         }
@@ -2230,6 +2242,11 @@ struct ContentView: View {
         ocrProgressTotal = document.pageCount
         isRunningOCR = true
         showsOCRProgress = true
+        let context = OCRRunContext(
+            pageIndices: Array(0..<document.pageCount),
+            documentRevision: editorState.revision
+        )
+        ocrBatchRunContext = context
 
         ocrBatchTask = Task {
             defer {
@@ -2240,12 +2257,15 @@ struct ContentView: View {
             do {
                 let result = try await ocrService.recognizePages(
                     in: document.pdfDocument,
-                    pageIndices: Array(0..<document.pageCount)
+                    pageIndices: context.pageIndices
                 ) { completed, total in
                     ocrProgressCompleted = completed
                     ocrProgressTotal = total
                 }
                 try Task.checkCancellation()
+                guard context.isCurrent(documentRevision: editorState.revision) else {
+                    throw VisionOCRError.documentChanged
+                }
                 showsOCRProgress = false
                 await Task.yield()
                 ocrBatchResult = result
@@ -2258,8 +2278,12 @@ struct ContentView: View {
     }
 
     private func addOCRTextLayer(_ observations: [OCRTextObservation]) {
-        guard let pageIndex = selectedPageIndex else { return }
         do {
+            guard let context = ocrRunContext,
+                  let pageIndex = context.singlePageIndex else { return }
+            guard context.isCurrent(documentRevision: editorState.revision) else {
+                throw VisionOCRError.documentChanged
+            }
             try document.addOCRTextLayer(
                 observations,
                 pageIndex: pageIndex,
@@ -2273,6 +2297,10 @@ struct ContentView: View {
 
     private func addOCRTextLayers(_ result: OCRBatchResult) {
         do {
+            guard let context = ocrBatchRunContext else { return }
+            guard context.isCurrent(documentRevision: editorState.revision) else {
+                throw VisionOCRError.documentChanged
+            }
             try document.addOCRTextLayers(
                 result.recognizedPages,
                 undoManager: undoManager
