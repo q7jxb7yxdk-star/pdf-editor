@@ -118,6 +118,7 @@ nonisolated enum PDFEditingError: Error, Equatable, Sendable, LocalizedError {
     case pageMutationFailed
     case exportFailed
     case passwordRemovalFailed
+    case passwordProtectionFailed
     case digitalSignatureConsentRequired
 
     var errorDescription: String? {
@@ -158,6 +159,8 @@ nonisolated enum PDFEditingError: Error, Equatable, Sendable, LocalizedError {
             return "The edited PDF could not be exported."
         case .passwordRemovalFailed:
             return "The unlocked PDF could not be exported without password protection."
+        case .passwordProtectionFailed:
+            return "The PDF could not be saved with the requested password protection."
         case .digitalSignatureConsentRequired:
             return "This PDF contains a digital signature. Editing it will invalidate that signature. Confirm this before making changes."
         }

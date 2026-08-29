@@ -33,8 +33,13 @@
       skipped.
 - [ ] Confirm page editing, merge, split, annotation, signature, Undo, Redo,
       save, close, and reopen all preserve the expected result.
-- [ ] Confirm password removal happens only after explicit confirmation and the
-      saved output reopens without a password.
+- [ ] Use Protect PDF with matching passwords, save, close, and confirm the
+      output rejects a wrong password and reopens with the requested password.
+- [ ] Confirm mismatched Protect PDF passwords cannot be submitted and
+      cancelling Save does not write or discard the pending protection request.
+- [ ] Unlock a protected PDF with its known password, select Remove Password,
+      save without a visible page flash, close, and confirm the output reopens
+      without a password.
 - [ ] Inspect iPhone, iPad, and macOS layouts with accessibility text sizes.
 
 Archive, signing, notarization, physical-device installation, TestFlight, and

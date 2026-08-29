@@ -233,6 +233,7 @@ struct ContentView: View {
     @State private var selectedESignPlacement: ESignPlacement?
     @State private var showsOCRResult = false
     @State private var showsSignatureWarning = false
+    @State private var showsProtectPDF = false
     @State private var showsPasswordRemovalConfirmation = false
     @State private var showsAddTextPrompt = false
     @State private var showsAnnotationInspector = false
@@ -240,7 +241,6 @@ struct ContentView: View {
     @State private var pendingMergeFilename = "Protected PDF"
     @State private var viewerMode: PDFViewerMode = .scrolling
     @State private var viewerCommand: PDFViewerCommand?
-    @State private var unavailableTool: String?
     @State private var showsCommentPrompt = false
     @State private var showsCommentList = false
     @State private var commentEditorAnnotation: PDFAnnotationSnapshot?
@@ -422,13 +422,16 @@ struct ContentView: View {
         } message: {
             Text("This PDF contains digital signatures. Editing content or annotations will invalidate them. Confirm, then repeat the operation.")
         }
-        .alert("Remove PDF Password Protection?", isPresented: $showsPasswordRemovalConfirmation) {
+        .alert("Remove PDF Password?", isPresented: $showsPasswordRemovalConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Remove When Saving", role: .destructive) {
                 document.setRemovesPasswordProtectionOnSave(true)
+                if !usesInlinePanels {
+                    showsToolPanel = false
+                }
             }
         } message: {
-            Text("The next save will create a PDF that no longer requires a password. The original is replaced only if you save over it.")
+            Text("The next Save or Save As will create a PDF that no longer requires a password.")
         }
         .alert("Add Text", isPresented: $showsAddTextPrompt) {
             TextField("Text", text: $newText)
@@ -437,14 +440,6 @@ struct ContentView: View {
                 .disabled(newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("Text will be added to the center of the current page. You can move or edit it from the PDF Objects panel.")
-        }
-        .alert("Feature unavailable", isPresented: Binding(
-            get: { unavailableTool != nil },
-            set: { if !$0 { unavailableTool = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("\(unavailableTool ?? "This tool") is visible in the workspace, but its PDF processing workflow has not been implemented yet.")
         }
         .sheet(isPresented: $showsObjectInspector) {
             PageObjectInspectorView(
@@ -496,6 +491,15 @@ struct ContentView: View {
                 hasCurrentPage: selectedPageIndex != nil,
                 pageCount: document.pageCount,
                 onExport: startImageExport
+            )
+        }
+        .sheet(isPresented: $showsProtectPDF) {
+            PDFProtectView(
+                onProtect: { password in
+                    document.setPasswordProtectionOnSave(password)
+                    showsProtectPDF = false
+                },
+                onCancel: { showsProtectPDF = false }
             )
         }
         .sheet(isPresented: $isExportingImages) {
@@ -737,6 +741,10 @@ struct ContentView: View {
         PDFToolSidebar(
             pageCount: document.pageCount,
             hasSelectedPage: selectedPageIndex != nil,
+            isEncrypted: document.isEncrypted,
+            isLocked: document.isLocked,
+            removesPasswordProtectionOnSave:
+                document.removesPasswordProtectionOnSave,
             onAction: handleToolAction
         )
     }
@@ -886,7 +894,11 @@ struct ContentView: View {
                 let pendingSave = try await preparePendingManualSave()
                 let data = pendingSave.preparation.data
                 if let saveURL, !choosingNewDestination {
+#if os(macOS)
+                    try await writeExistingDocument(data, to: saveURL)
+#else
                     try ManualPDFSaveCoordinator.write(data, to: saveURL)
+#endif
                     try await finishSuccessfulManualSave(pendingSave, at: saveURL)
                     isSaving = false
                 } else {
@@ -923,6 +935,42 @@ struct ContentView: View {
     }
 
 #if os(macOS)
+    private func writeExistingDocument(_ data: Data, to url: URL) async throws {
+        let documentController = NSDocumentController.shared
+        let targetURL = url.standardizedFileURL.resolvingSymlinksInPath()
+        let windowDocument = NSApp.keyWindow?.windowController?.document
+        let matchingWindowDocument = windowDocument.flatMap { candidate in
+            candidate.fileURL?.standardizedFileURL.resolvingSymlinksInPath() ==
+                targetURL ? candidate : nil
+        }
+        guard let nativeDocument = matchingWindowDocument ??
+                documentController.document(for: url) else {
+            try ManualPDFSaveCoordinator.write(data, to: url)
+            return
+        }
+
+        let previousSnapshot = document.stageManualSaveSnapshot(data)
+        do {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                nativeDocument.save(
+                    to: url,
+                    ofType: nativeDocument.fileType ?? UTType.pdf.identifier,
+                    for: .saveOperation
+                ) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        } catch {
+            document.restoreManualSaveSnapshot(previousSnapshot)
+            throw error
+        }
+    }
+
     private func presentManualSavePanel(filename: String) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
@@ -1101,7 +1149,7 @@ struct ContentView: View {
         markingUnsaved: Bool
     ) async throws {
         let edits = pendingSave.edits
-        if !edits.isEmpty {
+        if pendingSave.preparation.requiresInstallation {
             try document.installPreparedManualSave(
                 pendingSave.preparation,
                 markingUnsaved: markingUnsaved,
@@ -1228,14 +1276,38 @@ struct ContentView: View {
         case .exportImage:
             beginImageExport()
         case .protectPDF:
-            showUnavailable("Protect PDF")
-        case .redactPDF:
-            showUnavailable("Redact PDF")
+            beginPasswordProtection()
+        case .removePassword:
+            beginPasswordRemoval()
         }
     }
 
-    private func showUnavailable(_ tool: String) {
-        unavailableTool = tool
+    private func beginPasswordProtection() {
+        guard !document.isLocked else {
+            present(PDFEditingError.documentLocked)
+            return
+        }
+        guard !document.requiresDigitalSignatureConsent else {
+            showsSignatureWarning = true
+            return
+        }
+        if !usesInlinePanels {
+            showsToolPanel = false
+        }
+        showsProtectPDF = true
+    }
+
+    private func beginPasswordRemoval() {
+        guard document.isEncrypted else { return }
+        guard !document.isLocked else {
+            present(PDFEditingError.documentLocked)
+            return
+        }
+        guard !document.requiresDigitalSignatureConsent else {
+            showsSignatureWarning = true
+            return
+        }
+        showsPasswordRemovalConfirmation = true
     }
 
     private func beginImageExport() {

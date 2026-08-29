@@ -17,7 +17,7 @@ enum PDFToolAction {
     case addCheckmark
     case addCrossmark
     case protectPDF
-    case redactPDF
+    case removePassword
 }
 
 extension PDFToolAction {
@@ -41,6 +41,9 @@ struct PDFToolSidebar: View {
 
     let pageCount: Int
     let hasSelectedPage: Bool
+    let isEncrypted: Bool
+    let isLocked: Bool
+    let removesPasswordProtectionOnSave: Bool
     let onAction: (PDFToolAction) -> Void
 
     @State private var expandedSections: Set<String>
@@ -48,10 +51,16 @@ struct PDFToolSidebar: View {
     init(
         pageCount: Int,
         hasSelectedPage: Bool,
+        isEncrypted: Bool,
+        isLocked: Bool,
+        removesPasswordProtectionOnSave: Bool,
         onAction: @escaping (PDFToolAction) -> Void
     ) {
         self.pageCount = pageCount
         self.hasSelectedPage = hasSelectedPage
+        self.isEncrypted = isEncrypted
+        self.isLocked = isLocked
+        self.removesPasswordProtectionOnSave = removesPasswordProtectionOnSave
         self.onAction = onAction
         _expandedSections = State(initialValue: Self.loadExpandedSections())
     }
@@ -100,7 +109,21 @@ struct PDFToolSidebar: View {
 
                     section("Secure PDF") {
                         tool("Protect PDF", icon: "lock", action: .protectPDF)
-                        tool("Redact PDF", icon: "rectangle.fill", action: .redactPDF)
+                        if removesPasswordProtectionOnSave {
+                            tool(
+                                "Password Will Be Removed",
+                                icon: "checkmark.circle",
+                                action: .removePassword,
+                                enabled: false
+                            )
+                        } else {
+                            tool(
+                                "Remove Password",
+                                icon: "lock.open",
+                                action: .removePassword,
+                                enabled: isEncrypted && !isLocked
+                            )
+                        }
                     }
                 }
                 .padding(.bottom, 18)
@@ -170,6 +193,59 @@ struct PDFToolSidebar: View {
         }
         .menuStyle(.borderlessButton)
         .disabled(!hasSelectedPage)
+    }
+}
+
+struct PDFProtectView: View {
+    let onProtect: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var password = ""
+    @State private var confirmation = ""
+    @State private var validationMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("Password", text: $password)
+                    SecureField("Confirm password", text: $confirmation)
+                } header: {
+                    Text("PDF password")
+                } footer: {
+                    Text("The password will be required after the PDF is saved. It is kept only for this open document and is not stored separately.")
+                }
+
+                if let validationMessage {
+                    Text(validationMessage)
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(.horizontal, 28)
+            .navigationTitle("Protect PDF")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Protect", action: protect)
+                        .disabled(password.isEmpty || confirmation.isEmpty)
+                }
+            }
+        }
+        .frame(minWidth: 420, minHeight: 280)
+    }
+
+    private func protect() {
+        guard !password.isEmpty else {
+            validationMessage = "Enter a password."
+            return
+        }
+        guard password == confirmation else {
+            validationMessage = "The passwords do not match."
+            return
+        }
+        onProtect(password)
     }
 }
 

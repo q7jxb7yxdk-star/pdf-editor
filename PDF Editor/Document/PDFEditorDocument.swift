@@ -69,6 +69,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
 
     private(set) var pdfDocument: PDFDocument
     private(set) var removesPasswordProtectionOnSave = false
+    private(set) var pendingPasswordProtection: String?
 
     private var editingSession: (any PDFEditingSession)?
     private var interactionPreparationTask: Task<PreparedPDFEditingSession, Error>?
@@ -79,6 +80,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private var sourceData: Data
     private var persistedData: Data
     private var authorizedPassword: String?
+    private var presentationPassword: String?
     private var allowsInvalidatingDigitalSignatures = false
 
     var pageCount: Int {
@@ -90,11 +92,15 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     var isEncrypted: Bool {
-        pdfDocument.isEncrypted
+        editingSession?.metadata.isEncrypted ?? pdfDocument.isEncrypted
     }
 
     var hasDigitalSignatures: Bool {
         (editingSession as? any PDFObjectEditingSession)?.hasDigitalSignatures == true
+    }
+
+    var requiresDigitalSignatureConsent: Bool {
+        hasDigitalSignatures && !allowsInvalidatingDigitalSignatures
     }
 
     func authorizeDigitalSignatureInvalidation() {
@@ -106,6 +112,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         sourceData = data
         persistedData = data
         authorizedPassword = nil
+        presentationPassword = nil
         pdfDocument = PDFDocument(data: data) ?? PDFDocument()
     }
 
@@ -118,6 +125,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         sourceData = data
         persistedData = data
         authorizedPassword = nil
+        presentationPassword = nil
         pdfDocument = document
     }
 
@@ -141,12 +149,26 @@ final class PDFEditorDocument: ReferenceFileDocument {
         )
         editingSession = session
         authorizedPassword = password
+        presentationPassword = password
         try refreshPDFKitDocument(markingUnsaved: false)
     }
 
     func setRemovesPasswordProtectionOnSave(_ removesProtection: Bool) {
-        guard removesPasswordProtectionOnSave != removesProtection else { return }
+        guard removesPasswordProtectionOnSave != removesProtection ||
+                (removesProtection && pendingPasswordProtection != nil) else { return }
         removesPasswordProtectionOnSave = removesProtection
+        if removesProtection {
+            pendingPasswordProtection = nil
+        }
+        editorState.documentDidChange(markingUnsaved: true)
+    }
+
+    func setPasswordProtectionOnSave(_ password: String) {
+        guard !password.isEmpty,
+              pendingPasswordProtection != password ||
+                removesPasswordProtectionOnSave else { return }
+        pendingPasswordProtection = password
+        removesPasswordProtectionOnSave = false
         editorState.documentDidChange(markingUnsaved: true)
     }
 
@@ -154,17 +176,32 @@ final class PDFEditorDocument: ReferenceFileDocument {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
         if let editingSession {
-            return try editingSession.dataRepresentation(
+            let data = try editingSession.dataRepresentation(
                 options: PDFExportOptions(
                     securityPolicy: removesPasswordProtectionOnSave
                         ? .removeAfterAuthorizedUnlock
                         : .preserve
                 )
             )
+            if let pendingPasswordProtection {
+                return try PDFPasswordProtectionService.protect(
+                    data: data,
+                    sourcePassword: authorizedPassword,
+                    newPassword: pendingPasswordProtection
+                )
+            }
+            return data
         }
 
         guard let data = pdfDocument.dataRepresentation() else {
             throw CocoaError(.fileWriteUnknown)
+        }
+        if let pendingPasswordProtection {
+            return try PDFPasswordProtectionService.protect(
+                data: data,
+                sourcePassword: authorizedPassword,
+                newPassword: pendingPasswordProtection
+            )
         }
         return data
     }
@@ -172,14 +209,16 @@ final class PDFEditorDocument: ReferenceFileDocument {
     func prepareManualSave(
         applying replacements: [PDFManualTextReplacement]
     ) async throws -> PDFManualSavePreparation {
-        if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures &&
-            !replacements.isEmpty {
+        if requiresDigitalSignatureConsent &&
+            (!replacements.isEmpty || pendingPasswordProtection != nil ||
+                removesPasswordProtectionOnSave) {
             throw PDFEditingError.digitalSignatureConsentRequired
         }
 
         let startingRevision = editorState.revision
         let sourceSnapshot = sourceData
         let password = authorizedPassword
+        let protectionPassword = pendingPasswordProtection
         let session = editingSession.map { PreparedPDFEditingSession(session: $0) }
         let fallbackFontData = try unicodeFontData()
         let exportOptions = PDFExportOptions(
@@ -203,7 +242,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
                     password: password,
                     replacements: replacements,
                     fallbackFontData: fallbackFontData,
-                    exportOptions: exportOptions
+                    exportOptions: exportOptions,
+                    protectionPassword: protectionPassword
                 )
             }
         }.value
@@ -223,23 +263,28 @@ final class PDFEditorDocument: ReferenceFileDocument {
         defer { Self.pdfiumAccessLock.unlock() }
         let preparedSession = try PDFiumEditingEngine().makeSession(
             data: preparation.data,
-            password: removesPasswordProtectionOnSave ? nil : authorizedPassword
+            password: preparation.openingPassword
         )
         guard let preparedDocument = PDFDocument(data: preparation.data) else {
             throw PDFEditingError.invalidDocument
         }
         if preparedDocument.isLocked {
-            guard let authorizedPassword,
-                  preparedDocument.unlock(withPassword: authorizedPassword) else {
+            guard let openingPassword = preparation.openingPassword,
+                  preparedDocument.unlock(withPassword: openingPassword) else {
                 throw PDFEditingError.invalidPassword
             }
         }
         editingSession = preparedSession
+        authorizedPassword = preparation.openingPassword
+        pendingPasswordProtection = nil
+        removesPasswordProtectionOnSave = false
         sourceData = preparation.data
-        synchronizePresentationPages(with: preparedDocument)
+        if !preparation.isSecurityOnlyPresentationUpdate {
+            synchronizePresentationPages(with: preparedDocument)
+        }
         publishDocumentChangeAfterViewUpdate(markingUnsaved: markingUnsaved)
 
-        if let undoManager {
+        if !preparation.replacementResults.isEmpty, let undoManager {
             undoManager.registerUndo(withTarget: self) { document in
                 document.restore(
                     data: preparation.originalData,
@@ -260,6 +305,16 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
         sourceData = data
         editorState.markSaved()
+    }
+
+    func stageManualSaveSnapshot(_ data: Data) -> Data {
+        let previousData = persistedData
+        persistedData = data
+        return previousData
+    }
+
+    func restoreManualSaveSnapshot(_ data: Data) {
+        persistedData = data
     }
 
     @discardableResult
@@ -658,9 +713,10 @@ final class PDFEditorDocument: ReferenceFileDocument {
             refreshesPDFKitDocument: false
         ) {
             try mutation()
-            guard let data = pdfDocument.dataRepresentation() else {
+            guard let presentationData = pdfDocument.dataRepresentation() else {
                 throw PDFEditingError.exportFailed
             }
+            let data = try normalizePresentationSecurity(presentationData)
             editingSession = try makeVerifiedAnnotationSession(
                 data: data,
                 expected: allAnnotationSnapshots()
@@ -739,10 +795,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 with: effectiveUpdate,
                 in: pdfDocument
             )
-            guard let data = pdfDocument.dataRepresentation(),
-                  PDFDocument(data: data) != nil else {
+            guard let presentationData = pdfDocument.dataRepresentation(),
+                  PDFDocument(data: presentationData) != nil else {
                 throw PDFEditingError.exportFailed
             }
+            let data = try normalizePresentationSecurity(presentationData)
             editingSession = try makeVerifiedAnnotationSession(
                 data: data,
                 expected: [updated],
@@ -1021,6 +1078,12 @@ final class PDFEditorDocument: ReferenceFileDocument {
         guard let serializedDocument = PDFDocument(data: data) else {
             throw PDFEditingError.invalidDocument
         }
+        if serializedDocument.isLocked {
+            guard let authorizedPassword,
+                  serializedDocument.unlock(withPassword: authorizedPassword) else {
+                throw PDFEditingError.invalidPassword
+            }
+        }
         let service = PDFAnnotationService()
         let relevantReferences = Set(expected.map(\.reference))
             .union(colorOverrides.keys)
@@ -1073,10 +1136,53 @@ final class PDFEditorDocument: ReferenceFileDocument {
         guard let reopened = PDFDocument(data: verifiedData) else {
             throw PDFEditingError.invalidDocument
         }
+        if reopened.isLocked {
+            guard let authorizedPassword,
+                  reopened.unlock(withPassword: authorizedPassword) else {
+                throw PDFEditingError.invalidPassword
+            }
+        }
         for annotation in expected {
             try service.verify(annotation, in: reopened)
         }
         return session
+    }
+
+    private func normalizePresentationSecurity(_ data: Data) throws -> Data {
+        guard let presentationDocument = PDFDocument(data: data) else {
+            throw PDFEditingError.invalidDocument
+        }
+        let presentationIsEncrypted = presentationDocument.isEncrypted
+        let activeIsEncrypted = editingSession?.metadata.isEncrypted ??
+            pdfDocument.isEncrypted
+
+        if activeIsEncrypted {
+            guard let authorizedPassword else {
+                throw PDFEditingError.invalidPassword
+            }
+            if presentationIsEncrypted,
+               presentationPassword == authorizedPassword {
+                return data
+            }
+            return try PDFPasswordProtectionService.protect(
+                data: data,
+                sourcePassword: presentationIsEncrypted
+                    ? presentationPassword
+                    : nil,
+                newPassword: authorizedPassword
+            )
+        }
+
+        guard presentationIsEncrypted else { return data }
+        let session = try PDFiumEditingEngine().makeSession(
+            data: data,
+            password: presentationPassword
+        )
+        return try session.dataRepresentation(
+            options: PDFExportOptions(
+                securityPolicy: .removeAfterAuthorizedUnlock
+            )
+        )
     }
 
     private func mutate<Result>(
