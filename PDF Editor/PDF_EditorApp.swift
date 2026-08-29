@@ -45,8 +45,11 @@ private struct FillWindowView: NSViewRepresentable {
         view.onWindowAttached = { window in
             guard !Self.filledWindows.contains(window) else { return }
             Self.filledWindows.add(window)
-            guard !window.isZoomed else { return }
-            fill(window)
+            Task { @MainActor [weak window] in
+                await Task.yield()
+                guard let window, !window.isZoomed else { return }
+                fill(window)
+            }
         }
         return view
     }
