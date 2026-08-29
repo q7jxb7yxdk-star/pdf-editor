@@ -45,16 +45,18 @@ private struct FillWindowView: NSViewRepresentable {
         view.onWindowAttached = { window in
             guard !Self.filledWindows.contains(window) else { return }
             Self.filledWindows.add(window)
-            Task { @MainActor [weak window] in
-                await Task.yield()
-                guard let window, !window.isZoomed else { return }
-                window.performZoom(nil)
-            }
+            guard !window.isZoomed else { return }
+            fill(window)
         }
         return view
     }
 
     func updateNSView(_ nsView: WindowAttachmentView, context: Context) {}
+
+    private func fill(_ window: NSWindow) {
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        window.setFrame(screen.visibleFrame, display: true, animate: false)
+    }
 }
 
 private final class WindowAttachmentView: NSView {
