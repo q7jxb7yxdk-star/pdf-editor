@@ -257,8 +257,9 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(try objectText(reopened, index: 1), "Untouched Text")
     }
 
-    func testICCPageRejectsTextRegenerationThatWouldDiscardColor() throws {
+    func testICCPageTextRegenerationPreservesVisibleColor() throws {
         let source = try makeICCColoredTextPDF()
+        let beforePixels = try nonWhitePixelCount(source)
         let document = try open(source)
         defer { PEPDFDocumentClose(document) }
         let count = Int(PEPDFPageObjectCountRecursive(document, 0))
@@ -271,9 +272,8 @@ final class PDFiumBridgeTests: XCTestCase {
             }
             return path
         }.first)
-        let originalText = try objectText(document, path: target)
         let replacement = Array("TEST".utf16)
-        XCTAssertFalse(target.withUnsafeBufferPointer { path in
+        XCTAssertTrue(target.withUnsafeBufferPointer { path in
             replacement.withUnsafeBufferPointer { text in
                 PEPDFPageObjectReplaceTextAtPath(
                     document, 0, path.baseAddress, path.count,
@@ -281,8 +281,66 @@ final class PDFiumBridgeTests: XCTestCase {
                 )
             }
         })
-        XCTAssertTrue(PEPDFDocumentLastMutationRejectedForAppearance(document))
-        XCTAssertEqual(try objectText(document, path: target), originalText)
+        XCTAssertFalse(PEPDFDocumentLastMutationRejectedForAppearance(document))
+
+        let saved = try copyData(document)
+        let reopened = try open(saved)
+        defer { PEPDFDocumentClose(reopened) }
+        XCTAssertEqual(try objectText(reopened, path: target), "TEST")
+        let afterPixels = try nonWhitePixelCount(saved)
+        XCTAssertGreaterThanOrEqual(afterPixels * 100, beforePixels * 95)
+    }
+
+    func testShadingPageTextRegenerationPreservesVisibleGradient() throws {
+        let source = makeShadedTextPDF()
+        let beforePixels = try nonWhitePixelCount(source)
+        let document = try open(source)
+        defer { PEPDFDocumentClose(document) }
+        let count = Int(PEPDFPageObjectCountRecursive(document, 0))
+        let target = try XCTUnwrap((0..<count).lazy.compactMap { flatIndex -> [Int32]? in
+            guard let path = try? self.objectPath(document, flatIndex: Int32(flatIndex)),
+                  let info = try? self.objectInfo(document, path: path),
+                  info.type == Int32(PEPDFObjectTypeText.rawValue),
+                  (try? self.objectText(document, path: path).isEmpty) == false else {
+                return nil
+            }
+            return path
+        }.first)
+        let replacement = Array("TEST".utf16)
+        XCTAssertTrue(target.withUnsafeBufferPointer { path in
+            replacement.withUnsafeBufferPointer { text in
+                PEPDFPageObjectReplaceTextAtPath(
+                    document, 0, path.baseAddress, path.count,
+                    text.baseAddress, text.count
+                )
+            }
+        })
+        XCTAssertFalse(PEPDFDocumentLastMutationRejectedForAppearance(document))
+
+        let saved = try copyData(document)
+        let reopened = try open(saved)
+        defer { PEPDFDocumentClose(reopened) }
+        XCTAssertEqual(try objectText(reopened, path: target), "TEST")
+        let afterPixels = try nonWhitePixelCount(saved)
+        XCTAssertGreaterThanOrEqual(afterPixels * 100, beforePixels * 95)
+    }
+
+    func testColoredTilingPatternTextRegenerationPreservesPaint() throws {
+        try assertPatternTextReplacementPreservesPaint(
+            makeColoredTilingPatternTextPDF()
+        )
+    }
+
+    func testUncoloredTilingPatternTextRegenerationPreservesPaint() throws {
+        try assertPatternTextReplacementPreservesPaint(
+            makeUncoloredTilingPatternTextPDF()
+        )
+    }
+
+    func testShadingPatternTextRegenerationPreservesPaint() throws {
+        try assertPatternTextReplacementPreservesPaint(
+            makeShadingPatternTextPDF()
+        )
     }
 
     func testMoveAddDeleteAndUnicodeSearchLayerRoundTrip() throws {
@@ -1340,7 +1398,10 @@ final class PDFiumBridgeTests: XCTestCase {
     }
 
     private func notoFontURL() -> URL {
-        URL(fileURLWithPath: #filePath)
+        if let path = ProcessInfo.processInfo.environment["PE_FALLBACK_FONT"] {
+            return URL(fileURLWithPath: path)
+        }
+        return URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1447,6 +1508,101 @@ final class PDFiumBridgeTests: XCTestCase {
         context.endPDFPage()
         context.closePDF()
         return data as Data
+    }
+
+    private func makeShadedTextPDF() -> Data {
+        let stream = "q 0.7 0 0 0.6 80 90 cm /Sh1 sh Q BT /F1 18 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Original Text) Tj ET"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /Shading << /Sh1 5 0 R >> >> /Contents 6 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 612 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> /Extend [true true] >>",
+            "<< /Length \(stream.utf8.count) >>\nstream\n\(stream)\nendstream",
+        ])
+    }
+
+    private func assertPatternTextReplacementPreservesPaint(
+        _ source: Data
+    ) throws {
+        let beforePixels = try nonWhitePixelCount(source)
+        let document = try open(source)
+        defer { PEPDFDocumentClose(document) }
+        let count = Int(PEPDFPageObjectCountRecursive(document, 0))
+        let target = try XCTUnwrap((0..<count).lazy.compactMap { flatIndex -> [Int32]? in
+            guard let path = try? self.objectPath(document, flatIndex: Int32(flatIndex)),
+                  let info = try? self.objectInfo(document, path: path),
+                  info.type == Int32(PEPDFObjectTypeText.rawValue),
+                  (try? self.objectText(document, path: path)) == "Original Text" else {
+                return nil
+            }
+            return path
+        }.first)
+        let replacement = Array("TEST".utf16)
+        XCTAssertTrue(target.withUnsafeBufferPointer { path in
+            replacement.withUnsafeBufferPointer { text in
+                PEPDFPageObjectReplaceTextAtPath(
+                    document, 0, path.baseAddress, path.count,
+                    text.baseAddress, text.count
+                )
+            }
+        })
+        XCTAssertFalse(PEPDFDocumentLastMutationRejectedForAppearance(document))
+
+        let saved = try copyData(document)
+        let reopened = try open(saved)
+        defer { PEPDFDocumentClose(reopened) }
+        XCTAssertEqual(try objectText(reopened, path: target), "TEST")
+        XCTAssertGreaterThanOrEqual(try nonWhitePixelCount(saved) * 100,
+                                    beforePixels * 95)
+        XCTAssertTrue(String(
+            decoding: try decodedFirstPageContents(saved),
+            as: UTF8.self
+        ).contains("scn"))
+    }
+
+    private func makeColoredTilingPatternTextPDF() -> Data {
+        let pattern = "1 0 0 rg 0 0 8 8 re f 0 0 1 rg 0 0 4 4 re f"
+        let stream =
+            "/Pattern cs /P1 scn 40 80 520 180 re f " +
+            "BT /F1 18 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Original Text) Tj ET"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /Pattern << /P1 5 0 R >> >> /Contents 6 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8 /Resources << >> /Length \(pattern.utf8.count) >>\nstream\n\(pattern)\nendstream",
+            "<< /Length \(stream.utf8.count) >>\nstream\n\(stream)\nendstream",
+        ])
+    }
+
+    private func makeUncoloredTilingPatternTextPDF() -> Data {
+        let pattern = "0 0 8 8 re f"
+        let stream =
+            "/PCS cs 0 0.7 0.2 /P1 scn 40 80 520 180 re f " +
+            "BT /F1 18 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Original Text) Tj ET"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /ColorSpace << /PCS [/Pattern /DeviceRGB] >> /Pattern << /P1 5 0 R >> >> /Contents 6 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /Type /Pattern /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8 /Resources << >> /Length \(pattern.utf8.count) >>\nstream\n\(pattern)\nendstream",
+            "<< /Length \(stream.utf8.count) >>\nstream\n\(stream)\nendstream",
+        ])
+    }
+
+    private func makeShadingPatternTextPDF() -> Data {
+        let stream =
+            "/Pattern cs /P1 scn 40 80 520 180 re f " +
+            "BT /F1 18 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Original Text) Tj ET"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /Pattern << /P1 5 0 R >> >> /Contents 6 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [40 80 560 80] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> /Extend [true true] >> >>",
+            "<< /Length \(stream.utf8.count) >>\nstream\n\(stream)\nendstream",
+        ])
     }
 
     private func makeTextPDF(text: String = "Original Text") -> Data {

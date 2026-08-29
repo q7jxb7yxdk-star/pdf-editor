@@ -82,7 +82,6 @@ nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
     case preservedOriginalFont
     case usedCoreTextFallback(originalFontName: String?)
     case usedStyledCoreTextOverlay(originalFontName: String?)
-    case usedAppearanceSafeAnnotationFallback(originalFontName: String?)
 
     var userMessage: String? {
         switch self {
@@ -96,12 +95,6 @@ nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
             }
         case .usedStyledCoreTextOverlay:
             "Bold or italic formatting was saved as a searchable CoreText vector layer."
-        case let .usedAppearanceSafeAnnotationFallback(originalFontName):
-            if let originalFontName {
-                "The page cannot be regenerated without changing unrelated text or color resources. An editable FreeText layer replaces the \(originalFontName) text."
-            } else {
-                "The page cannot be regenerated without changing unrelated text or color resources. The replacement uses an editable FreeText layer."
-            }
         }
     }
 }
@@ -134,7 +127,7 @@ nonisolated enum PDFObjectEditingError: Error, LocalizedError, Equatable, Sendab
         case .shapingFallbackFailed:
             "The CoreText replacement could not be written back as a searchable PDF overlay."
         case .pageAppearanceWouldChange:
-            "PDFium cannot regenerate this page without changing unrelated text or color resources. The text was not changed, and the original page was preserved."
+            "PDFium cannot write this edit as PDF page content without changing unrelated text or color resources. The text was not changed, and the original page was preserved."
         case .invalidBitmapPayload:
             "The decoded image bitmap is invalid or too large."
         }

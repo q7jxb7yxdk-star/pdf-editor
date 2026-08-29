@@ -259,45 +259,6 @@ struct AnnotationRoundTripValidation {
             )
         }
 
-        let replacementFontSize: CGFloat = 11.25
-        let minimumReplacementBottomY: CGFloat = 66.5
-        let replacementBaselineY: CGFloat = 73
-        let appearanceSafeReplacement = try service.addAppearanceSafeTextReplacement(
-            text: "替代文字",
-            replacing: PDFPageObjectSnapshot(
-                bounds: CGRect(x: 90, y: 70, width: 56, height: replacementFontSize),
-                transform: CGAffineTransform(
-                    translationX: 90,
-                    y: replacementBaselineY
-                ),
-                fillColor: PDFObjectColor(red: 0, green: 0, blue: 0, alpha: 255),
-                fontSize: replacementFontSize
-            ),
-            originalFontData: nil,
-            style: [],
-            minimumBottomY: minimumReplacementBottomY,
-            to: page
-        )
-        let replacementFont = appearanceSafeReplacement.font!
-        let replacementLineHeight = max(
-            replacementFont.ascender - replacementFont.descender + replacementFont.leading,
-            replacementFont.pointSize
-        )
-        precondition(
-            appearanceSafeReplacement.bounds.height >= ceil(replacementLineHeight) + 1
-        )
-        precondition(
-            abs(
-                appearanceSafeReplacement.bounds.minY + 4 - replacementBaselineY
-            ) <= 1
-        )
-        let replacementMask = page.annotations[page.annotations.count - 2]
-        precondition(replacementMask.type == "Square")
-        precondition(replacementMask.bounds.minY >= minimumReplacementBottomY)
-        let replacementSnapshot = service.snapshots(on: page, pageIndex: 0).last!
-        precondition(replacementSnapshot.kind == .freeText)
-        precondition(replacementSnapshot.contents == "替代文字")
-
         guard let serialized = document.dataRepresentation(),
               let reopened = PDFDocument(data: serialized) else {
             throw CocoaError(.fileWriteUnknown)
@@ -316,7 +277,6 @@ struct AnnotationRoundTripValidation {
         for mark in markSnapshots {
             try service.verify(mark, in: reopened)
         }
-        try service.verify(replacementSnapshot, in: reopened)
 
         let reopenedPage = reopened.page(at: 0)!
         precondition(reopenedPage.annotations[0].iconType == .comment)
@@ -357,7 +317,7 @@ struct AnnotationRoundTripValidation {
             service: service
         )
 
-        print("Annotation round-trip validation passed (note, free text, unclipped appearance-safe replacement, freehand ink, highlight, signatures, checkmark, and crossmark).")
+        print("Annotation round-trip validation passed (note, free text, freehand ink, highlight, signatures, checkmark, and crossmark).")
     }
 
     private static func requireInkPathsInsideAnnotationBounds(

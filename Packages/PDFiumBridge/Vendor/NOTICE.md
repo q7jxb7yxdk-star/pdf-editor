@@ -2,21 +2,25 @@
 
 - PDFium branch: `chromium/7811`
 - PDFium revision: `9e5d491ff73630b6a423689698290650050e7b3f`
-- Build date: 2026-08-24
-- Build tooling: Xcode 26.5 SDKs and `bblanchon/pdfium-binaries` revision
+- Build date: 2026-08-29
+- Build tooling: Xcode 26.5 SDKs, `depot_tools` revision
+  `f70835271105ca56d2cd5382a0118152bc2bdeea`, and
+  `bblanchon/pdfium-binaries` revision
   `cf2b11286a7960c39eb75c736910c999696b91a7`
-- Local source patches, in application order:
+- Local build patch: `Fork/pdfium-clang-rt-pinned.patch`
+- Local PDFium source patches, in application order:
   `Fork/pdfium-form-xobject-cow.patch`,
-  `Fork/pdfium-phase3-object-editing.patch`
+  `Fork/pdfium-phase3-object-editing.patch`,
+  `Fork/pdfium-page-content-preservation.patch`
 - Reproduction notes: `Fork/README.md`
 - Upstream engine: <https://pdfium.googlesource.com/pdfium/>
 
 Framework binary SHA-256 values after universal-slice assembly and signing:
 
-- iOS device: `efcd1dc5f5be02c2e8c8f78e81b2e186c75b18d430dbf0a85fcfad314cd4fb5c`
-- iOS Simulator: `e1eca5b75c8cae4a29f1d9c9067b999d98aebdbfb08a846cc15e808df997a306`
-- Mac Catalyst: `6603a0b2c3bad0a84a21fb8456ce20a5a04c0df6b6b6d0295f46acacfc9f8578`
-- macOS: `116ae8b414abb6f9c8a2eff586d9371a6abbeda8cfb52a400ccd73b908be5881`
+- iOS device: `7e6d38124cf163e1884a87291adc798f0f93c1822aee56946b9eaafc5fedd560`
+- iOS Simulator: `1c3c63211d21ed741a228c36996ce674869c24fab3b38f50c41dc146f5a1cae4`
+- Mac Catalyst: `710dc90bd45b4e1d6fa34cf314c15a5c718eb7ffcc92830b6ee60ed506ba8ef9`
+- macOS: `9fcc7d7bf9fa5e537cd3c94e5f43a75727d93167c11eed27f5f5ffaf9b7e8494`
 
 PDFium's top-level source license is BSD-style. It also incorporates third-party
 components with their own license notices. Before distributing the application,

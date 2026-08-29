@@ -417,127 +417,27 @@ final class PDFEditorDocument: ReferenceFileDocument {
         undoManager: UndoManager?
     ) throws -> PDFTextReplacementResult {
         let pageObjects = try pageObjects(at: pageIndex)
-        let object = pageObjects.first { $0.path == path }
-        guard let object else {
+        guard pageObjects.contains(where: { $0.path == path }) else {
             throw PDFObjectEditingError.objectInspectionFailed
         }
-        let originalFontData = try? (editingSession as? any PDFObjectEditingSession)?
-            .fontData(pageIndex: pageIndex, path: path)
-        if PDFPageResourceIntegrityService.requiresAppearanceSafeTextReplacement(
+        if PDFPageResourceIntegrityService.preventsSafePageContentRegeneration(
             data: sourceData,
             pageIndex: pageIndex
         ) {
-            return try replaceTextUsingAppearanceSafeAnnotation(
-                text,
-                object: object,
-                originalFontData: originalFontData ?? nil,
-                style: style,
-                minimumBottomY: minimumReplacementBottomY(
-                    for: object,
-                    among: pageObjects
-                ),
-                undoManager: undoManager
-            )
+            throw PDFObjectEditingError.pageAppearanceWouldChange
         }
-        do {
-            return try mutate(undoManager: undoManager, actionName: "Replace PDF Text") {
-                guard let objectSession = editingSession as? any PDFObjectEditingSession else {
-                    throw PDFObjectEditingError.objectMutationFailed
-                }
-                return try objectSession.replaceText(
-                    pageIndex: pageIndex,
-                    path: path,
-                    with: text,
-                    style: style,
-                    fallbackFontData: try unicodeFontData()
-                )
+        return try mutate(undoManager: undoManager, actionName: "Replace PDF Text") {
+            guard let objectSession = editingSession as? any PDFObjectEditingSession else {
+                throw PDFObjectEditingError.objectMutationFailed
             }
-        } catch PDFObjectEditingError.pageAppearanceWouldChange {
-            return try replaceTextUsingAppearanceSafeAnnotation(
-                text,
-                object: object,
-                originalFontData: originalFontData ?? nil,
-                style: style,
-                minimumBottomY: minimumReplacementBottomY(
-                    for: object,
-                    among: pageObjects
-                ),
-                undoManager: undoManager
-            )
-        }
-    }
-
-    private func replaceTextUsingAppearanceSafeAnnotation(
-        _ text: String,
-        object: PDFPageObjectSnapshot,
-        originalFontData: Data?,
-        style: PDFTextStyle,
-        minimumBottomY: CGFloat?,
-        undoManager: UndoManager?
-    ) throws -> PDFTextReplacementResult {
-        let pageIndex = object.pageIndex
-        let expectedResources = PDFPageResourceIntegrityService.signature(
-            in: sourceData,
-            pageIndex: pageIndex
-        )
-        let service = PDFAnnotationService()
-        try mutate(
-            undoManager: undoManager,
-            actionName: "Replace PDF Text Safely",
-            refreshesPDFKitDocument: false
-        ) {
-            guard let page = pdfDocument.page(at: pageIndex) else {
-                throw PDFEditingError.invalidPageIndex(
-                    index: pageIndex,
-                    pageCount: pdfDocument.pageCount
-                )
-            }
-            let replacement = try service.addAppearanceSafeTextReplacement(
-                text: text,
-                replacing: object,
-                originalFontData: originalFontData,
-                style: style,
-                minimumBottomY: minimumBottomY,
-                to: page
-            )
-            guard let data = pdfDocument.dataRepresentation() else {
-                throw PDFEditingError.exportFailed
-            }
-            guard expectedResources != nil,
-                  PDFPageResourceIntegrityService.preservesPageResources(
-                      from: sourceData,
-                      to: data,
-                      pageIndex: pageIndex
-                  ) else {
-                throw PDFObjectEditingError.pageAppearanceWouldChange
-            }
-            let reference = PDFAnnotationReference(
+            return try objectSession.replaceText(
                 pageIndex: pageIndex,
-                annotationIndex: page.annotations.firstIndex(of: replacement) ?? 0
+                path: path,
+                with: text,
+                style: style,
+                fallbackFontData: try unicodeFontData()
             )
-            editingSession = try makeVerifiedAnnotationSession(
-                data: data,
-                expected: [try service.snapshot(for: reference, in: pdfDocument)]
-            )
         }
-        return .usedAppearanceSafeAnnotationFallback(originalFontName: object.fontName)
-    }
-
-    private func minimumReplacementBottomY(
-        for object: PDFPageObjectSnapshot,
-        among objects: [PDFPageObjectSnapshot]
-    ) -> CGFloat? {
-        let horizontalTolerance = max(object.bounds.height * 0.25, 1)
-        let candidates = objects.filter { candidate in
-            candidate.path != object.path &&
-                candidate.bounds.maxY <= object.bounds.minY + 0.1 &&
-                candidate.bounds.maxX > object.bounds.minX + horizontalTolerance &&
-                candidate.bounds.minX < object.bounds.maxX - horizontalTolerance
-        }
-        guard let nearestTop = candidates.map(\.bounds.maxY).max() else {
-            return nil
-        }
-        return nearestTop + 0.5
     }
 
     func translateObject(

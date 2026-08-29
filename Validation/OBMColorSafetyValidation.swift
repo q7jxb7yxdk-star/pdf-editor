@@ -24,7 +24,7 @@ struct OBMColorSafetyValidation {
                 originalSignature.patternCount +
                 originalSignature.shadingCount > 0
         )
-        precondition(originalSignature.requiresAppearanceSafeTextReplacement)
+        precondition(!originalSignature.preventsSafePageContentRegeneration)
 
         let session = try PDFiumEditingEngine().makeSession(
             data: originalData,
@@ -61,9 +61,7 @@ struct OBMColorSafetyValidation {
         )
         let elapsed = started.duration(to: .now)
 
-        precondition(preparation.replacementResults == [
-            .usedAppearanceSafeAnnotationFallback(originalFontName: title.fontName)
-        ])
+        precondition(preparation.replacementResults.count == 1)
         let outputSignature = try requireSignature(preparation.data, pageIndex: 0)
         precondition(PDFPageResourceIntegrityService.preservesPageResources(
             from: originalData,
@@ -77,33 +75,20 @@ struct OBMColorSafetyValidation {
         precondition(afterChroma * 100 >= beforeChroma * 95)
 
         guard let reopened = PDFDocument(data: preparation.data),
-              let reopenedPage = reopened.page(at: 0),
-              let replacementAnnotation = reopenedPage.annotations.first(where: {
-                  $0.type == "FreeText" && $0.contents == replacementText
-              }) else {
-            fatalError("The verified replacement annotation was not preserved.")
+              let reopenedPage = reopened.page(at: 0) else {
+            throw PDFEditingError.invalidDocument
         }
-        let fontSize = min(max(title.fontSize ?? title.bounds.height * 0.82, 6),
-                           max(title.bounds.height, 6))
-        let expectedBaselineOffset = 2 + max(1, ceil(fontSize * 0.1))
-        precondition(abs(
-            replacementAnnotation.bounds.minY + expectedBaselineOffset -
-                title.transform.ty
-        ) < 0.25)
-        let maskSubjectKey = PDFAnnotationKey(rawValue: "/Subj")
-        precondition(reopenedPage.annotations.contains(where: {
-            $0.value(forAnnotationKey: maskSubjectKey) as? String ==
-                "Text Replacement Mask"
+        precondition(reopenedPage.string?.contains(replacementText) == true)
+        precondition(!reopenedPage.annotations.contains(where: {
+            $0.type == "FreeText"
         }))
 
-        let outputURL = URL(fileURLWithPath: "/tmp/PDFEditor-OBM-Color-Safe.pdf")
+        let outputURL = URL(fileURLWithPath: "/tmp/PDFEditor-OBM-Pattern-Preserved.pdf")
         try preparation.data.write(to: outputURL, options: .atomic)
         print(
-            "OBM color safety validation passed " +
-                "(resources \(outputSignature), chroma \(beforeChroma)->\(afterChroma), " +
-                "baseline \(title.transform.ty)->" +
-                "\(replacementAnnotation.bounds.minY + expectedBaselineOffset), " +
-                "elapsed \(elapsed))."
+            "OBM Pattern page-content replacement passed " +
+                "(resources \(originalSignature)->\(outputSignature), " +
+                "chroma \(beforeChroma)->\(afterChroma), elapsed \(elapsed))."
         )
     }
 

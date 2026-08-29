@@ -2,27 +2,34 @@
 
 This XCFramework is built from PDFium `chromium/7811` at revision
 `9e5d491ff73630b6a423689698290650050e7b3f` (2026-04-23). The local patches
-add copy-on-write Form XObject streams, isolated Image XObject replacement, and
-persistent drawing-order changes for pages and Forms. The C bridge clones every
-Form ancestor before changing a descendant, so separately placed references to
-a shared Form remain isolated.
+add copy-on-write Form XObject streams, isolated Image XObject replacement,
+persistent drawing-order changes for pages and Forms, non-pattern color-space
+conversion, Shading regeneration, and Pattern paint regeneration. Colored and
+uncolored tiling patterns plus shading patterns retain their original resource
+objects; uncolored operands are normalized through a Pattern/DeviceRGB color
+space. The C bridge clones every Form ancestor before changing a descendant, so
+separately placed references to a shared Form remain isolated.
 
 ## Reproduction inputs
 
-- `depot_tools` checkout current at build time (2026-08-24)
+- `depot_tools` revision `f70835271105ca56d2cd5382a0118152bc2bdeea`
 - `bblanchon/pdfium-binaries` revision
   `cf2b11286a7960c39eb75c736910c999696b91a7`
 - `simdutf` revision `f7356eed293f8208c40b3c1b344a50bd70971983`
 - Xcode 26.5 SDKs
 - bblanchon patches: `shared_library.patch`, `public_headers.patch`,
-  `ios/pdfium.patch`, `mac/build.patch`, and `clang_rt.patch`
+  `ios/pdfium.patch`, and `mac/build.patch`
+- `pdfium-clang-rt-pinned.patch`, applied in the `build` checkout in place of
+  bblanchon's `clang_rt.patch`, whose AIX context does not match this revision
 - local patches, applied in this order:
   1. `pdfium-form-xobject-cow.patch`
   2. `pdfium-phase3-object-editing.patch`
+  3. `pdfium-page-content-preservation.patch`
 
 Fetch PDFium with a `.gclient` whose `target_os` is `["mac", "ios"]`, checkout
 the pinned revision, sync without history, apply the listed bblanchon patches,
-then apply the local patch. Generate and build `pdfium` with `gn gen` and
+apply `pdfium-clang-rt-pinned.patch` from the `build` checkout, then apply the
+three PDFium-source patches. Generate and build `pdfium` with `gn gen` and
 `autoninja -C <output> pdfium` for these configurations:
 
 | Output | `target_os` | `target_environment` | `target_cpu` |
@@ -63,4 +70,5 @@ the existing XCFramework slice layout and headers, set each install name to
   platform and architecture.
 - `swift test` passes nested text replacement, translation, deletion, z-order,
   shared page/Form image isolation, clipping and marked-content preservation,
-  alpha bitmap, and searchable CoreText overlay regressions.
+  alpha bitmap, searchable CoreText overlay, ICC color, Shading, colored and
+  uncolored tiling Pattern, and shading Pattern regressions.

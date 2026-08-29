@@ -1,0 +1,54 @@
+diff --git a/config/clang/BUILD.gn b/config/clang/BUILD.gn
+--- a/config/clang/BUILD.gn
++++ b/config/clang/BUILD.gn
+@@ -180,7 +180,7 @@ template("clang_lib") {
+         } else if (current_cpu == "arm64") {
+           _suffix = "-aarch64"
+         } else {
+-          assert(false)  # Unhandled cpu type
++          # Unhandled cpu type
+         }
+       } else if (is_apple) {
+         _dir = "darwin"
+@@ -202,7 +202,7 @@ template("clang_lib") {
+         } else if (current_cpu == "s390x") {
+           _dir = "s390x-unknown-linux-gnu"
+         } else {
+-          assert(false)  # Unhandled cpu type
++          # Unhandled cpu type
+         }
+       } else if (is_fuchsia) {
+         if (current_cpu == "x64") {
+@@ -210,7 +210,7 @@ template("clang_lib") {
+         } else if (current_cpu == "arm64") {
+           _dir = "aarch64-unknown-fuchsia"
+         } else {
+-          assert(false)  # Unhandled cpu type
++          # Unhandled cpu type
+         }
+       } else if (is_android) {
+         _dir = "linux"
+@@ -225,15 +225,20 @@ template("clang_lib") {
+         } else if (current_cpu == "riscv64") {
+           _suffix = "-riscv64-android"
+         } else {
+-          assert(false)  # Unhandled cpu type
++          # Unhandled cpu type
+         }
+       } else {
+-        assert(false)  # Unhandled target platform
++        # Unhandled target platform
+       }
+
+       _clang_lib_dir = "$clang_base_path/lib/clang/$clang_version/lib"
+       _lib_file = "${_prefix}clang_rt.${_libname}${_suffix}.${_ext}"
+-      libs = [ "$_clang_lib_dir/$_dir/$_lib_file" ]
++      if (_dir != "") {
++        libs = [ "$_clang_lib_dir/$_dir/$_lib_file" ]
++      } else {
++        print("WARNING: No clang runtime library for $target_os/$current_cpu")
++        print("$_clang_lib_dir/????/$_lib_file")
++      }
+     }
+   }
+ }

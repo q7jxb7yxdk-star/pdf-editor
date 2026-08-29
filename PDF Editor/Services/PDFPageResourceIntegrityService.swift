@@ -6,23 +6,23 @@ nonisolated struct PDFPageResourceSignature: Equatable, Sendable {
     let patternCount: Int
     let shadingCount: Int
 
-    var requiresAppearanceSafeTextReplacement: Bool {
-        colorSpaceCount > 0 || patternCount > 0 || shadingCount > 0
+    var preventsSafePageContentRegeneration: Bool {
+        false
     }
 }
 
 nonisolated enum PDFPageResourceIntegrityService {
-    static func requiresAppearanceSafeTextReplacement(
+    static func preventsSafePageContentRegeneration(
         data: Data,
         pageIndex: Int
     ) -> Bool {
-        // A named ColorSpace, Pattern, or Shading resource can be rewritten or
-        // discarded by FPDFPage_GenerateContent even when PDFium's own raster
-        // comparison sees little chroma. Fail closed before mutating the page.
+        // The local PDFium fork converts non-pattern object colors to equivalent
+        // RGB, re-emits Shading objects, and preserves Pattern paints by retaining
+        // their original resource object and regenerating cs/scn operators.
         guard let signature = signature(in: data, pageIndex: pageIndex) else {
             return true
         }
-        return signature.requiresAppearanceSafeTextReplacement
+        return signature.preventsSafePageContentRegeneration
     }
 
     static func signature(in data: Data, pageIndex: Int) -> PDFPageResourceSignature? {
