@@ -90,17 +90,17 @@ nonisolated enum PDFTextReplacementResult: Equatable, Sendable {
             nil
         case let .usedCoreTextFallback(originalFontName):
             if let originalFontName {
-                "The original font \(originalFontName) lacks required glyphs or the text needs complex shaping. A searchable CoreText vector layer was used."
+                "The original PDF font \(originalFontName) cannot safely render every required glyph or shaping rule. The original text was hidden and replaced with a searchable CoreText vector layer."
             } else {
-                "The original PDF font cannot safely render this text. A searchable CoreText vector layer was used."
+                "The original PDF font cannot safely render this text. The original text was hidden and replaced with a searchable CoreText vector layer."
             }
         case .usedStyledCoreTextOverlay:
             "Bold or italic formatting was saved as a searchable CoreText vector layer."
         case let .usedAppearanceSafeAnnotationFallback(originalFontName):
             if let originalFontName {
-                "The page's color resources cannot be regenerated safely. An editable FreeText layer replaces the \(originalFontName) text."
+                "The page cannot be regenerated without changing unrelated text or color resources. An editable FreeText layer replaces the \(originalFontName) text."
             } else {
-                "The page's color resources cannot be regenerated safely. The replacement uses an editable FreeText layer."
+                "The page cannot be regenerated without changing unrelated text or color resources. The replacement uses an editable FreeText layer."
             }
         }
     }
@@ -134,7 +134,7 @@ nonisolated enum PDFObjectEditingError: Error, LocalizedError, Equatable, Sendab
         case .shapingFallbackFailed:
             "The CoreText replacement could not be written back as a searchable PDF overlay."
         case .pageAppearanceWouldChange:
-            "This page uses color resources that PDFium cannot regenerate safely. The text was not changed, and the original page appearance was preserved."
+            "PDFium cannot regenerate this page without changing unrelated text or color resources. The text was not changed, and the original page was preserved."
         case .invalidBitmapPayload:
             "The decoded image bitmap is invalid or too large."
         }
@@ -571,6 +571,13 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
                     throw PDFObjectEditingError.replacementVerificationFailed
                 }
                 let updatedData = try dataRepresentation(options: PDFExportOptions())
+                guard PDFPageResourceIntegrityService.preservesPageResources(
+                    from: beforeData,
+                    to: updatedData,
+                    pageIndex: pageIndex
+                ) else {
+                    throw PDFObjectEditingError.pageAppearanceWouldChange
+                }
                 try replaceHandle(with: updatedData, password: authorizedPassword)
                 guard copyText(pageIndex: pageIndex, path: path)?.trimmingCharacters(
                     in: .whitespacesAndNewlines
@@ -600,7 +607,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             )
 
             let actualText = Array(text.utf16)
-            guard try replaceTextDirectly(pageIndex: pageIndex, path: path, text: " "),
+            guard setTextInvisible(pageIndex: pageIndex, path: path),
+                  try replaceTextDirectly(pageIndex: pageIndex, path: path, text: " "),
                   overlayData.withUnsafeBytes({ bytes in
                       actualText.withUnsafeBufferPointer { textBuffer in
                           PEPDFPageImportOverlayWithActualText(
@@ -617,6 +625,13 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             }
 
             let updatedData = try dataRepresentation(options: PDFExportOptions())
+            guard PDFPageResourceIntegrityService.preservesPageResources(
+                from: beforeData,
+                to: updatedData,
+                pageIndex: pageIndex
+            ) else {
+                throw PDFObjectEditingError.pageAppearanceWouldChange
+            }
             try replaceHandle(with: updatedData, password: authorizedPassword)
             guard try containsSemanticText(
                 text,
@@ -1263,6 +1278,20 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             throw PDFObjectEditingError.pageAppearanceWouldChange
         }
         return success
+    }
+
+    private func setTextInvisible(
+        pageIndex: Int,
+        path: PDFPageObjectPath
+    ) -> Bool {
+        path.indices.withUnsafeBufferPointer {
+            PEPDFPageObjectSetInvisibleAtPath(
+                handle,
+                Int32(pageIndex),
+                $0.baseAddress,
+                $0.count
+            )
+        }
     }
 
     private func mediaBox(pageIndex: Int, data: Data) throws -> CGRect {

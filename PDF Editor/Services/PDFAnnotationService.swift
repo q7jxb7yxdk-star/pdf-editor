@@ -51,10 +51,14 @@ nonisolated enum PDFAnnotationServiceError: LocalizedError {
     }
 }
 
-final class PDFAnnotationService {
+nonisolated final class PDFAnnotationService {
     func snapshots(on page: PDFPage, pageIndex: Int) -> [PDFAnnotationSnapshot] {
         page.annotations.enumerated().compactMap { index, annotation in
-            guard annotation.type != "Popup" else { return nil }
+            guard annotation.type != "Popup",
+                  annotation.value(forAnnotationKey: replacementMaskSubjectKey)
+                    as? String != "Text Replacement Mask" else {
+                return nil
+            }
             return snapshot(
                 annotation,
                 reference: PDFAnnotationReference(
@@ -210,42 +214,112 @@ final class PDFAnnotationService {
         replacing object: PDFPageObjectSnapshot,
         originalFontData: Data?,
         style: PDFTextStyle,
+        minimumBottomY: CGFloat? = nil,
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let text = try validated(text)
         let padding = max(1, min(object.bounds.height * 0.08, 3))
         let visualHeight = max(object.bounds.height, 6)
         let fontSize = min(max(object.fontSize ?? visualHeight * 0.82, 6), visualHeight)
+        let font = appearanceSafeReplacementFont(
+            for: object,
+            size: fontSize,
+            originalFontData: originalFontData,
+            style: style
+        )
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let measuredWidth = lines.reduce(CGFloat.zero) { width, line in
+            max(width, (String(line) as NSString).size(
+                withAttributes: [.font: font]
+            ).width)
+        }
+        let lineHeight: CGFloat
+#if os(macOS)
+        lineHeight = max(font.ascender - font.descender + font.leading, font.pointSize)
+#else
+        lineHeight = max(font.lineHeight, font.pointSize)
+#endif
+        // PDFKit's FreeText appearance reserves an internal inset around the
+        // glyph run. Include that inset in addition to the page-content mask;
+        // using only fontSize * 1.2 clips CJK ascenders/descenders after reopen.
+        let freeTextInset: CGFloat = 2
+        let pdfKitLayoutTolerance = fontSize * 2
         let width = max(
             object.bounds.width + padding * 2,
-            fontSize * 0.72 * CGFloat(max(text.count, 1)) + fontSize
+            ceil(measuredWidth) + freeTextInset * 2 + pdfKitLayoutTolerance
         )
-        let height = max(object.bounds.height + padding * 2, fontSize * 1.2)
+        let height = max(
+            object.bounds.height + padding * 2,
+            ceil(lineHeight * CGFloat(max(lines.count, 1))) + freeTextInset * 2
+        )
+        let baselineOffset = freeTextInset + max(1, ceil(fontSize * 0.1))
+        let transformedBaselineY = object.transform.ty
+        let baselineTolerance = max(object.bounds.height * 2, fontSize * 2)
+        let baselineY = if transformedBaselineY.isFinite &&
+            transformedBaselineY >= object.bounds.minY - baselineTolerance &&
+            transformedBaselineY <= object.bounds.maxY + baselineTolerance {
+            transformedBaselineY
+        } else {
+            object.bounds.minY - font.descender
+        }
         let bounds = CGRect(
             x: object.bounds.minX - padding,
-            y: object.bounds.maxY + padding - height,
+            y: baselineY - baselineOffset,
             width: width,
             height: height
         ).standardized
+
+        // Keep the white cover independent from the FreeText bounds. PDFKit
+        // positions a FreeText glyph run relative to the annotation's lower
+        // edge, so trimming that edge to protect a lower line also moves the
+        // replacement baseline upward.
+        let glyphBottom = baselineY + font.descender - padding
+        let glyphTop = baselineY + font.ascender + padding
+        var maskBounds = CGRect(
+            x: object.bounds.minX - padding,
+            y: min(object.bounds.minY - padding, glyphBottom),
+            width: object.bounds.width + padding * 2,
+            height: max(object.bounds.maxY + padding, glyphTop) -
+                min(object.bounds.minY - padding, glyphBottom)
+        ).standardized
+        if let minimumBottomY, maskBounds.minY < minimumBottomY {
+            let lowestSafeGlyphY = min(glyphBottom, maskBounds.maxY - 1)
+            let adjustedBottom = min(minimumBottomY, lowestSafeGlyphY)
+            maskBounds.size.height = maskBounds.maxY - adjustedBottom
+            maskBounds.origin.y = adjustedBottom
+        }
+
+        let mask = PDFAnnotation(
+            bounds: maskBounds,
+            forType: .square,
+            withProperties: nil
+        )
+        let maskBorder = PDFBorder()
+        maskBorder.lineWidth = 0
+        mask.border = maskBorder
+        mask.color = .clear
+        mask.interiorColor = .white
+        mask.userName = "PDF Editor"
+        mask.setValue(
+            "Text Replacement Mask",
+            forAnnotationKey: replacementMaskSubjectKey
+        )
+        page.addAnnotation(mask)
+
         let annotation = PDFAnnotation(
             bounds: bounds,
             forType: .freeText,
             withProperties: nil
         )
         annotation.contents = text
-        annotation.font = appearanceSafeReplacementFont(
-            for: object,
-            size: fontSize,
-            originalFontData: originalFontData,
-            style: style
-        )
+        annotation.font = font
         annotation.fontColor = platformColor(PDFAnnotationColor(
             red: CGFloat(object.fillColor.red) / 255,
             green: CGFloat(object.fillColor.green) / 255,
             blue: CGFloat(object.fillColor.blue) / 255,
             alpha: CGFloat(object.fillColor.alpha) / 255
         ))
-        annotation.color = .white
+        annotation.color = .clear
         annotation.alignment = .left
         page.addAnnotation(annotation)
         return annotation
@@ -663,6 +737,9 @@ final class PDFAnnotationService {
     }
 
     private var opacityKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/CA") }
+    private var replacementMaskSubjectKey: PDFAnnotationKey {
+        PDFAnnotationKey(rawValue: "/Subj")
+    }
     private var appearanceDictionaryKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/AP") }
     private var appearanceStateKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/AS") }
 

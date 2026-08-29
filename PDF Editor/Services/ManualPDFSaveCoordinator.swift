@@ -1,6 +1,24 @@
 import Foundation
 import SwiftUI
 
+nonisolated enum ManualPDFSaveDestinationPolicy {
+    static func updatesReferenceSnapshot(
+        originalURL: URL?,
+        targetURL: URL,
+        didAdoptDestination: Bool = false
+    ) -> Bool {
+        if didAdoptDestination {
+            return true
+        }
+        // A new untitled document has no existing file that could be
+        // overwritten. Existing documents advance their ReferenceFileDocument
+        // snapshot only when saving back to that same original URL.
+        guard let originalURL else { return true }
+        return originalURL.standardizedFileURL.resolvingSymlinksInPath() ==
+            targetURL.standardizedFileURL.resolvingSymlinksInPath()
+    }
+}
+
 enum ManualPDFSaveCoordinator {
     static func write(_ data: Data, to url: URL) throws {
         let didStartSecurityScope = url.startAccessingSecurityScopedResource()
@@ -39,16 +57,26 @@ struct ManualPDFSaveActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+struct ManualPDFSaveAsActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 extension FocusedValues {
     var manualPDFSaveAction: (() -> Void)? {
         get { self[ManualPDFSaveActionKey.self] }
         set { self[ManualPDFSaveActionKey.self] = newValue }
+    }
+
+    var manualPDFSaveAsAction: (() -> Void)? {
+        get { self[ManualPDFSaveAsActionKey.self] }
+        set { self[ManualPDFSaveAsActionKey.self] = newValue }
     }
 }
 
 #if os(macOS)
 struct ManualPDFSaveCommands: Commands {
     @FocusedValue(\.manualPDFSaveAction) private var saveAction
+    @FocusedValue(\.manualPDFSaveAsAction) private var saveAsAction
 
     var body: some Commands {
         CommandGroup(replacing: .saveItem) {
@@ -57,6 +85,12 @@ struct ManualPDFSaveCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: .command)
             .disabled(saveAction == nil)
+
+            Button("Save As…") {
+                saveAsAction?()
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(saveAsAction == nil)
         }
     }
 }

@@ -230,6 +230,33 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertEqual(after.matrixF, before.matrixF, accuracy: 0.001)
     }
 
+    func testTextReplacementPreservesEveryUnrelatedTextObject() throws {
+        let document = try open(makeTwoTextObjectPDF())
+        defer { PEPDFDocumentClose(document) }
+        XCTAssertEqual(PEPDFPageObjectCount(document, 0), 2)
+        XCTAssertEqual(try objectText(document, index: 1), "Untouched Text")
+
+        let replacement = Array("Changed Text".utf16)
+        let targetPath: [Int32] = [0]
+        XCTAssertTrue(targetPath.withUnsafeBufferPointer { pathBuffer in
+            replacement.withUnsafeBufferPointer { textBuffer in
+                PEPDFPageObjectReplaceTextAtPath(
+                    document,
+                    0,
+                    pathBuffer.baseAddress,
+                    pathBuffer.count,
+                    textBuffer.baseAddress,
+                    textBuffer.count
+                )
+            }
+        })
+
+        let reopened = try open(copyData(document))
+        defer { PEPDFDocumentClose(reopened) }
+        XCTAssertEqual(try objectText(reopened, index: 0), "Changed Text")
+        XCTAssertEqual(try objectText(reopened, index: 1), "Untouched Text")
+    }
+
     func testICCPageRejectsTextRegenerationThatWouldDiscardColor() throws {
         let source = try makeICCColoredTextPDF()
         let document = try open(source)
@@ -911,6 +938,105 @@ final class PDFiumBridgeTests: XCTestCase {
         }
     }
 
+    func testFallbackHidesOriginalTextBeforeImportingSearchableOverlay() throws {
+        let source = makeTextPDF()
+        XCTAssertGreaterThan(try nonWhitePixelCount(source), 25)
+
+        let document = try open(source)
+        defer { PEPDFDocumentClose(document) }
+        let path: [Int32] = [0]
+        XCTAssertTrue(path.withUnsafeBufferPointer {
+            PEPDFPageObjectSetInvisibleAtPath(
+                document,
+                0,
+                $0.baseAddress,
+                $0.count
+            )
+        })
+
+        let blank = Array(" ".utf16)
+        XCTAssertTrue(path.withUnsafeBufferPointer { pathBuffer in
+            blank.withUnsafeBufferPointer { textBuffer in
+                PEPDFPageObjectReplaceTextAtPath(
+                    document,
+                    0,
+                    pathBuffer.baseAddress,
+                    pathBuffer.count,
+                    textBuffer.baseAddress,
+                    textBuffer.count
+                )
+            }
+        })
+        XCTAssertLessThanOrEqual(try nonWhitePixelCount(copyData(document)), 8)
+
+        let replacement = "替代文字"
+        let overlay = try makeCoreTextOverlay(text: replacement)
+        let actualText = Array(replacement.utf16)
+        XCTAssertTrue(overlay.withUnsafeBytes { overlayBytes in
+            actualText.withUnsafeBufferPointer { textBuffer in
+                PEPDFPageImportOverlayWithActualText(
+                    document,
+                    0,
+                    overlayBytes.bindMemory(to: UInt8.self).baseAddress,
+                    overlayBytes.count,
+                    textBuffer.baseAddress,
+                    textBuffer.count
+                )
+            }
+        })
+
+        let saved = try copyData(document)
+        XCTAssertGreaterThan(try nonWhitePixelCount(saved), 25)
+        let reopened = try XCTUnwrap(PDFDocument(data: saved))
+        XCTAssertFalse(reopened.findString(replacement, withOptions: []).isEmpty)
+        XCTAssertTrue(reopened.findString("Original Text", withOptions: []).isEmpty)
+    }
+
+    func testLocalSubsetFontFixtureRejectsUnsafePageRegeneration() throws {
+        guard let fixturePath = ProcessInfo.processInfo.environment["PE_TEXT_FIXTURE"] else {
+            throw XCTSkip("Set PE_TEXT_FIXTURE for the local subset-font regression fixture.")
+        }
+        let source = try Data(contentsOf: URL(fileURLWithPath: fixturePath))
+        let inspection = try open(source)
+        let count = PEPDFPageObjectCountRecursive(inspection, 0)
+        let expectedTexts = try recursiveTexts(inspection)
+        let textPaths = try (0..<count).compactMap { flatIndex -> [Int32]? in
+            let path = try objectPath(inspection, flatIndex: flatIndex)
+            return try objectInfo(inspection, path: path).type ==
+                Int32(PEPDFObjectTypeText.rawValue) ? path : nil
+        }
+        PEPDFDocumentClose(inspection)
+
+        var rejectedPath: [Int32]?
+        for path in textPaths.prefix(80) {
+            let document = try open(source)
+            let blank = Array(" ".utf16)
+            let replaced = path.withUnsafeBufferPointer { pathBuffer in
+                blank.withUnsafeBufferPointer { textBuffer in
+                    PEPDFPageObjectReplaceTextAtPath(
+                        document,
+                        0,
+                        pathBuffer.baseAddress,
+                        pathBuffer.count,
+                        textBuffer.baseAddress,
+                        textBuffer.count
+                    )
+                }
+            }
+            if !replaced && PEPDFDocumentLastMutationRejectedForAppearance(document) {
+                rejectedPath = path
+                XCTAssertEqual(try recursiveTexts(document), expectedTexts)
+                PEPDFDocumentClose(document)
+                break
+            }
+            PEPDFDocumentClose(document)
+        }
+        XCTAssertNotNil(
+            rejectedPath,
+            "The real-world subset-font page should be rejected before unrelated text changes."
+        )
+    }
+
     func testBoldItalicCoreTextOverlayRemainsSearchableAfterPDFiumImport() throws {
         let replacement = "Styled 文字"
         let styles: [(bold: Bool, italic: Bool)] = [
@@ -1259,6 +1385,37 @@ final class PDFiumBridgeTests: XCTestCase {
         return data as Data
     }
 
+    private func nonWhitePixelCount(_ data: Data) throws -> Int {
+        let provider = try XCTUnwrap(CGDataProvider(data: data as CFData))
+        let document = try XCTUnwrap(CGPDFDocument(provider))
+        let page = try XCTUnwrap(document.page(at: 1))
+        let bounds = page.getBoxRect(.mediaBox).integral
+        let width = Int(bounds.width)
+        let height = Int(bounds.height)
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 255, count: bytesPerRow * height)
+        return try pixels.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(
+                data: buffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            context.setFillColor(gray: 1, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.drawPDFPage(page)
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            return stride(from: 0, to: bytes.count, by: 4).reduce(into: 0) {
+                if bytes[$1] < 245 || bytes[$1 + 1] < 245 || bytes[$1 + 2] < 245 {
+                    $0 += 1
+                }
+            }
+        }
+    }
+
     private func makeICCColoredTextPDF() throws -> Data {
         let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
         let data = NSMutableData()
@@ -1317,6 +1474,19 @@ final class PDFiumBridgeTests: XCTestCase {
         pdf += "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\n"
         pdf += "startxref\n\(xrefOffset)\n%%EOF\n"
         return Data(pdf.utf8)
+    }
+
+    private func makeTwoTextObjectPDF() -> Data {
+        let stream =
+            "BT /F1 18 Tf 1 0 0 1 72 700 Tm (Original Text) Tj ET " +
+            "BT /F1 18 Tf 1 0 0 1 72 650 Tm (Untouched Text) Tj ET"
+        return makePDF(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /Length \(stream.utf8.count) >>\nstream\n\(stream)\nendstream",
+        ])
     }
 
     private func makeNestedFormPDF() -> Data {

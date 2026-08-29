@@ -169,8 +169,95 @@ final class PDFEditorDocument: ReferenceFileDocument {
         return data
     }
 
-    func markManuallySaved(data: Data) {
-        persistedData = data
+    func prepareManualSave(
+        applying replacements: [PDFManualTextReplacement]
+    ) async throws -> PDFManualSavePreparation {
+        if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures &&
+            !replacements.isEmpty {
+            throw PDFEditingError.digitalSignatureConsentRequired
+        }
+
+        let startingRevision = editorState.revision
+        let sourceSnapshot = sourceData
+        let password = authorizedPassword
+        let session = editingSession.map { PreparedPDFEditingSession(session: $0) }
+        let fallbackFontData = try unicodeFontData()
+        let exportOptions = PDFExportOptions(
+            securityPolicy: removesPasswordProtectionOnSave
+                ? .removeAfterAuthorizedUnlock
+                : .preserve
+        )
+
+        let preparation = try await Task.detached(priority: .userInitiated) {
+            try Self.pdfiumAccessLock.withLock {
+                let originalData: Data
+                if let session {
+                    originalData = try session.session.dataRepresentation(
+                        options: PDFExportOptions()
+                    )
+                } else {
+                    originalData = sourceSnapshot
+                }
+                return try PDFManualSavePreparationService.prepare(
+                    originalData: originalData,
+                    password: password,
+                    replacements: replacements,
+                    fallbackFontData: fallbackFontData,
+                    exportOptions: exportOptions
+                )
+            }
+        }.value
+
+        guard editorState.revision == startingRevision else {
+            throw PDFEditingError.pageMutationFailed
+        }
+        return preparation
+    }
+
+    func installPreparedManualSave(
+        _ preparation: PDFManualSavePreparation,
+        markingUnsaved: Bool,
+        undoManager: UndoManager?
+    ) throws {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let preparedSession = try PDFiumEditingEngine().makeSession(
+            data: preparation.data,
+            password: removesPasswordProtectionOnSave ? nil : authorizedPassword
+        )
+        guard let preparedDocument = PDFDocument(data: preparation.data) else {
+            throw PDFEditingError.invalidDocument
+        }
+        if preparedDocument.isLocked {
+            guard let authorizedPassword,
+                  preparedDocument.unlock(withPassword: authorizedPassword) else {
+                throw PDFEditingError.invalidPassword
+            }
+        }
+        editingSession = preparedSession
+        sourceData = preparation.data
+        synchronizePresentationPages(with: preparedDocument)
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: markingUnsaved)
+
+        if let undoManager {
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restore(
+                    data: preparation.originalData,
+                    actionName: "Replace PDF Text",
+                    undoManager: undoManager
+                )
+            }
+            undoManager.setActionName("Replace PDF Text")
+        }
+    }
+
+    func markManuallySaved(
+        data: Data,
+        updatesFileDocumentSnapshot: Bool
+    ) {
+        if updatesFileDocumentSnapshot {
+            persistedData = data
+        }
         sourceData = data
         editorState.markSaved()
     }
@@ -329,12 +416,29 @@ final class PDFEditorDocument: ReferenceFileDocument {
         style: PDFTextStyle,
         undoManager: UndoManager?
     ) throws -> PDFTextReplacementResult {
-        let object = try pageObjects(at: pageIndex).first { $0.path == path }
+        let pageObjects = try pageObjects(at: pageIndex)
+        let object = pageObjects.first { $0.path == path }
         guard let object else {
             throw PDFObjectEditingError.objectInspectionFailed
         }
         let originalFontData = try? (editingSession as? any PDFObjectEditingSession)?
             .fontData(pageIndex: pageIndex, path: path)
+        if PDFPageResourceIntegrityService.requiresAppearanceSafeTextReplacement(
+            data: sourceData,
+            pageIndex: pageIndex
+        ) {
+            return try replaceTextUsingAppearanceSafeAnnotation(
+                text,
+                object: object,
+                originalFontData: originalFontData ?? nil,
+                style: style,
+                minimumBottomY: minimumReplacementBottomY(
+                    for: object,
+                    among: pageObjects
+                ),
+                undoManager: undoManager
+            )
+        }
         do {
             return try mutate(undoManager: undoManager, actionName: "Replace PDF Text") {
                 guard let objectSession = editingSession as? any PDFObjectEditingSession else {
@@ -349,27 +453,91 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 )
             }
         } catch PDFObjectEditingError.pageAppearanceWouldChange {
-            let service = PDFAnnotationService()
-            try mutateAnnotations(
-                undoManager: undoManager,
-                actionName: "Replace PDF Text Safely"
-            ) {
-                guard let page = pdfDocument.page(at: pageIndex) else {
-                    throw PDFEditingError.invalidPageIndex(
-                        index: pageIndex,
-                        pageCount: pdfDocument.pageCount
-                    )
-                }
-                _ = try service.addAppearanceSafeTextReplacement(
-                    text: text,
-                    replacing: object,
-                    originalFontData: originalFontData ?? nil,
-                    style: style,
-                    to: page
+            return try replaceTextUsingAppearanceSafeAnnotation(
+                text,
+                object: object,
+                originalFontData: originalFontData ?? nil,
+                style: style,
+                minimumBottomY: minimumReplacementBottomY(
+                    for: object,
+                    among: pageObjects
+                ),
+                undoManager: undoManager
+            )
+        }
+    }
+
+    private func replaceTextUsingAppearanceSafeAnnotation(
+        _ text: String,
+        object: PDFPageObjectSnapshot,
+        originalFontData: Data?,
+        style: PDFTextStyle,
+        minimumBottomY: CGFloat?,
+        undoManager: UndoManager?
+    ) throws -> PDFTextReplacementResult {
+        let pageIndex = object.pageIndex
+        let expectedResources = PDFPageResourceIntegrityService.signature(
+            in: sourceData,
+            pageIndex: pageIndex
+        )
+        let service = PDFAnnotationService()
+        try mutate(
+            undoManager: undoManager,
+            actionName: "Replace PDF Text Safely",
+            refreshesPDFKitDocument: false
+        ) {
+            guard let page = pdfDocument.page(at: pageIndex) else {
+                throw PDFEditingError.invalidPageIndex(
+                    index: pageIndex,
+                    pageCount: pdfDocument.pageCount
                 )
             }
-            return .usedAppearanceSafeAnnotationFallback(originalFontName: object.fontName)
+            let replacement = try service.addAppearanceSafeTextReplacement(
+                text: text,
+                replacing: object,
+                originalFontData: originalFontData,
+                style: style,
+                minimumBottomY: minimumBottomY,
+                to: page
+            )
+            guard let data = pdfDocument.dataRepresentation() else {
+                throw PDFEditingError.exportFailed
+            }
+            guard expectedResources != nil,
+                  PDFPageResourceIntegrityService.preservesPageResources(
+                      from: sourceData,
+                      to: data,
+                      pageIndex: pageIndex
+                  ) else {
+                throw PDFObjectEditingError.pageAppearanceWouldChange
+            }
+            let reference = PDFAnnotationReference(
+                pageIndex: pageIndex,
+                annotationIndex: page.annotations.firstIndex(of: replacement) ?? 0
+            )
+            editingSession = try makeVerifiedAnnotationSession(
+                data: data,
+                expected: [try service.snapshot(for: reference, in: pdfDocument)]
+            )
         }
+        return .usedAppearanceSafeAnnotationFallback(originalFontName: object.fontName)
+    }
+
+    private func minimumReplacementBottomY(
+        for object: PDFPageObjectSnapshot,
+        among objects: [PDFPageObjectSnapshot]
+    ) -> CGFloat? {
+        let horizontalTolerance = max(object.bounds.height * 0.25, 1)
+        let candidates = objects.filter { candidate in
+            candidate.path != object.path &&
+                candidate.bounds.maxY <= object.bounds.minY + 0.1 &&
+                candidate.bounds.maxX > object.bounds.minX + horizontalTolerance &&
+                candidate.bounds.minX < object.bounds.maxX - horizontalTolerance
+        }
+        guard let nearestTop = candidates.map(\.bounds.maxY).max() else {
+            return nil
+        }
+        return nearestTop + 0.5
     }
 
     func translateObject(

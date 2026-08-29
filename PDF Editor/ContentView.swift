@@ -33,6 +33,24 @@ private struct PendingTextEdit {
     let style: PDFTextStyle
 }
 
+private struct PendingManualSave {
+    let preparation: PDFManualSavePreparation
+    let edits: [PendingTextEdit]
+}
+
+#if os(macOS)
+private struct ManualSaveDestinationAdoption {
+    let nativeDocument: NSDocument?
+    let window: NSWindow?
+    let previousDocumentURL: URL?
+    let previousFileModificationDate: Date?
+    let previousSaveURL: URL?
+    let previousWindowTitle: String?
+    let previousRepresentedURL: URL?
+    let didAdoptNativeDocument: Bool
+}
+#endif
+
 private enum ESignPlacement {
     case signature(SignatureLibraryTemplate)
     case mark(ESignMark)
@@ -197,7 +215,9 @@ struct ContentView: View {
     @State private var imageExportProgressTotal = 0
     @State private var isExportingImages = false
     @State private var manualSaveExportDocument: PDFExportDocument?
-    @State private var pendingManualSaveData: Data?
+    @State private var showsManualSaveExporter = false
+    @State private var pendingManualSave: PendingManualSave?
+    @State private var manualSaveDefaultFilename = "Untitled"
     @State private var saveURL: URL?
     @State private var isSaving = false
     @State private var pageAnnotations: [PDFAnnotationSnapshot] = []
@@ -216,7 +236,6 @@ struct ContentView: View {
     @State private var showsPasswordRemovalConfirmation = false
     @State private var showsAddTextPrompt = false
     @State private var showsAnnotationInspector = false
-    @State private var replacementNotice: String?
     @State private var pendingMergeData: Data?
     @State private var pendingMergeFilename = "Protected PDF"
     @State private var viewerMode: PDFViewerMode = .scrolling
@@ -235,9 +254,11 @@ struct ContentView: View {
 
     private let annotationService = PDFAnnotationService()
     private let ocrService = VisionOCRService()
+    private let documentFileURL: URL?
 
     init(document: PDFEditorDocument, fileURL: URL?) {
         self.document = document
+        documentFileURL = fileURL
         _editorState = ObservedObject(wrappedValue: document.editorState)
         _saveURL = State(initialValue: fileURL)
     }
@@ -255,6 +276,7 @@ struct ContentView: View {
     var body: some View {
         fileTransferView
             .focusedValue(\.manualPDFSaveAction, saveDocument)
+            .focusedValue(\.manualPDFSaveAsAction, saveDocumentAs)
             .task {
                 await document.prepareEditingSessionForInteraction()
             }
@@ -416,14 +438,6 @@ struct ContentView: View {
         } message: {
             Text("Text will be added to the center of the current page. You can move or edit it from the PDF Objects panel.")
         }
-        .alert("Safe Replacement Text Layer Used", isPresented: Binding(
-            get: { replacementNotice != nil },
-            set: { if !$0 { replacementNotice = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(replacementNotice ?? "")
-        }
         .alert("Feature unavailable", isPresented: Binding(
             get: { unavailableTool != nil },
             set: { if !$0 { unavailableTool = nil } }
@@ -529,17 +543,10 @@ struct ContentView: View {
             handleFileImport($0)
         }
         .fileExporter(
-            isPresented: Binding(
-                get: { manualSaveExportDocument != nil },
-                set: {
-                    if !$0 {
-                        manualSaveExportDocument = nil
-                    }
-                }
-            ),
+            isPresented: $showsManualSaveExporter,
             document: manualSaveExportDocument,
             contentType: .pdf,
-            defaultFilename: "Untitled"
+            defaultFilename: manualSaveDefaultFilename
         ) { result in
             finishManualSaveExport(result)
         }
@@ -770,6 +777,16 @@ struct ContentView: View {
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
+            Button(action: saveDocumentAs) {
+                Image(systemName: "square.and.arrow.down.on.square")
+            }
+            .buttonStyle(.plain)
+            .disabled(isSaving)
+            .help("Save As")
+            .accessibilityLabel("Save As")
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .navigation) {
             Button {
                 undoManager?.undo()
             } label: {
@@ -847,23 +864,50 @@ struct ContentView: View {
     }
 
     private func saveDocument() {
+        performSave(choosingNewDestination: false)
+    }
+
+    private func saveDocumentAs() {
+        performSave(choosingNewDestination: true)
+    }
+
+    private func performSave(choosingNewDestination: Bool) {
         guard !isSaving else { return }
         isSaving = true
+#if os(macOS)
+        if choosingNewDestination || saveURL == nil {
+            presentManualSavePanel(filename: "\(suggestedSaveFilename).pdf")
+            return
+        }
+#endif
         Task { @MainActor in
             await Task.yield()
             do {
-                try commitPendingTextEdits()
-                let data = try document.dataForManualSave()
-                if let saveURL {
+                let pendingSave = try await preparePendingManualSave()
+                let data = pendingSave.preparation.data
+                if let saveURL, !choosingNewDestination {
                     try ManualPDFSaveCoordinator.write(data, to: saveURL)
-                    document.markManuallySaved(data: data)
+                    try await finishSuccessfulManualSave(pendingSave, at: saveURL)
                     isSaving = false
                 } else {
-                    pendingManualSaveData = data
+                    let defaultFilename = suggestedSaveFilename
+                    manualSaveDefaultFilename = defaultFilename
+#if os(macOS)
+                    // The macOS new-destination path returns before starting
+                    // this task, after presenting NSSavePanel immediately.
+                    isSaving = false
+#else
+                    pendingManualSave = pendingSave
                     manualSaveExportDocument = PDFExportDocument(
                         data: data,
-                        filename: "Untitled.pdf"
+                        filename: "\(defaultFilename).pdf"
                     )
+                    Task { @MainActor in
+                        await Task.yield()
+                        guard manualSaveExportDocument != nil else { return }
+                        showsManualSaveExporter = true
+                    }
+#endif
                 }
             } catch {
                 isSaving = false
@@ -872,33 +916,254 @@ struct ContentView: View {
         }
     }
 
-    private func commitPendingTextEdits() throws {
+    private var suggestedSaveFilename: String {
+        guard let saveURL else { return "Untitled" }
+        let filename = saveURL.deletingPathExtension().lastPathComponent
+        return filename.isEmpty ? "Untitled" : filename
+    }
+
+#if os(macOS)
+    private func presentManualSavePanel(filename: String) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = filename
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        let presentingWindow = NSApp.keyWindow
+        let preparationTask = Task { @MainActor in
+            let pendingSave = try await preparePendingManualSave()
+            try Task.checkCancellation()
+            return pendingSave
+        }
+
+        let completionHandler: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let url = panel.url else {
+                preparationTask.cancel()
+                isSaving = false
+                return
+            }
+            let destinationAdoption = beginDocumentDestinationAdoption(
+                url,
+                in: presentingWindow
+            )
+            Task { @MainActor in
+                do {
+                    let pendingSave = try await preparationTask.value
+                    try ManualPDFSaveCoordinator.write(
+                        pendingSave.preparation.data,
+                        to: url
+                    )
+                    completeDocumentDestinationAdoption(
+                        destinationAdoption,
+                        at: url
+                    )
+                    try await finishSuccessfulManualSave(
+                        pendingSave,
+                        at: url,
+                        didAdoptDestination:
+                            destinationAdoption.didAdoptNativeDocument
+                    )
+                } catch {
+                    rollbackDocumentDestinationAdoption(destinationAdoption)
+                    present(error)
+                }
+                isSaving = false
+            }
+        }
+
+        if let presentingWindow {
+            panel.beginSheetModal(
+                for: presentingWindow,
+                completionHandler: completionHandler
+            )
+        } else {
+            panel.begin(completionHandler: completionHandler)
+        }
+    }
+
+    private func beginDocumentDestinationAdoption(
+        _ url: URL,
+        in window: NSWindow?
+    ) -> ManualSaveDestinationAdoption {
+        let documentController = NSDocumentController.shared
+        let nativeDocument =
+            window?.windowController?.document as? NSDocument ??
+            saveURL.flatMap { documentController.document(for: $0) } ??
+            documentController.currentDocument
+
+        let previousDocumentURL = nativeDocument?.fileURL
+        let previousFileModificationDate = nativeDocument?.fileModificationDate
+        let previousSaveURL = saveURL
+        let previousWindowTitle = window?.title
+        let previousRepresentedURL = window?.representedURL
+
+        saveURL = url
+        nativeDocument?.fileURL = url
+        let didAdoptNativeDocument = nativeDocument?.fileURL?
+            .standardizedFileURL.resolvingSymlinksInPath() ==
+            url.standardizedFileURL.resolvingSymlinksInPath()
+
+        let adoption = ManualSaveDestinationAdoption(
+            nativeDocument: nativeDocument,
+            window: window,
+            previousDocumentURL: previousDocumentURL,
+            previousFileModificationDate: previousFileModificationDate,
+            previousSaveURL: previousSaveURL,
+            previousWindowTitle: previousWindowTitle,
+            previousRepresentedURL: previousRepresentedURL,
+            didAdoptNativeDocument: didAdoptNativeDocument
+        )
+
+        synchronizeDocumentDestination(
+            window: window,
+            url: url,
+            title: url.lastPathComponent
+        )
+        return adoption
+    }
+
+    private func completeDocumentDestinationAdoption(
+        _ adoption: ManualSaveDestinationAdoption,
+        at url: URL
+    ) {
+        guard let nativeDocument = adoption.nativeDocument else { return }
+        if let modificationDate = try? url.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate {
+            nativeDocument.fileModificationDate = modificationDate
+        }
+    }
+
+    private func rollbackDocumentDestinationAdoption(
+        _ adoption: ManualSaveDestinationAdoption
+    ) {
+        saveURL = adoption.previousSaveURL
+        adoption.nativeDocument?.fileURL = adoption.previousDocumentURL
+        adoption.nativeDocument?.fileModificationDate =
+            adoption.previousFileModificationDate
+
+        if let window = adoption.window {
+            window.windowController?.synchronizeWindowTitleWithDocumentName()
+            window.representedURL = adoption.previousRepresentedURL
+            let previousWindowTitle = adoption.previousWindowTitle ??
+                adoption.previousDocumentURL?.lastPathComponent ??
+                "Untitled"
+            window.title = previousWindowTitle
+            NSApp.changeWindowsItem(
+                window,
+                title: previousWindowTitle,
+                filename: adoption.previousRepresentedURL != nil
+            )
+        }
+    }
+
+    private func synchronizeDocumentDestination(
+        window: NSWindow?,
+        url: URL,
+        title: String
+    ) {
+        window?.windowController?.synchronizeWindowTitleWithDocumentName()
+        guard let window else { return }
+        window.representedURL = url
+        window.title = title
+        NSApp.changeWindowsItem(window, title: title, filename: true)
+    }
+#endif
+
+    @discardableResult
+    private func commitPendingTextEdits() async throws -> Data {
+        let pendingSave = try await preparePendingManualSave()
+        try await installPreparedTextEdits(pendingSave, markingUnsaved: true)
+        return pendingSave.preparation.data
+    }
+
+    private func preparePendingManualSave() async throws -> PendingManualSave {
         let edits = pendingTextEditStore.edits.values.sorted {
             if $0.object.pageIndex != $1.object.pageIndex {
                 return $0.object.pageIndex < $1.object.pageIndex
             }
             return $0.object.path.displayValue < $1.object.path.displayValue
         }
+        let preparation = try await document.prepareManualSave(
+            applying: edits.map {
+                PDFManualTextReplacement(
+                    object: $0.object,
+                    text: $0.text,
+                    style: $0.style
+                )
+            }
+        )
+        return PendingManualSave(preparation: preparation, edits: edits)
+    }
+
+    private func installPreparedTextEdits(
+        _ pendingSave: PendingManualSave,
+        markingUnsaved: Bool
+    ) async throws {
+        let edits = pendingSave.edits
+        if !edits.isEmpty {
+            try document.installPreparedManualSave(
+                pendingSave.preparation,
+                markingUnsaved: markingUnsaved,
+                undoManager: undoManager
+            )
+        }
         for edit in edits {
-            try commitTextReplacement(edit.object, text: edit.text, style: edit.style)
             pendingTextEditStore.removeCommittedEdit(objectID: edit.object.id)
         }
         pendingTextEditStore.removeUndoActions(using: undoManager)
+        if !edits.isEmpty {
+            pageObjectCache.removeAll()
+            pageObjects = []
+            selectedObject = nil
+            loadCanvasAnnotations()
+            await Task.yield()
+            loadCanvasObjects()
+        }
+    }
+
+    private func finishSuccessfulManualSave(
+        _ pendingSave: PendingManualSave,
+        at url: URL,
+        didAdoptDestination: Bool = false
+    ) async throws {
+        saveURL = url
+        try await installPreparedTextEdits(pendingSave, markingUnsaved: false)
+        document.markManuallySaved(
+            data: pendingSave.preparation.data,
+            updatesFileDocumentSnapshot:
+                ManualPDFSaveDestinationPolicy.updatesReferenceSnapshot(
+                    originalURL: documentFileURL,
+                    targetURL: url,
+                    didAdoptDestination: didAdoptDestination
+                )
+        )
     }
 
     private func finishManualSaveExport(_ result: Result<URL, Error>) {
-        defer {
+        func clearExportState() {
+            showsManualSaveExporter = false
             manualSaveExportDocument = nil
-            pendingManualSaveData = nil
+            pendingManualSave = nil
             isSaving = false
         }
 
         switch result {
         case let .success(url):
-            guard let pendingManualSaveData else { return }
-            saveURL = url
-            document.markManuallySaved(data: pendingManualSaveData)
+            guard let pendingManualSave else {
+                clearExportState()
+                return
+            }
+            Task { @MainActor in
+                defer { clearExportState() }
+                do {
+                    try await finishSuccessfulManualSave(pendingManualSave, at: url)
+                } catch {
+                    present(error)
+                }
+            }
         case let .failure(error):
+            defer { clearExportState() }
             let cocoaError = error as NSError
             guard !(cocoaError.domain == NSCocoaErrorDomain
                     && cocoaError.code == CocoaError.userCancelled.rawValue) else {
@@ -1012,7 +1277,7 @@ struct ContentView: View {
             await Task.yield()
             isExportingImages = true
             do {
-                try commitPendingTextEdits()
+                _ = try await commitPendingTextEdits()
                 let outputs = try await PDFPageImageExporter().exportPages(
                     in: document.pdfDocument,
                     pageIndices: pageIndices,
@@ -1359,44 +1624,6 @@ struct ContentView: View {
             style: style,
             undoManager: undoManager
         )
-    }
-
-    private func commitTextReplacement(
-        _ object: PDFPageObjectSnapshot,
-        text: String,
-        style: PDFTextStyle
-    ) throws {
-        do {
-            let result = try document.replaceText(
-                pageIndex: object.pageIndex,
-                path: object.path,
-                with: text,
-                style: style,
-                undoManager: undoManager
-            )
-            pageObjects = try document.pageObjects(at: object.pageIndex)
-            loadCanvasAnnotations()
-            switch result {
-            case let .usedCoreTextFallback(originalFontName):
-                replacementNotice = if let originalFontName {
-                    "The original font \(originalFontName) does not contain every required glyph or the text needs complex shaping. A searchable CoreText vector layer was used instead."
-                } else {
-                    "The original PDF font cannot safely render this text. A searchable CoreText vector layer was used instead."
-                }
-            case .usedStyledCoreTextOverlay:
-                replacementNotice = "Bold or italic formatting was saved as searchable PDF text."
-            case let .usedAppearanceSafeAnnotationFallback(originalFontName):
-                replacementNotice = if let originalFontName {
-                    "This page cannot safely regenerate its color resources. An editable FreeText layer replaced the \(originalFontName) text, and the original page colors were preserved."
-                } else {
-                    "This page cannot safely regenerate its color resources. An editable FreeText layer was used, and the original page colors were preserved."
-                }
-            case .preservedOriginalFont:
-                replacementNotice = nil
-            }
-        } catch {
-            throw error
-        }
     }
 
     private func replaceAnnotationText(

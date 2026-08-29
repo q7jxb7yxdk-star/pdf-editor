@@ -1422,6 +1422,209 @@ typedef struct PEPageColorMetrics {
     uint64_t chromaSum;
 } PEPageColorMetrics;
 
+typedef struct PETextObjectState {
+    int32_t path[64];
+    size_t pathLength;
+    uint16_t* text;
+    size_t textLength;
+} PETextObjectState;
+
+typedef struct PEPageTextState {
+    PETextObjectState* objects;
+    size_t count;
+    size_t capacity;
+} PEPageTextState;
+
+static void PEPageTextStateDestroy(PEPageTextState* state) {
+    if (state == NULL) {
+        return;
+    }
+    for (size_t index = 0; index < state->count; ++index) {
+        free(state->objects[index].text);
+    }
+    free(state->objects);
+    memset(state, 0, sizeof(*state));
+}
+
+static bool PEPathsEqual(
+    const int32_t* first,
+    size_t firstLength,
+    const int32_t* second,
+    size_t secondLength
+) {
+    return firstLength == secondLength &&
+        (firstLength == 0 || memcmp(
+            first,
+            second,
+            firstLength * sizeof(int32_t)
+        ) == 0);
+}
+
+static bool PEPageTextStateAppend(
+    PEPageTextState* state,
+    const int32_t* path,
+    size_t pathLength,
+    FPDF_PAGEOBJECT object,
+    FPDF_TEXTPAGE textPage
+) {
+    if (state == NULL || path == NULL || pathLength == 0 || pathLength > 64 ||
+        object == NULL || textPage == NULL) {
+        return false;
+    }
+    unsigned long byteCount = FPDFTextObj_GetText(object, textPage, NULL, 0);
+    if (byteCount < sizeof(uint16_t) ||
+        byteCount % sizeof(uint16_t) != 0) {
+        return false;
+    }
+    uint16_t* text = (uint16_t*)malloc((size_t)byteCount);
+    if (text == NULL ||
+        FPDFTextObj_GetText(object, textPage, text, byteCount) == 0) {
+        free(text);
+        return false;
+    }
+    if (state->count == state->capacity) {
+        size_t nextCapacity = state->capacity == 0 ? 32 : state->capacity * 2;
+        if (nextCapacity < state->capacity ||
+            nextCapacity > SIZE_MAX / sizeof(PETextObjectState)) {
+            free(text);
+            return false;
+        }
+        PETextObjectState* objects = (PETextObjectState*)realloc(
+            state->objects,
+            nextCapacity * sizeof(PETextObjectState)
+        );
+        if (objects == NULL) {
+            free(text);
+            return false;
+        }
+        state->objects = objects;
+        state->capacity = nextCapacity;
+    }
+    PETextObjectState* entry = &state->objects[state->count];
+    memset(entry, 0, sizeof(*entry));
+    memcpy(entry->path, path, pathLength * sizeof(int32_t));
+    entry->pathLength = pathLength;
+    entry->text = text;
+    entry->textLength = (size_t)byteCount / sizeof(uint16_t) - 1;
+    state->count += 1;
+    return true;
+}
+
+static bool PECollectPageTextState(
+    FPDF_PAGEOBJECT object,
+    int32_t objectIndex,
+    int32_t* path,
+    size_t depth,
+    FPDF_TEXTPAGE textPage,
+    const int32_t* excludedPath,
+    size_t excludedPathLength,
+    PEPageTextState* state
+) {
+    if (object == NULL || path == NULL || depth >= 64) {
+        return false;
+    }
+    path[depth] = objectIndex;
+    size_t pathLength = depth + 1;
+    int type = FPDFPageObj_GetType(object);
+    if (type == FPDF_PAGEOBJ_TEXT && !PEPathsEqual(
+        path,
+        pathLength,
+        excludedPath,
+        excludedPathLength
+    ) && !PEPageTextStateAppend(
+        state,
+        path,
+        pathLength,
+        object,
+        textPage
+    )) {
+        return false;
+    }
+    if (type != FPDF_PAGEOBJ_FORM || depth >= 63) {
+        return true;
+    }
+    int childCount = FPDFFormObj_CountObjects(object);
+    for (int childIndex = 0; childIndex < childCount; ++childIndex) {
+        if (!PECollectPageTextState(
+            FPDFFormObj_GetObject(object, (unsigned long)childIndex),
+            childIndex,
+            path,
+            depth + 1,
+            textPage,
+            excludedPath,
+            excludedPathLength,
+            state
+        )) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool PEPageTextStateCreate(
+    FPDF_PAGE page,
+    const int32_t* excludedPath,
+    size_t excludedPathLength,
+    PEPageTextState* output
+) {
+    if (page == NULL || output == NULL || excludedPath == NULL ||
+        excludedPathLength == 0 || excludedPathLength > 64) {
+        return false;
+    }
+    memset(output, 0, sizeof(*output));
+    FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
+    if (textPage == NULL) {
+        return false;
+    }
+    int32_t path[64];
+    int objectCount = FPDFPage_CountObjects(page);
+    bool success = true;
+    for (int index = 0; index < objectCount && success; ++index) {
+        success = PECollectPageTextState(
+            FPDFPage_GetObject(page, index),
+            index,
+            path,
+            0,
+            textPage,
+            excludedPath,
+            excludedPathLength,
+            output
+        );
+    }
+    FPDFText_ClosePage(textPage);
+    if (!success) {
+        PEPageTextStateDestroy(output);
+    }
+    return success;
+}
+
+static bool PEPageTextStatePreserved(
+    const PEPageTextState* before,
+    const PEPageTextState* after
+) {
+    if (before == NULL || after == NULL || before->count != after->count) {
+        return false;
+    }
+    for (size_t index = 0; index < before->count; ++index) {
+        const PETextObjectState* first = &before->objects[index];
+        const PETextObjectState* second = &after->objects[index];
+        if (!PEPathsEqual(
+            first->path,
+            first->pathLength,
+            second->path,
+            second->pathLength
+        ) || first->textLength != second->textLength ||
+            (first->textLength > 0 && memcmp(
+                first->text,
+                second->text,
+                first->textLength * sizeof(uint16_t)
+            ) != 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool PEPageObjectBoundsInPage(
     PEObjectContext context,
     float* left,
@@ -1546,14 +1749,17 @@ static bool PEPageColorsPreserved(
         after.chromaSum * 4 >= before.chromaSum;
 }
 
-static bool PESerializedPageColorMetricsCreate(
+static bool PESerializedPageIntegrityCreate(
     PEPDFDocumentRef document,
     int32_t pageIndex,
     float excludedLeft,
     float excludedBottom,
     float excludedRight,
     float excludedTop,
-    PEPageColorMetrics* output
+    const int32_t* excludedPath,
+    size_t excludedPathLength,
+    PEPageColorMetrics* outputColorMetrics,
+    PEPageTextState* outputTextState
 ) {
     uint8_t* bytes = NULL;
     size_t length = 0;
@@ -1577,7 +1783,12 @@ static bool PESerializedPageColorMetricsCreate(
         excludedBottom,
         excludedRight,
         excludedTop,
-        output
+        outputColorMetrics
+    ) && PEPageTextStateCreate(
+        page,
+        excludedPath,
+        excludedPathLength,
+        outputTextState
     );
     if (page != NULL) FPDF_ClosePage(page);
     if (reopened != NULL) FPDF_CloseDocument(reopened);
@@ -1612,8 +1823,11 @@ bool PEPDFPageObjectReplaceText(
         kPEIdentityMatrix
     };
     PEPageColorMetrics beforeMetrics;
+    PEPageTextState beforeTextState;
+    memset(&beforeTextState, 0, sizeof(beforeTextState));
     uint8_t* beforeBytes = NULL;
     size_t beforeLength = 0;
+    int32_t excludedPath[] = {objectIndex};
     bool prepared = PEPageObjectBoundsInPage(
         context,
         &excludedLeft,
@@ -1627,6 +1841,11 @@ bool PEPDFPageObjectReplaceText(
         excludedRight,
         excludedTop,
         &beforeMetrics
+    ) && PEPageTextStateCreate(
+        page,
+        excludedPath,
+        1,
+        &beforeTextState
     ) && PECopyDocumentData(
         document->handle,
         FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS,
@@ -1635,6 +1854,7 @@ bool PEPDFPageObjectReplaceText(
     );
     if (!prepared) {
         document->lastMutationRejectedForAppearance = true;
+        PEPageTextStateDestroy(&beforeTextState);
         free(beforeBytes);
         FPDF_ClosePage(page);
         return false;
@@ -1645,22 +1865,31 @@ bool PEPDFPageObjectReplaceText(
         FPDFPage_GenerateContent(page);
     free(terminatedText);
     PEPageColorMetrics afterMetrics;
+    PEPageTextState afterTextState;
+    memset(&afterTextState, 0, sizeof(afterTextState));
     if (success) {
-        bool measured = PESerializedPageColorMetricsCreate(
+        bool measuredIntegrity = PESerializedPageIntegrityCreate(
             document,
             pageIndex,
             excludedLeft,
             excludedBottom,
             excludedRight,
             excludedTop,
-            &afterMetrics
+            excludedPath,
+            1,
+            &afterMetrics,
+            &afterTextState
         );
-        bool preserved = measured && PEPageColorsPreserved(beforeMetrics, afterMetrics);
+        bool preserved = measuredIntegrity &&
+            PEPageColorsPreserved(beforeMetrics, afterMetrics) &&
+            PEPageTextStatePreserved(&beforeTextState, &afterTextState);
         if (!preserved) {
             document->lastMutationRejectedForAppearance = true;
         }
         success = preserved;
     }
+    PEPageTextStateDestroy(&afterTextState);
+    PEPageTextStateDestroy(&beforeTextState);
     FPDF_ClosePage(page);
     if (!success) {
         PEReloadDocumentFromData(document, beforeBytes, beforeLength);
@@ -1728,6 +1957,8 @@ bool PEPDFPageObjectReplaceTextAtPath(
     float excludedRight = 0;
     float excludedTop = 0;
     PEPageColorMetrics beforeMetrics;
+    PEPageTextState beforeTextState;
+    memset(&beforeTextState, 0, sizeof(beforeTextState));
     uint8_t* beforeBytes = NULL;
     size_t beforeLength = 0;
     bool prepared = PEPageObjectBoundsInPage(
@@ -1743,6 +1974,11 @@ bool PEPDFPageObjectReplaceTextAtPath(
         excludedRight,
         excludedTop,
         &beforeMetrics
+    ) && PEPageTextStateCreate(
+        context.page,
+        path,
+        pathLength,
+        &beforeTextState
     ) && PECopyDocumentData(
         document->handle,
         FPDF_NO_INCREMENTAL | FPDF_SUBSET_NEW_FONTS,
@@ -1751,6 +1987,7 @@ bool PEPDFPageObjectReplaceTextAtPath(
     );
     if (!prepared) {
         document->lastMutationRejectedForAppearance = true;
+        PEPageTextStateDestroy(&beforeTextState);
         free(beforeBytes);
         PECloseObjectContext(&context);
         return false;
@@ -1762,22 +1999,31 @@ bool PEPDFPageObjectReplaceTextAtPath(
         FPDFPage_GenerateContent(context.page);
     free(terminatedText);
     PEPageColorMetrics afterMetrics;
+    PEPageTextState afterTextState;
+    memset(&afterTextState, 0, sizeof(afterTextState));
     if (success) {
-        bool measured = PESerializedPageColorMetricsCreate(
+        bool measuredIntegrity = PESerializedPageIntegrityCreate(
             document,
             pageIndex,
             excludedLeft,
             excludedBottom,
             excludedRight,
             excludedTop,
-            &afterMetrics
+            path,
+            pathLength,
+            &afterMetrics,
+            &afterTextState
         );
-        bool preserved = measured && PEPageColorsPreserved(beforeMetrics, afterMetrics);
+        bool preserved = measuredIntegrity &&
+            PEPageColorsPreserved(beforeMetrics, afterMetrics) &&
+            PEPageTextStatePreserved(&beforeTextState, &afterTextState);
         if (!preserved) {
             document->lastMutationRejectedForAppearance = true;
         }
         success = preserved;
     }
+    PEPageTextStateDestroy(&afterTextState);
+    PEPageTextStateDestroy(&beforeTextState);
     PECloseObjectContext(&context);
     if (!success) {
         PEReloadDocumentFromData(document, beforeBytes, beforeLength);

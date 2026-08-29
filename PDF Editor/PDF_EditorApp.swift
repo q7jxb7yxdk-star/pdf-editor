@@ -37,20 +37,17 @@ struct PDF_EditorApp: App {
 
 #if os(macOS)
 private struct FillWindowView: NSViewRepresentable {
-    final class Coordinator {
-        var didFillWindow = false
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+    @MainActor
+    private static let filledWindows = NSHashTable<NSWindow>.weakObjects()
 
     func makeNSView(context: Context) -> WindowAttachmentView {
         let view = WindowAttachmentView()
-        view.onWindowAttached = { [weak coordinator = context.coordinator] window in
-            guard let coordinator, !coordinator.didFillWindow else { return }
-            coordinator.didFillWindow = true
-            if !window.isZoomed {
+        view.onWindowAttached = { window in
+            guard !Self.filledWindows.contains(window) else { return }
+            Self.filledWindows.add(window)
+            Task { @MainActor [weak window] in
+                await Task.yield()
+                guard let window, !window.isZoomed else { return }
                 window.performZoom(nil)
             }
         }
