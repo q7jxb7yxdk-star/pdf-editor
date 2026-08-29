@@ -233,6 +233,7 @@ struct ContentView: View {
     @StateObject private var signatureLibraryStore = SignatureLibraryStore()
     @State private var showsSignatureLibrary = false
     @State private var selectedESignPlacement: ESignPlacement?
+    @State private var freeTextPlacementEnabled = false
     @State private var showsOCRResult = false
     @State private var showsSignatureWarning = false
     @State private var showsProtectPDF = false
@@ -632,6 +633,9 @@ struct ContentView: View {
                     onSetAnnotationBounds: setAnnotationBounds,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
+                    freeTextPlacementEnabled: freeTextPlacementEnabled,
+                    onPlaceFreeText: addPlacedFreeText,
+                    onCancelFreeTextPlacement: cancelFreeTextPlacement,
                     signaturePlacementEnabled: selectedESignPlacement != nil,
                     signaturePlacementStrokes: selectedESignPlacement?.normalizedStrokes,
                     signaturePlacementSize: selectedESignPlacement?.preferredSize
@@ -676,6 +680,24 @@ struct ContentView: View {
                             systemImage: selectedESignPlacement.systemImage
                         )
                         Button("Cancel", action: cancelESignPlacement)
+                            .buttonStyle(.bordered)
+                            .keyboardShortcut(.cancelAction)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 12)
+                    .shadow(radius: 4, y: 2)
+                }
+
+                if freeTextPlacementEnabled {
+                    HStack(spacing: 12) {
+                        Label(
+                            "Click anywhere in the PDF to add a multiline text box",
+                            systemImage: "character.cursor.ibeam"
+                        )
+                        Button("Cancel", action: cancelFreeTextPlacement)
                             .buttonStyle(.bordered)
                             .keyboardShortcut(.cancelAction)
                     }
@@ -1230,6 +1252,9 @@ struct ContentView: View {
         if !action.isESignAction {
             cancelESignPlacement()
         }
+        if action != .fillFormFields {
+            cancelFreeTextPlacement()
+        }
         switch action {
         case .addComment:
             beginCommentPlacement()
@@ -1266,6 +1291,8 @@ struct ContentView: View {
             beginESignPlacement(.mark(.checkmark))
         case .addCrossmark:
             beginESignPlacement(.mark(.crossmark))
+        case .fillFormFields:
+            beginFreeTextPlacement()
         case .drawFreehand:
             commentPlacementEnabled = false
             highlightModeEnabled = false
@@ -1707,15 +1734,10 @@ struct ContentView: View {
 
     private func replaceAnnotationText(
         _ annotation: PDFAnnotationSnapshot,
-        text: String
+        text: String,
+        bounds: CGRect
     ) {
         do {
-            let fontSize = max(annotation.fontSize ?? annotation.bounds.height / 1.8, 6)
-            var bounds = annotation.bounds
-            bounds.size.width = max(
-                bounds.width,
-                fontSize * 0.72 * CGFloat(max(text.count, 1)) + fontSize
-            )
             selectedAnnotation = try document.updateAnnotation(
                 annotation.reference,
                 with: PDFAnnotationUpdate(
@@ -2022,6 +2044,7 @@ struct ContentView: View {
 
     private func beginESignPlacement(_ placement: ESignPlacement) {
         showsSignatureLibrary = false
+        cancelFreeTextPlacement()
         cancelCommentPlacement()
         cancelHighlightMode()
         selectedObject = nil
@@ -2034,6 +2057,77 @@ struct ContentView: View {
 
     private func cancelESignPlacement() {
         selectedESignPlacement = nil
+    }
+
+    private func beginFreeTextPlacement() {
+        guard !document.requiresDigitalSignatureConsent else {
+            showsSignatureWarning = true
+            return
+        }
+        showsSignatureLibrary = false
+        cancelESignPlacement()
+        cancelCommentPlacement()
+        cancelHighlightMode()
+        freehandDrawingEnabled = false
+        selectedObject = nil
+        selectedAnnotation = nil
+        freeTextPlacementEnabled = true
+        if !usesInlinePanels {
+            showsToolPanel = false
+        }
+    }
+
+    private func cancelFreeTextPlacement() {
+        freeTextPlacementEnabled = false
+    }
+
+    private func addPlacedFreeText(
+        pageIndex: Int,
+        bounds: CGRect,
+        text: String,
+        color: PDFAnnotationColor,
+        fontSize: CGFloat
+    ) {
+        guard let page = document.pdfDocument.page(at: pageIndex) else { return }
+        var newReference: PDFAnnotationReference?
+        do {
+            try document.mutateAnnotations(
+                undoManager: undoManager,
+                actionName: "Add Form Text"
+            ) {
+                let annotation = try annotationService.addFreeText(
+                    text: text,
+                    bounds: bounds,
+                    fontSize: fontSize,
+                    to: page
+                )
+                annotation.fontColor = PlatformColor(
+                    red: color.red,
+                    green: color.green,
+                    blue: color.blue,
+                    alpha: color.alpha
+                )
+                guard let annotationIndex = page.annotations.firstIndex(where: {
+                    $0 === annotation
+                }) else {
+                    throw PDFAnnotationServiceError.annotationNotFound
+                }
+                newReference = PDFAnnotationReference(
+                    pageIndex: pageIndex,
+                    annotationIndex: annotationIndex
+                )
+            }
+            freeTextPlacementEnabled = false
+            selectedPageIndex = pageIndex
+            loadCanvasAnnotations()
+            if let newReference {
+                selectedAnnotation = pageAnnotations.first {
+                    $0.reference == newReference
+                }
+            }
+        } catch {
+            present(error)
+        }
     }
 
     private func placeSelectedESign(pageIndex: Int, point: CGPoint) {

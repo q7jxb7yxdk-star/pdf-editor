@@ -97,6 +97,19 @@ nonisolated final class PDFAnnotationService {
     ) throws -> PDFAnnotationSnapshot {
         let resolved = try resolve(reference, in: document)
         let annotation = resolved.annotation
+        var update = update
+        if annotation.type == "FreeText",
+           let requestedFontSize = update.fontSize,
+           update.bounds == nil {
+            let fontSize = min(max(requestedFontSize, 6), 144)
+            update.fontSize = fontSize
+            update.bounds = fittedFreeTextBounds(
+                annotation,
+                on: resolved.page,
+                text: update.contents ?? annotation.contents ?? "",
+                fontSize: fontSize
+            )
+        }
 
         let requestsStyleChange = update.color != nil || update.fontColor != nil ||
             update.fontSize != nil || update.lineWidth != nil
@@ -117,8 +130,11 @@ nonisolated final class PDFAnnotationService {
                 update.contents == nil && update.fontColor == nil &&
                 update.fontSize == nil &&
                 (update.color != nil || update.lineWidth != nil)
+            let canRegenerateFreeTextAppearance = annotation.type == "FreeText" &&
+                update.contents == nil && update.lineWidth == nil &&
+                (update.color != nil || update.fontColor != nil || update.fontSize != nil)
             guard canRegenerateNoteAppearance || canRegenerateHighlightAppearance ||
-                canRegenerateInkAppearance else {
+                canRegenerateInkAppearance || canRegenerateFreeTextAppearance else {
                 throw PDFAnnotationServiceError.appearanceStreamStyleUnsupported
             }
             annotation.removeValue(forAnnotationKey: appearanceDictionaryKey)
@@ -191,7 +207,7 @@ nonisolated final class PDFAnnotationService {
     func addFreeText(
         text: String,
         bounds: CGRect,
-        fontSize: CGFloat = 16,
+        fontSize: CGFloat = 11,
         to page: PDFPage
     ) throws -> PDFAnnotation {
         let text = try validated(text)
@@ -536,6 +552,59 @@ nonisolated final class PDFAnnotationService {
         #else
         return PlatformFont(descriptor: font.fontDescriptor, size: size)
         #endif
+    }
+
+    private func fittedFreeTextBounds(
+        _ annotation: PDFAnnotation,
+        on page: PDFPage,
+        text: String,
+        fontSize: CGFloat
+    ) -> CGRect {
+        let currentBounds = annotation.bounds.standardized
+        let pageBounds = page.bounds(for: .cropBox).standardized
+        guard pageBounds.width > 0, pageBounds.height > 0 else {
+            return currentBounds
+        }
+
+        let font = resizedFont(annotation.font, size: fontSize)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let lines = text.components(separatedBy: "\n")
+        let widestLine = lines.reduce(CGFloat.zero) { width, line in
+            max(width, (line as NSString).size(withAttributes: attributes).width)
+        }
+        let minimumWidth = min(72, pageBounds.width)
+        let width = min(
+            max(minimumWidth, ceil(widestLine) + 12),
+            pageBounds.width
+        )
+        let renderedHeight = (text as NSString).boundingRect(
+            with: CGSize(
+                width: max(width - 12, 1),
+                height: CGFloat.greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes
+        ).height
+#if os(macOS)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+#else
+        let lineHeight = ceil(font.lineHeight)
+#endif
+        let contentHeight = max(
+            lineHeight * CGFloat(max(lines.count, 1)),
+            ceil(renderedHeight)
+        )
+        let minimumHeight = min(28, pageBounds.height)
+        let height = min(
+            max(minimumHeight, contentHeight + 8),
+            pageBounds.height
+        )
+        let maximumX = max(pageBounds.minX, pageBounds.maxX - width)
+        let maximumY = max(pageBounds.minY, pageBounds.maxY - height)
+        let x = min(max(currentBounds.minX, pageBounds.minX), maximumX)
+        let preferredY = currentBounds.maxY - height
+        let y = min(max(preferredY, pageBounds.minY), maximumY)
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 
     private func platformColor(_ color: PDFAnnotationColor) -> PlatformColor {

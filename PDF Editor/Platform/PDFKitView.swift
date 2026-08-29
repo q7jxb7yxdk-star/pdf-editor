@@ -6,10 +6,12 @@ import SwiftUI
 private struct PDFAnnotationActionBar: View {
     let annotation: PDFAnnotationSnapshot
     let onChangeColor: (PDFAnnotationColor) -> Void
+    let onChangeFontSize: (CGFloat) -> Void
     let onChangeLineWidth: (CGFloat) -> Void
     let onDelete: () -> Void
 
     @State private var showsColorPicker = false
+    @State private var showsFontSizePicker = false
     @State private var showsLineWidthPicker = false
 
     private let colorChoices: [(name: String, color: PDFAnnotationColor)] = [
@@ -23,6 +25,7 @@ private struct PDFAnnotationActionBar: View {
         ("Purple", PDFAnnotationColor(red: 0.63, green: 0.25, blue: 0.82, alpha: 1)),
     ]
     private let lineWidthChoices: [CGFloat] = [0.5, 1, 2, 4, 8, 12]
+    private let fontSizeChoices: [CGFloat] = [8, 9, 10, 11, 12, 14, 18, 24, 30, 36, 48]
 #if os(macOS)
     private let lineWidthChoiceHitTolerance: CGFloat = 12
 #else
@@ -37,7 +40,8 @@ private struct PDFAnnotationActionBar: View {
                 Circle()
                     .fill(opaqueSwiftUIColor(annotation.color))
                     .frame(width: 18, height: 18)
-                    .padding(2)
+                    .frame(width: 32, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Change color")
@@ -48,15 +52,19 @@ private struct PDFAnnotationActionBar: View {
                     ForEach(availableColorChoices.indices, id: \.self) { index in
                         let choice = availableColorChoices[index]
                         Button {
-                            showsColorPicker = false
-                            onChangeColor(choice.color.withAlpha(
+                            let color = choice.color.withAlpha(
                                 annotation.kind == .ink ? 1 : annotation.color.alpha
-                            ))
+                            )
+                            showsColorPicker = false
+                            DispatchQueue.main.async {
+                                onChangeColor(color)
+                            }
                         } label: {
                             Circle()
                                 .fill(opaqueSwiftUIColor(choice.color))
                                 .frame(width: 22, height: 22)
-                                .padding(3)
+                                .frame(width: 40, height: 40)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help(choice.name)
@@ -69,6 +77,55 @@ private struct PDFAnnotationActionBar: View {
 
             Divider()
                 .frame(height: 18)
+
+            if annotation.kind == .freeText {
+                Button {
+                    showsFontSizePicker.toggle()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "textformat.size")
+                        Text("\(Int(annotation.fontSize ?? 11))")
+                            .monospacedDigit()
+                    }
+                    .frame(minWidth: 48, minHeight: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Change text size")
+                .accessibilityLabel("Change text size")
+                .accessibilityValue("\(Int(annotation.fontSize ?? 11)) points")
+                .popover(isPresented: $showsFontSizePicker, arrowEdge: .bottom) {
+                    VStack(spacing: 2) {
+                        ForEach(fontSizeChoices, id: \.self) { fontSize in
+                            Button {
+                                showsFontSizePicker = false
+                                DispatchQueue.main.async {
+                                    onChangeFontSize(fontSize)
+                                }
+                            } label: {
+                                HStack {
+                                    Text("\(Int(fontSize)) pt")
+                                    Spacer()
+                                    if abs(fontSize - (annotation.fontSize ?? 11)) < 0.01 {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .frame(maxWidth: .infinity, minHeight: 36)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(Int(fontSize)) point text")
+                        }
+                    }
+                    .frame(width: 124)
+                    .padding(.vertical, 6)
+                    .presentationCompactAdaptation(.popover)
+                }
+
+                Divider()
+                    .frame(height: 18)
+            }
 
             if annotation.kind == .ink {
                 Button {
@@ -119,7 +176,8 @@ private struct PDFAnnotationActionBar: View {
 
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")
-                    .frame(width: 18, height: 18)
+                    .frame(width: 32, height: 28)
+                    .contentShape(Rectangle())
             }
             .help("Delete")
             .accessibilityLabel("Delete")
@@ -146,7 +204,8 @@ private struct PDFAnnotationActionBar: View {
 
     private var availableColorChoices: [(name: String, color: PDFAnnotationColor)] {
         colorChoices.filter { choice in
-            (annotation.kind == .ink || choice.name != "Black") &&
+            (annotation.kind == .ink || annotation.kind == .freeText ||
+                choice.name != "Black") &&
                 !approximatelySameRGB(annotation.color, choice.color)
         }
     }
@@ -374,6 +433,9 @@ struct PDFKitView: NSViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let freeTextPlacementEnabled: Bool
+    let onPlaceFreeText: (Int, CGRect, String, PDFAnnotationColor, CGFloat) -> Void
+    let onCancelFreeTextPlacement: () -> Void
     let signaturePlacementEnabled: Bool
     let signaturePlacementStrokes: [[CGPoint]]?
     let signaturePlacementSize: CGSize
@@ -382,7 +444,7 @@ struct PDFKitView: NSViewRepresentable {
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
-    let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+    let onReplaceAnnotationText: (PDFAnnotationSnapshot, String, CGRect) -> Void
     let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
     let onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
@@ -445,6 +507,9 @@ struct PDFKitView: UIViewRepresentable {
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
+    let freeTextPlacementEnabled: Bool
+    let onPlaceFreeText: (Int, CGRect, String, PDFAnnotationColor, CGFloat) -> Void
+    let onCancelFreeTextPlacement: () -> Void
     let signaturePlacementEnabled: Bool
     let signaturePlacementStrokes: [[CGPoint]]?
     let signaturePlacementSize: CGSize
@@ -453,7 +518,7 @@ struct PDFKitView: UIViewRepresentable {
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
-    let onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+    let onReplaceAnnotationText: (PDFAnnotationSnapshot, String, CGRect) -> Void
     let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
     let onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
@@ -498,6 +563,9 @@ private extension PDFKitView {
             onSetAnnotationBounds: onSetAnnotationBounds,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
+            freeTextPlacementEnabled: freeTextPlacementEnabled,
+            onPlaceFreeText: onPlaceFreeText,
+            onCancelFreeTextPlacement: onCancelFreeTextPlacement,
             signaturePlacementEnabled: signaturePlacementEnabled,
             signaturePlacementStrokes: signaturePlacementStrokes,
             signaturePlacementSize: signaturePlacementSize,
@@ -558,6 +626,9 @@ private extension PDFKitView {
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
+        coordinator.freeTextPlacementEnabled = freeTextPlacementEnabled
+        coordinator.onPlaceFreeText = onPlaceFreeText
+        coordinator.onCancelFreeTextPlacement = onCancelFreeTextPlacement
         coordinator.signaturePlacementEnabled = signaturePlacementEnabled
         coordinator.signaturePlacementStrokes = signaturePlacementStrokes
         coordinator.signaturePlacementSize = signaturePlacementSize
@@ -672,6 +743,20 @@ extension PDFKitView {
             }
         }
         var onPlaceComment: (Int, CGPoint) -> Void
+        var freeTextPlacementEnabled: Bool {
+            didSet {
+                guard oldValue != freeTextPlacementEnabled else { return }
+                if !freeTextPlacementEnabled, pendingFreeTextPlacement != nil {
+                    finishInlineTextEditing(
+                        commit: false,
+                        notifiesFreeTextCancellation: false
+                    )
+                }
+                updateGestureAvailability()
+            }
+        }
+        var onPlaceFreeText: (Int, CGRect, String, PDFAnnotationColor, CGFloat) -> Void
+        var onCancelFreeTextPlacement: () -> Void
         var signaturePlacementEnabled: Bool {
             didSet {
                 guard oldValue != signaturePlacementEnabled else { return }
@@ -724,7 +809,7 @@ extension PDFKitView {
         }
         var onAddFreehand: (Int, [CGPoint]) -> Void
         var onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
-        var onReplaceAnnotationText: (PDFAnnotationSnapshot, String) -> Void
+        var onReplaceAnnotationText: (PDFAnnotationSnapshot, String, CGRect) -> Void
         var onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
         var onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
         var onOpenObject: (PDFPageObjectSnapshot) -> Void
@@ -851,14 +936,28 @@ extension PDFKitView {
         private var gestures: [UIGestureRecognizer] = []
         private var annotationActionContainer: UIView?
         private var annotationActionHostingController: UIHostingController<PDFAnnotationActionBar>?
-        private var inlineTextField: UITextField?
+        private var inlineTextField: UITextView?
         private var inlineEditingBaseFont: UIFont?
         private var inlineEditingPDFStyle: PDFTextStyle = []
         private var inlineBoldButton: UIBarButtonItem?
         private var inlineItalicButton: UIBarButtonItem?
 #endif
+        private var annotationActionSnapshot: PDFAnnotationSnapshot?
         private var inlineEditingObject: PDFPageObjectSnapshot?
         private var inlineEditingAnnotation: PDFAnnotationSnapshot?
+        private struct PendingFreeTextPlacement {
+            let pageIndex: Int
+            let minimumBounds: CGRect
+            var bounds: CGRect
+            var color: PDFAnnotationColor
+            var fontSize: CGFloat
+        }
+        private var pendingFreeTextPlacement: PendingFreeTextPlacement?
+        private struct HiddenFreeTextAnnotation {
+            let annotation: PDFAnnotation
+            let shouldDisplay: Bool
+        }
+        private var hiddenFreeTextAnnotation: HiddenFreeTextAnnotation?
         private var isFinishingInlineTextEditing = false
         private var overlayRefreshScheduled = false
 
@@ -877,6 +976,15 @@ extension PDFKitView {
             onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
+            freeTextPlacementEnabled: Bool,
+            onPlaceFreeText: @escaping (
+                Int,
+                CGRect,
+                String,
+                PDFAnnotationColor,
+                CGFloat
+            ) -> Void,
+            onCancelFreeTextPlacement: @escaping () -> Void,
             signaturePlacementEnabled: Bool,
             signaturePlacementStrokes: [[CGPoint]]?,
             signaturePlacementSize: CGSize,
@@ -885,7 +993,7 @@ extension PDFKitView {
             freehandDrawingEnabled: Bool,
             onAddFreehand: @escaping (Int, [CGPoint]) -> Void,
             onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void,
-            onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String) -> Void,
+            onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String, CGRect) -> Void,
             onUpdateAnnotation: @escaping (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void,
             onDeleteAnnotation: @escaping (PDFAnnotationSnapshot) -> Void,
             onOpenObject: @escaping (PDFPageObjectSnapshot) -> Void,
@@ -905,6 +1013,9 @@ extension PDFKitView {
             self.onSetAnnotationBounds = onSetAnnotationBounds
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
+            self.freeTextPlacementEnabled = freeTextPlacementEnabled
+            self.onPlaceFreeText = onPlaceFreeText
+            self.onCancelFreeTextPlacement = onCancelFreeTextPlacement
             self.signaturePlacementEnabled = signaturePlacementEnabled
             self.signaturePlacementStrokes = signaturePlacementStrokes
             self.signaturePlacementSize = signaturePlacementSize
@@ -1030,6 +1141,7 @@ extension PDFKitView {
 
         func stopObserving() {
             finishInlineTextEditing(commit: false)
+            restoreHiddenFreeTextAnnotation()
             pendingTextActivation = nil
             hoveredCommentReference = nil
             observers.forEach(NotificationCenter.default.removeObserver)
@@ -1076,6 +1188,7 @@ extension PDFKitView {
 
         func prepareForDocumentReplacement() {
             finishInlineTextEditing(commit: false)
+            restoreHiddenFreeTextAnnotation()
             pendingTextActivation = nil
 #if os(macOS)
             hideSignaturePreview()
@@ -1113,6 +1226,16 @@ extension PDFKitView {
             updateStagedTextOverlays()
 #endif
             updateInlineTextEditorFrame()
+            if pendingFreeTextPlacement != nil,
+               let inlineTextField {
+                outlineLayer.isHidden = true
+                handleLayers.forEach { $0.isHidden = true }
+                updatePendingFreeTextActionBar(
+                    above: inlineTextField.frame,
+                    in: pdfView
+                )
+                return
+            }
             let pageIndex: Int
             let pageBounds: CGRect
             if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
@@ -1257,10 +1380,14 @@ extension PDFKitView {
         private func updateAnnotationActionBar(
             for annotation: PDFAnnotationSnapshot?,
             above annotationBounds: CGRect,
-            in pdfView: PDFView
+            in pdfView: PDFView,
+            onChangeColor customColorChange: ((PDFAnnotationColor) -> Void)? = nil,
+            onChangeFontSize customFontSizeChange: ((CGFloat) -> Void)? = nil,
+            onDelete customDelete: (() -> Void)? = nil
         ) {
             guard let annotation,
-                  annotation.kind == .highlight || annotation.kind == .ink else {
+                  annotation.kind == .highlight || annotation.kind == .ink ||
+                  annotation.kind == .freeText else {
                 removeAnnotationActionBar()
                 return
             }
@@ -1268,10 +1395,32 @@ extension PDFKitView {
             let actionBar = PDFAnnotationActionBar(
                 annotation: annotation,
                 onChangeColor: { [weak self] color in
-                    self?.onUpdateAnnotation(
+                    if let customColorChange {
+                        customColorChange(color)
+                        return
+                    }
+                    guard let self else { return }
+                    self.onUpdateAnnotation(
                         annotation,
-                        PDFAnnotationUpdate(color: color)
+                        annotation.kind == .freeText
+                            ? PDFAnnotationUpdate(fontColor: color)
+                            : PDFAnnotationUpdate(color: color)
                     )
+                    self.refreshPDFViewDisplay()
+                    self.scheduleOverlayRefresh()
+                },
+                onChangeFontSize: { [weak self] fontSize in
+                    if let customFontSizeChange {
+                        customFontSizeChange(fontSize)
+                        return
+                    }
+                    guard let self else { return }
+                    self.onUpdateAnnotation(
+                        annotation,
+                        PDFAnnotationUpdate(fontSize: fontSize)
+                    )
+                    self.refreshPDFViewDisplay()
+                    self.scheduleOverlayRefresh()
                 },
                 onChangeLineWidth: { [weak self] lineWidth in
                     self?.onUpdateAnnotation(
@@ -1280,7 +1429,11 @@ extension PDFKitView {
                     )
                 },
                 onDelete: { [weak self] in
-                    self?.onDeleteAnnotation(annotation)
+                    if let customDelete {
+                        customDelete()
+                    } else {
+                        self?.onDeleteAnnotation(annotation)
+                    }
                 }
             )
 
@@ -1291,7 +1444,10 @@ extension PDFKitView {
                let existingHost = annotationActionHost {
                 container = existingContainer
                 host = existingHost
-                host.rootView = actionBar
+                if annotationActionSnapshot != annotation {
+                    host.rootView = actionBar
+                    annotationActionSnapshot = annotation
+                }
             } else {
                 container = PDFAnnotationActionContainerView(frame: .zero)
                 host = NSHostingView(rootView: actionBar)
@@ -1299,6 +1455,7 @@ extension PDFKitView {
                 pdfView.addSubview(container)
                 annotationActionContainer = container
                 annotationActionHost = host
+                annotationActionSnapshot = annotation
             }
             let fittingSize = host.fittingSize
             let size = CGSize(width: max(fittingSize.width, 150), height: max(fittingSize.height, 32))
@@ -1310,7 +1467,10 @@ extension PDFKitView {
                let existingController = annotationActionHostingController {
                 container = existingContainer
                 hostingController = existingController
-                hostingController.rootView = actionBar
+                if annotationActionSnapshot != annotation {
+                    hostingController.rootView = actionBar
+                    annotationActionSnapshot = annotation
+                }
             } else {
                 container = UIView(frame: .zero)
                 container.backgroundColor = .clear
@@ -1320,6 +1480,7 @@ extension PDFKitView {
                 pdfView.addSubview(container)
                 annotationActionContainer = container
                 annotationActionHostingController = hostingController
+                annotationActionSnapshot = annotation
             }
             let fittingSize = hostingController.sizeThatFits(
                 in: CGSize(width: 320, height: 80)
@@ -1371,7 +1532,52 @@ extension PDFKitView {
 #endif
         }
 
+        private func updatePendingFreeTextActionBar(
+            above editorBounds: CGRect,
+            in pdfView: PDFView
+        ) {
+            guard let pendingFreeTextPlacement else {
+                removeAnnotationActionBar()
+                return
+            }
+#if os(macOS)
+            let text = inlineTextField?.string ?? ""
+#else
+            let text = inlineTextField?.text ?? ""
+#endif
+            let snapshot = PDFAnnotationSnapshot(
+                reference: PDFAnnotationReference(
+                    pageIndex: pendingFreeTextPlacement.pageIndex,
+                    annotationIndex: -1
+                ),
+                kind: .freeText,
+                bounds: pendingFreeTextPlacement.bounds,
+                contents: text,
+                color: pendingFreeTextPlacement.color,
+                fontColor: pendingFreeTextPlacement.color,
+                fontSize: pendingFreeTextPlacement.fontSize,
+                lineWidth: 0,
+                geometryPointCount: 0,
+                hasAppearanceStream: false
+            )
+            updateAnnotationActionBar(
+                for: snapshot,
+                above: editorBounds,
+                in: pdfView,
+                onChangeColor: { [weak self] color in
+                    self?.updatePendingFreeTextColor(color)
+                },
+                onChangeFontSize: { [weak self] fontSize in
+                    self?.updatePendingFreeTextFontSize(fontSize)
+                },
+                onDelete: { [weak self] in
+                    self?.finishInlineTextEditing(commit: false)
+                }
+            )
+        }
+
         private func removeAnnotationActionBar() {
+            annotationActionSnapshot = nil
 #if os(macOS)
             annotationActionContainer?.removeFromSuperview()
             annotationActionContainer = nil
@@ -1411,6 +1617,7 @@ extension PDFKitView {
                     gesture.isEnabled = false
                 } else if gesture is UITapGestureRecognizer {
                     gesture.isEnabled = commentPlacementEnabled ||
+                        freeTextPlacementEnabled ||
                         signaturePlacementEnabled ||
                         objectEditingEnabled || annotationEditingEnabled
                 } else {
@@ -1616,6 +1823,14 @@ extension PDFKitView {
             pendingTextActivation = nil
             let pageIndex = document.index(for: page)
             let pagePoint = pdfView.convert(viewPoint, to: page)
+            if freeTextPlacementEnabled {
+                beginFreeTextPlacement(
+                    pageIndex: pageIndex,
+                    pagePoint: pagePoint,
+                    on: page
+                )
+                return
+            }
             if commentPlacementEnabled {
                 selectedObject.wrappedValue = nil
                 selectedAnnotation.wrappedValue = nil
@@ -1691,6 +1906,7 @@ extension PDFKitView {
         private func activateTarget(at viewPoint: CGPoint) {
             guard prepareForCanvasInteraction(at: viewPoint),
                   !commentPlacementEnabled,
+                  !freeTextPlacementEnabled,
                   !signaturePlacementEnabled,
                   let pdfView,
                   let page = pdfView.page(for: viewPoint, nearest: false),
@@ -1835,6 +2051,58 @@ extension PDFKitView {
             } else {
                 onOpenObject(resolvedObject)
             }
+        }
+
+        private func beginFreeTextPlacement(
+            pageIndex: Int,
+            pagePoint: CGPoint,
+            on page: PDFPage
+        ) {
+            guard freeTextPlacementEnabled else { return }
+            finishInlineTextEditing(commit: true)
+            selectedObject.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            pdfView?.clearSelection()
+            selection.wrappedValue = nil
+            selectedPageIndex.wrappedValue = pageIndex
+
+            let pageBounds = page.bounds(for: .cropBox).standardized
+            let size = CGSize(
+                width: min(72, pageBounds.width),
+                height: min(28, pageBounds.height)
+            )
+            let maximumX = max(pageBounds.minX, pageBounds.maxX - size.width)
+            let maximumY = max(pageBounds.minY, pageBounds.maxY - size.height)
+            let bounds = CGRect(
+                x: min(max(pagePoint.x, pageBounds.minX), maximumX),
+                y: min(max(pagePoint.y - size.height, pageBounds.minY), maximumY),
+                width: size.width,
+                height: size.height
+            )
+            guard let frame = inlineTextEditorFrame(
+                pageIndex: pageIndex,
+                bounds: bounds
+            ) else { return }
+
+            pendingFreeTextPlacement = PendingFreeTextPlacement(
+                pageIndex: pageIndex,
+                minimumBounds: bounds,
+                bounds: bounds,
+                color: .black,
+                fontSize: 11
+            )
+            beginInlineTextEditing(
+                text: "",
+                color: PDFObjectColor(red: 0, green: 0, blue: 0, alpha: 255),
+                fontName: nil,
+                displayFontSize: 11 * (pdfView?.scaleFactor ?? 1),
+                fontData: nil,
+                frame: frame,
+                maskFrame: nil,
+                initialStyle: [],
+                object: nil,
+                annotation: nil
+            )
         }
 
         private func resolvePendingTextActivation() {
@@ -2131,6 +2399,10 @@ extension PDFKitView {
         private func prepareForCanvasInteraction(at viewPoint: CGPoint) -> Bool {
             guard inlineTextField != nil else { return true }
             if inlineEditorContains(viewPoint) { return false }
+            if pendingFreeTextPlacement != nil {
+                finishInlineTextEditing(commit: true)
+                return false
+            }
             finishInlineTextEditing(commit: true)
             return true
         }
@@ -2223,6 +2495,10 @@ extension PDFKitView {
             inlineEditingObject = object
             inlineEditingAnnotation = annotation
             inlineEditingPDFStyle = initialStyle
+            let isFreeTextEditor = annotation != nil || pendingFreeTextPlacement != nil
+            if let annotation {
+                hideFreeTextAnnotationForEditing(annotation)
+            }
 
 #if os(macOS)
             stagedTextViews[object?.id ?? ""]?.isHidden = true
@@ -2234,10 +2510,17 @@ extension PDFKitView {
             let field = PDFInlineTextView(frame: frame)
             field.allowsUndo = false
             field.string = text
-            field.drawsBackground = maskFrame == nil
-            field.backgroundColor = maskFrame == nil
+            field.drawsBackground = maskFrame == nil && !isFreeTextEditor
+            field.backgroundColor = maskFrame == nil && !isFreeTextEditor
                 ? NSColor.white.withAlphaComponent(0.98)
                 : .clear
+            if isFreeTextEditor {
+                field.wantsLayer = true
+                field.layer?.borderWidth = 1
+                field.layer?.borderColor = NSColor.controlAccentColor
+                    .withAlphaComponent(0.75).cgColor
+                field.layer?.cornerRadius = 3
+            }
             let resolvedColor = objectTextColor(color)
             let resolvedStyle: InlineTextStyle
             if let object, let stagedEdit = stagedTextByObjectID[object.id] {
@@ -2266,7 +2549,7 @@ extension PDFKitView {
             field.isRichText = false
             field.importsGraphics = false
             field.allowsUndo = true
-            field.textContainerInset = .zero
+            field.textContainerInset = NSSize(width: 6, height: 4)
             field.textContainer?.lineFragmentPadding = 0
             field.isHorizontallyResizable = true
             field.isVerticallyResizable = true
@@ -2286,13 +2569,28 @@ extension PDFKitView {
             adjustInlineEditorWidth(field)
             adjustInlineEditorHeight(field)
             alignInlineTextBaseline(field, object: object, annotation: annotation)
+            resizeFreeTextEditorToFit()
             focusInlineTextField(field, in: pdfView, attempt: 0)
 #elseif os(iOS)
-            let field = UITextField(frame: frame)
+            let field = UITextView(frame: frame)
             field.text = text
-            field.borderStyle = .none
-            field.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.96)
+            field.backgroundColor = isFreeTextEditor
+                ? .clear
+                : UIColor.systemBackground.withAlphaComponent(0.96)
+            if isFreeTextEditor {
+                field.layer.borderWidth = 1
+                field.layer.borderColor = UIColor.systemBlue
+                    .withAlphaComponent(0.75).cgColor
+                field.layer.cornerRadius = 3
+            }
             field.textColor = objectTextColor(color)
+            field.textContainerInset = UIEdgeInsets(
+                top: 4,
+                left: 6,
+                bottom: 4,
+                right: 6
+            )
+            field.textContainer.lineFragmentPadding = 0
             let baseFont = objectFont(
                 named: fontName,
                 displayPointSize: displayFontSize,
@@ -2301,14 +2599,13 @@ extension PDFKitView {
             )
             inlineEditingBaseFont = baseFont
             field.font = styledFont(baseFont, style: inlineEditingPDFStyle)
-            field.returnKeyType = .done
-            field.clearButtonMode = .whileEditing
             field.delegate = self
-            if object != nil || pendingTextActivation != nil {
-                field.inputAccessoryView = makeInlineStyleToolbar()
-            }
+            field.inputAccessoryView = makeInlineStyleToolbar(
+                showsStyleControls: object != nil || pendingTextActivation != nil
+            )
             inlineTextField = field
             pdfView.addSubview(field)
+            resizeFreeTextEditorToFit()
             field.becomeFirstResponder()
             if let range = field.textRange(
                 from: field.beginningOfDocument,
@@ -2320,12 +2617,31 @@ extension PDFKitView {
             refreshOverlay()
         }
 
-        private func finishInlineTextEditing(commit: Bool) {
+        private func finishInlineTextEditing(
+            commit: Bool,
+            notifiesFreeTextCancellation: Bool = true
+        ) {
             guard !isFinishingInlineTextEditing,
                   let field = inlineTextField else { return }
             let object = inlineEditingObject
             let annotation = inlineEditingAnnotation
-            guard object != nil || annotation != nil || pendingTextActivation != nil else { return }
+            let freeTextPlacement = pendingFreeTextPlacement
+            guard object != nil || annotation != nil || pendingTextActivation != nil ||
+                    freeTextPlacement != nil else { return }
+            let editedAnnotationBounds: CGRect?
+            if let annotation,
+               let pdfView,
+               let page = pdfView.document?.page(
+                   at: annotation.reference.pageIndex
+               ) {
+                editedAnnotationBounds = pdfView.convert(
+                    field.frame,
+                    to: page
+                ).standardized
+            } else {
+                editedAnnotationBounds = nil
+            }
+            restoreHiddenFreeTextAnnotation()
             isFinishingInlineTextEditing = true
 #if os(macOS)
             let text = field.string
@@ -2354,8 +2670,28 @@ extension PDFKitView {
             inlineTextField = nil
             inlineEditingObject = nil
             inlineEditingAnnotation = nil
+            pendingFreeTextPlacement = nil
             inlineEditingPDFStyle = []
             isFinishingInlineTextEditing = false
+            if let freeTextPlacement {
+#if os(macOS)
+                removeInlineTextEditingViews(field, mask: mask)
+#endif
+                let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if commit, !trimmedText.isEmpty {
+                    onPlaceFreeText(
+                        freeTextPlacement.pageIndex,
+                        freeTextPlacement.bounds,
+                        text,
+                        freeTextPlacement.color,
+                        freeTextPlacement.fontSize
+                    )
+                } else if notifiesFreeTextCancellation {
+                    onCancelFreeTextPlacement()
+                }
+                refreshOverlay()
+                return
+            }
             if object == nil, annotation == nil {
 #if os(macOS)
                 removeInlineTextEditingViews(field, mask: mask)
@@ -2410,7 +2746,11 @@ extension PDFKitView {
 #endif
             }
             if commit, let annotation, text != annotation.contents {
-                onReplaceAnnotationText(annotation, text)
+                onReplaceAnnotationText(
+                    annotation,
+                    text,
+                    editedAnnotationBounds ?? annotation.bounds
+                )
             }
         }
 
@@ -2422,6 +2762,11 @@ extension PDFKitView {
                 frame = inlineTextEditorFrame(
                     pageIndex: annotation.reference.pageIndex,
                     bounds: annotation.bounds
+                )
+            } else if let pendingFreeTextPlacement {
+                frame = inlineTextEditorFrame(
+                    pageIndex: pendingFreeTextPlacement.pageIndex,
+                    bounds: pendingFreeTextPlacement.bounds
                 )
             } else if let pendingTextActivation,
                       let page = pdfView?.document?.page(
@@ -2452,6 +2797,7 @@ extension PDFKitView {
                     annotation: inlineEditingAnnotation
                 )
                 positionInlineStyleBar(above: inlineTextField.frame)
+                resizeFreeTextEditorToFit()
                 return
             }
 #endif
@@ -2461,6 +2807,198 @@ extension PDFKitView {
                     abs(current.width - frame.width) > 0.5 ||
                     abs(current.height - frame.height) > 0.5 else { return }
             inlineTextField.frame = frame
+            resizeFreeTextEditorToFit()
+        }
+
+        private func resizeFreeTextEditorToFit() {
+            guard inlineEditingObject == nil,
+                  pendingTextActivation == nil,
+                  let pdfView,
+                  let field = inlineTextField else { return }
+
+            let pageIndex: Int
+            let minimumBounds: CGRect
+            if let pendingFreeTextPlacement {
+                pageIndex = pendingFreeTextPlacement.pageIndex
+                minimumBounds = pendingFreeTextPlacement.minimumBounds
+            } else if let annotation = inlineEditingAnnotation {
+                pageIndex = annotation.reference.pageIndex
+                minimumBounds = annotation.bounds
+            } else {
+                return
+            }
+            guard let page = pdfView.document?.page(at: pageIndex) else { return }
+
+#if os(macOS)
+            let text = field.string
+            guard let font = field.font else { return }
+            let lineHeight = ceil(
+                field.layoutManager?.defaultLineHeight(for: font) ??
+                    font.ascender - font.descender + font.leading
+            )
+#else
+            let text = field.text ?? ""
+            guard let font = field.font else { return }
+            let lineHeight = ceil(font.lineHeight)
+#endif
+            let lines = text.components(separatedBy: "\n")
+            let attributes: [NSAttributedString.Key: Any] = [.font: font]
+            let widestLine = lines.reduce(CGFloat.zero) { width, line in
+                max(width, (line as NSString).size(withAttributes: attributes).width)
+            }
+
+            let minimumFrame = pdfView.convert(minimumBounds, from: page).standardized
+            let pageFrame = pdfView.convert(
+                page.bounds(for: .cropBox),
+                from: page
+            ).standardized
+            let width = min(
+                max(minimumFrame.width, ceil(widestLine) + 12),
+                pageFrame.width
+            )
+            let renderedHeight = (text as NSString).boundingRect(
+                with: CGSize(
+                    width: max(width - 12, 1),
+                    height: CGFloat.greatestFiniteMagnitude
+                ),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes
+            ).height
+            let measuredHeight = max(
+                lineHeight * CGFloat(max(lines.count, 1)),
+                ceil(renderedHeight)
+            ) + 8
+            let height = min(
+                max(minimumFrame.height, measuredHeight),
+                pageFrame.height
+            )
+            let origin = CGPoint(
+                x: min(
+                    max(minimumFrame.minX, pageFrame.minX),
+                    max(pageFrame.minX, pageFrame.maxX - width)
+                ),
+                y: min(
+                    max(minimumFrame.minY, pageFrame.minY),
+                    max(pageFrame.minY, pageFrame.maxY - height)
+                )
+            )
+            let fittedFrame = CGRect(
+                origin: origin,
+                size: CGSize(width: width, height: height)
+            )
+            field.frame = fittedFrame
+            let contentHeight = max(
+                lineHeight * CGFloat(max(lines.count, 1)),
+                ceil(renderedHeight)
+            )
+            let verticalInset = max(4, (height - contentHeight) / 2)
+#if os(macOS)
+            field.textContainerInset = NSSize(width: 6, height: verticalInset)
+#else
+            field.textContainerInset = UIEdgeInsets(
+                top: verticalInset,
+                left: 6,
+                bottom: verticalInset,
+                right: 6
+            )
+#endif
+
+            if var pendingFreeTextPlacement {
+                pendingFreeTextPlacement.bounds = pdfView.convert(
+                    fittedFrame,
+                    to: page
+                ).standardized
+                self.pendingFreeTextPlacement = pendingFreeTextPlacement
+                updatePendingFreeTextActionBar(
+                    above: fittedFrame,
+                    in: pdfView
+                )
+            }
+        }
+
+        private func updatePendingFreeTextColor(_ color: PDFAnnotationColor) {
+            guard var pendingFreeTextPlacement,
+                  let field = inlineTextField else { return }
+            pendingFreeTextPlacement.color = color
+            self.pendingFreeTextPlacement = pendingFreeTextPlacement
+#if os(macOS)
+            field.textColor = NSColor(
+                calibratedRed: color.red,
+                green: color.green,
+                blue: color.blue,
+                alpha: color.alpha
+            )
+            if let pdfView {
+                focusInlineTextField(field, in: pdfView, attempt: 0)
+            }
+#else
+            field.textColor = UIColor(
+                red: color.red,
+                green: color.green,
+                blue: color.blue,
+                alpha: color.alpha
+            )
+            field.becomeFirstResponder()
+#endif
+            refreshOverlay()
+        }
+
+        private func updatePendingFreeTextFontSize(_ fontSize: CGFloat) {
+            guard var pendingFreeTextPlacement,
+                  let pdfView,
+                  let field = inlineTextField else { return }
+            pendingFreeTextPlacement.fontSize = fontSize
+            self.pendingFreeTextPlacement = pendingFreeTextPlacement
+            let displayFontSize = fontSize * max(pdfView.scaleFactor, 0.001)
+#if os(macOS)
+            field.font = NSFont.systemFont(ofSize: displayFontSize)
+#else
+            let font = UIFont.systemFont(ofSize: displayFontSize)
+            inlineEditingBaseFont = font
+            field.font = font
+#endif
+            resizeFreeTextEditorToFit()
+#if os(macOS)
+            focusInlineTextField(field, in: pdfView, attempt: 0)
+#else
+            field.becomeFirstResponder()
+#endif
+            refreshOverlay()
+        }
+
+        private func hideFreeTextAnnotationForEditing(
+            _ snapshot: PDFAnnotationSnapshot
+        ) {
+            restoreHiddenFreeTextAnnotation()
+            guard let pdfView,
+                  let page = pdfView.document?.page(at: snapshot.reference.pageIndex),
+                  page.annotations.indices.contains(snapshot.reference.annotationIndex) else {
+                return
+            }
+            let annotation = page.annotations[snapshot.reference.annotationIndex]
+            guard annotation.type == "FreeText" else { return }
+            hiddenFreeTextAnnotation = HiddenFreeTextAnnotation(
+                annotation: annotation,
+                shouldDisplay: annotation.shouldDisplay
+            )
+            annotation.shouldDisplay = false
+            refreshPDFViewDisplay()
+        }
+
+        private func restoreHiddenFreeTextAnnotation() {
+            guard let hiddenFreeTextAnnotation else { return }
+            self.hiddenFreeTextAnnotation = nil
+            hiddenFreeTextAnnotation.annotation.shouldDisplay =
+                hiddenFreeTextAnnotation.shouldDisplay
+            refreshPDFViewDisplay()
+        }
+
+        private func refreshPDFViewDisplay() {
+#if os(macOS)
+            pdfView?.needsDisplay = true
+#else
+            pdfView?.setNeedsDisplay()
+#endif
         }
 
         private func inlineTextEditorFrame(
@@ -3201,7 +3739,7 @@ extension PDFKitView {
             )
         }
 #elseif os(iOS)
-        private func makeInlineStyleToolbar() -> UIToolbar {
+        private func makeInlineStyleToolbar(showsStyleControls: Bool) -> UIToolbar {
             let toolbar = UIToolbar()
             toolbar.sizeToFit()
             let boldButton = UIBarButtonItem(
@@ -3218,9 +3756,11 @@ extension PDFKitView {
             )
             inlineBoldButton = boldButton
             inlineItalicButton = italicButton
-            toolbar.items = [
-                boldButton,
-                italicButton,
+            var items: [UIBarButtonItem] = []
+            if showsStyleControls {
+                items.append(contentsOf: [boldButton, italicButton])
+            }
+            items.append(contentsOf: [
                 UIBarButtonItem(
                     barButtonSystemItem: .flexibleSpace,
                     target: nil,
@@ -3232,7 +3772,8 @@ extension PDFKitView {
                     target: self,
                     action: #selector(finishInlineEditingFromToolbar)
                 ),
-            ]
+            ])
+            toolbar.items = items
             updateInlineStyleButtonStates()
             return toolbar
         }
@@ -3323,7 +3864,7 @@ extension PDFKitView {
 
         private func applyResolvedTextStyle(
             _ object: PDFPageObjectSnapshot,
-            to field: UITextField,
+            to field: UITextView,
             preservingCurrentPDFStyle: Bool
         ) {
             field.textColor = objectTextColor(object.fillColor)
@@ -3339,7 +3880,9 @@ extension PDFKitView {
             inlineEditingBaseFont = baseFont
             field.font = styledFont(baseFont, style: inlineEditingPDFStyle)
             if field.inputAccessoryView == nil {
-                field.inputAccessoryView = makeInlineStyleToolbar()
+                field.inputAccessoryView = makeInlineStyleToolbar(
+                    showsStyleControls: true
+                )
                 field.reloadInputViews()
             }
         }
@@ -4052,6 +4595,9 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
         if commentPlacementEnabled {
             return true
         }
+        if freeTextPlacementEnabled {
+            return true
+        }
         if signaturePlacementEnabled {
             return true
         }
@@ -4104,6 +4650,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
         if event.clickCount >= 2,
            !commentPlacementEnabled,
+           !freeTextPlacementEnabled,
            !signaturePlacementEnabled {
             let hasEditableAnnotation = annotationEditingEnabled &&
                 annotation(at: pagePoint, pageIndex: pageIndex) != nil
@@ -4117,7 +4664,8 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
             }
         }
 
-        if commentPlacementEnabled || signaturePlacementEnabled {
+        if commentPlacementEnabled || freeTextPlacementEnabled ||
+            signaturePlacementEnabled {
             selectTarget(at: viewPoint)
             return true
         }
@@ -4262,10 +4810,12 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
             object: inlineEditingObject,
             annotation: inlineEditingAnnotation
         )
+        resizeFreeTextEditorToFit()
     }
 
     func textDidEndEditing(_ notification: Notification) {
         guard inlineEditorDidGainFocus else { return }
+        if pendingFreeTextPlacement != nil { return }
         finishInlineTextEditing(commit: true)
     }
 
@@ -4277,13 +4827,18 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
             finishInlineTextEditing(commit: false)
             return true
         }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)),
+           NSApp.currentEvent?.modifierFlags.contains(.command) == true {
+            finishInlineTextEditing(commit: true)
+            return true
+        }
         return false
     }
 }
 #endif
 
 #if os(iOS)
-extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelegate {
+extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegate {
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldReceive touch: UITouch
@@ -4308,7 +4863,8 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelega
         }
         if freehandDrawingEnabled { return false }
         if gestureRecognizer is UITapGestureRecognizer {
-            return commentPlacementEnabled || signaturePlacementEnabled ||
+            return commentPlacementEnabled || freeTextPlacementEnabled ||
+                signaturePlacementEnabled ||
                 objectEditingEnabled || annotationEditingEnabled
         }
         if gestureRecognizer is UIRotationGestureRecognizer,
@@ -4355,13 +4911,14 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextFieldDelega
             otherGestureRecognizer is UITapGestureRecognizer
     }
 
-    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+    func textViewDidEndEditing(_ textView: UITextView) {
+        if pendingFreeTextPlacement != nil { return }
         finishInlineTextEditing(commit: true)
-        return true
     }
 
-    func textFieldDidEndEditing(_ textField: UITextField) {
-        finishInlineTextEditing(commit: true)
+    func textViewDidChange(_ textView: UITextView) {
+        guard inlineTextField === textView else { return }
+        resizeFreeTextEditorToFit()
     }
 }
 #endif

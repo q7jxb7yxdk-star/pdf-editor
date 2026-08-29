@@ -16,6 +16,7 @@ enum PDFToolAction {
     case addSignature
     case addCheckmark
     case addCrossmark
+    case fillFormFields
     case protectPDF
     case removePassword
 }
@@ -23,7 +24,7 @@ enum PDFToolAction {
 extension PDFToolAction {
     var isESignAction: Bool {
         switch self {
-        case .addSignature, .addCheckmark, .addCrossmark: true
+        case .addSignature, .addCheckmark, .addCrossmark, .fillFormFields: true
         default: false
         }
     }
@@ -102,6 +103,11 @@ struct PDFToolSidebar: View {
                     }
 
                     section("E-sign") {
+                        tool(
+                            "Fill in form fields",
+                            icon: "character.cursor.ibeam",
+                            action: .fillFormFields
+                        )
                         tool("Add a signature", icon: "signature", action: .addSignature)
                         tool("Add a checkmark", icon: "checkmark", action: .addCheckmark)
                         tool("Add a crossmark", icon: "xmark", action: .addCrossmark)
@@ -1430,12 +1436,13 @@ private struct AnnotationEditorRow: View {
         _contents = State(initialValue: annotation.contents)
         _color = State(initialValue: annotation.color)
         _opacity = State(initialValue: Double(annotation.color.alpha))
-        _fontSize = State(initialValue: Double(annotation.fontSize ?? 16))
+        _fontSize = State(initialValue: Double(annotation.fontSize ?? 11))
         _lineWidth = State(initialValue: Double(annotation.lineWidth))
     }
 
     private var supportsStyleChanges: Bool {
-        !annotation.hasAppearanceStream || annotation.kind == .note
+        !annotation.hasAppearanceStream || annotation.kind == .note ||
+            annotation.kind == .freeText
     }
 
     var body: some View {
