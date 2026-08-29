@@ -1392,6 +1392,7 @@ struct ContentView: View {
     }
 
     private func unlockDocument() {
+        guard !password.isEmpty else { return }
         do {
             try document.unlock(withPassword: password)
             password = ""
@@ -1570,6 +1571,10 @@ struct ContentView: View {
 
     private func loadCanvasObjects() {
         pageObjectLoadTask?.cancel()
+        guard !document.isLocked else {
+            pageObjects = []
+            return
+        }
         guard let index = selectedPageIndex else {
             pageObjects = []
             return
