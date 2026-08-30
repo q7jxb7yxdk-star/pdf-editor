@@ -798,6 +798,17 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var adaptiveToolbar: some ToolbarContent {
+#if os(macOS)
+        ToolbarItem(placement: .navigation) {
+            Button(action: openDocument) {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.plain)
+            .help("Open")
+            .accessibilityLabel("Open")
+        }
+        .sharedBackgroundVisibility(.hidden)
+#endif
         ToolbarItem(placement: .navigation) {
             Button(action: saveDocument) {
                 Image(systemName: "square.and.arrow.down")
@@ -867,6 +878,12 @@ struct ContentView: View {
         }
         .sharedBackgroundVisibility(.hidden)
     }
+
+#if os(macOS)
+    private func openDocument() {
+        NSDocumentController.shared.openDocument(nil)
+    }
+#endif
 
     private func toggleToolPanel() {
         let willShow = !showsToolPanel
