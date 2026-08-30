@@ -231,6 +231,9 @@ struct ContentView: View {
     @State private var imageReplacementTarget: PDFPageObjectSnapshot?
     @State private var showsObjectInspector = false
     @StateObject private var signatureLibraryStore = SignatureLibraryStore()
+#if os(macOS)
+    @StateObject private var recentDocuments = RecentPDFDocuments()
+#endif
     @State private var showsSignatureLibrary = false
     @State private var selectedESignPlacement: ESignPlacement?
     @State private var freeTextPlacementEnabled = false
@@ -251,7 +254,7 @@ struct ContentView: View {
     @State private var freehandDrawingEnabled = false
     @State private var pendingFreehandSelectionReference: PDFAnnotationReference?
     @State private var pendingCommentPlacement: PDFCommentPlacement?
-    @State private var showsToolPanel = false
+    @State private var showsToolPanel = true
     @State private var showsPagePanel = false
     @State private var usesInlinePanels = false
 
@@ -795,6 +798,23 @@ struct ContentView: View {
         }
     }
 
+#if os(macOS)
+    private var toolSidebar: some View {
+        PDFToolSidebar(
+            pageCount: document.pageCount,
+            hasSelectedPage: selectedPageIndex != nil,
+            isEncrypted: document.isEncrypted,
+            isLocked: document.isLocked,
+            removesPasswordProtectionOnSave:
+                document.removesPasswordProtectionOnSave,
+            recentDocumentURLs: Array(recentDocuments.urls.prefix(5)),
+            onOpenRecentDocument: recentDocuments.open,
+            onClearRecentDocuments: recentDocuments.clear,
+            onRefreshRecentDocuments: recentDocuments.refresh,
+            onAction: handleToolAction
+        )
+    }
+#else
     private var toolSidebar: some View {
         PDFToolSidebar(
             pageCount: document.pageCount,
@@ -806,6 +826,7 @@ struct ContentView: View {
             onAction: handleToolAction
         )
     }
+#endif
 
     private var rightPanel: some View {
         PDFRightPanel(

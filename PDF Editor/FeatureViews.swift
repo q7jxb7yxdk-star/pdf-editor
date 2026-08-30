@@ -1,6 +1,12 @@
 import PDFKit
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+import Combine
+import QuickLookThumbnailing
+#endif
+
 enum PDFToolAction {
     case addComment
     case editComments
@@ -32,19 +38,29 @@ extension PDFToolAction {
 
 struct PDFToolSidebar: View {
     private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
-    private static let sectionTitles: Set<String> = [
-        "Edit text",
-        "Organize a PDF",
-        "Export PDF to",
-        "E-sign",
-        "Secure PDF"
-    ]
+    private static var sectionTitles: Set<String> {
+        var titles: Set<String> = [
+            "Edit text",
+            "Organize a PDF",
+            "Export PDF to",
+            "E-sign",
+            "Secure PDF"
+        ]
+#if os(macOS)
+        titles.insert("Recent files")
+#endif
+        return titles
+    }
 
     let pageCount: Int
     let hasSelectedPage: Bool
     let isEncrypted: Bool
     let isLocked: Bool
     let removesPasswordProtectionOnSave: Bool
+    let recentDocumentURLs: [URL]
+    let onOpenRecentDocument: (URL) -> Void
+    let onClearRecentDocuments: () -> Void
+    let onRefreshRecentDocuments: () -> Void
     let onAction: (PDFToolAction) -> Void
 
     @State private var expandedSections: Set<String>
@@ -55,6 +71,10 @@ struct PDFToolSidebar: View {
         isEncrypted: Bool,
         isLocked: Bool,
         removesPasswordProtectionOnSave: Bool,
+        recentDocumentURLs: [URL] = [],
+        onOpenRecentDocument: @escaping (URL) -> Void = { _ in },
+        onClearRecentDocuments: @escaping () -> Void = {},
+        onRefreshRecentDocuments: @escaping () -> Void = {},
         onAction: @escaping (PDFToolAction) -> Void
     ) {
         self.pageCount = pageCount
@@ -62,6 +82,10 @@ struct PDFToolSidebar: View {
         self.isEncrypted = isEncrypted
         self.isLocked = isLocked
         self.removesPasswordProtectionOnSave = removesPasswordProtectionOnSave
+        self.recentDocumentURLs = recentDocumentURLs
+        self.onOpenRecentDocument = onOpenRecentDocument
+        self.onClearRecentDocuments = onClearRecentDocuments
+        self.onRefreshRecentDocuments = onRefreshRecentDocuments
         self.onAction = onAction
         _expandedSections = State(initialValue: Self.loadExpandedSections())
     }
@@ -131,9 +155,37 @@ struct PDFToolSidebar: View {
                             )
                         }
                     }
+
+#if os(macOS)
+                    section("Recent files") {
+                        if recentDocumentURLs.isEmpty {
+                            sidebarMessage("No recent files", icon: "clock")
+                        } else {
+                            ForEach(recentDocumentURLs, id: \.self) { url in
+                                recentDocument(url)
+                            }
+                        }
+                        sidebarButton(
+                            "Clear recent files",
+                            icon: "trash",
+                            enabled: !recentDocumentURLs.isEmpty,
+                            action: onClearRecentDocuments
+                        )
+                    }
+#endif
                 }
                 .padding(.bottom, 18)
             }
+#if os(macOS)
+            .onAppear(perform: onRefreshRecentDocuments)
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: NSWindow.didBecomeKeyNotification
+                )
+            ) { _ in
+                onRefreshRecentDocuments()
+            }
+#endif
         }
         .background(.background)
     }
@@ -189,6 +241,46 @@ struct PDFToolSidebar: View {
         .disabled(!enabled)
     }
 
+#if os(macOS)
+    private func recentDocument(_ url: URL) -> some View {
+        Button { onOpenRecentDocument(url) } label: {
+            VStack(spacing: 8) {
+                RecentDocumentThumbnail(url: url)
+
+                Text(url.lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 140)
+            }
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .help(url.path(percentEncoded: false))
+    }
+
+    private func sidebarButton(
+        _ title: String,
+        icon: String,
+        enabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ToolRowLabel(title: title, icon: icon)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private func sidebarMessage(_ title: String, icon: String) -> some View {
+        ToolRowLabel(title: title, icon: icon)
+            .foregroundStyle(.secondary)
+    }
+#endif
+
     private func menuTool<Content: View>(
         _ title: String,
         icon: String,
@@ -201,6 +293,85 @@ struct PDFToolSidebar: View {
         .disabled(!hasSelectedPage)
     }
 }
+
+#if os(macOS)
+@MainActor
+private enum RecentDocumentThumbnailCache {
+    static let images = NSCache<NSURL, NSImage>()
+}
+
+private struct RecentDocumentThumbnail: View {
+    let url: URL
+
+    @State private var image: NSImage?
+    @State private var request: QLThumbnailGenerator.Request?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "doc.richtext")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 140, maxHeight: 180)
+        .aspectRatio(7 / 9, contentMode: .fit)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 4))
+        .overlay {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 1.5, y: 1)
+        .onAppear(perform: loadThumbnail)
+        .onDisappear(perform: cancelThumbnailRequest)
+    }
+
+    private func loadThumbnail() {
+        if let cachedImage = RecentDocumentThumbnailCache.images.object(
+            forKey: url as NSURL
+        ) {
+            image = cachedImage
+            return
+        }
+
+        let didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 280, height: 360),
+            scale: NSScreen.main?.backingScaleFactor ?? 2,
+            representationTypes: .thumbnail
+        )
+        self.request = request
+
+        QLThumbnailGenerator.shared.generateBestRepresentation(
+            for: request
+        ) { representation, _ in
+            if didStartSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+            guard let thumbnailImage = representation?.nsImage else { return }
+            Task { @MainActor in
+                RecentDocumentThumbnailCache.images.setObject(
+                    thumbnailImage,
+                    forKey: url as NSURL
+                )
+                image = thumbnailImage
+                self.request = nil
+            }
+        }
+    }
+
+    private func cancelThumbnailRequest() {
+        guard let request else { return }
+        QLThumbnailGenerator.shared.cancel(request)
+        self.request = nil
+    }
+}
+#endif
 
 struct PDFProtectView: View {
     let onProtect: (String) -> Void

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 
 #if os(macOS)
@@ -78,6 +79,90 @@ extension FocusedValues {
 }
 
 #if os(macOS)
+@MainActor
+final class RecentPDFDocuments: ObservableObject {
+    @Published private(set) var urls: [URL] = []
+
+    init() {
+        refresh()
+    }
+
+    func refresh() {
+        let documentController = NSDocumentController.shared
+        let recentURLs = documentController.recentDocumentURLs
+        let existingURLs = recentURLs.filter { url in
+            !url.isFileURL || FileManager.default.fileExists(atPath: url.path)
+        }
+
+        if existingURLs.count != recentURLs.count {
+            documentController.clearRecentDocuments(nil)
+            for url in existingURLs.reversed() {
+                documentController.noteNewRecentDocumentURL(url)
+            }
+        }
+
+        urls = documentController.recentDocumentURLs
+    }
+
+    func open(_ url: URL) {
+        NSDocumentController.shared.openDocument(
+            withContentsOf: url,
+            display: true
+        ) { [weak self] _, _, error in
+            if let error {
+                NSApp.presentError(error)
+            }
+            self?.refresh()
+        }
+    }
+
+    func clear() {
+        NSDocumentController.shared.clearRecentDocuments(nil)
+        refresh()
+    }
+}
+
+private struct RecentPDFDocumentsMenu: View {
+    @StateObject private var recentDocuments = RecentPDFDocuments()
+
+    var body: some View {
+        Group {
+            if recentDocuments.urls.isEmpty {
+                Button("No Recent Documents") {}
+                    .disabled(true)
+            } else {
+                ForEach(recentDocuments.urls, id: \.self) { url in
+                    Button(url.lastPathComponent) {
+                        recentDocuments.open(url)
+                    }
+                    .help(url.path(percentEncoded: false))
+                }
+            }
+
+            Divider()
+
+            Button("Clear Menu") {
+                recentDocuments.clear()
+            }
+            .disabled(recentDocuments.urls.isEmpty)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSMenu.didBeginTrackingNotification
+            )
+        ) { _ in
+            recentDocuments.refresh()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSWindow.didBecomeKeyNotification
+            )
+        ) { _ in
+            recentDocuments.refresh()
+        }
+    }
+}
+
 struct VersionlessPDFDocumentCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -95,6 +180,10 @@ struct VersionlessPDFDocumentCommands: Commands {
                 NSDocumentController.shared.openDocument(nil)
             }
             .keyboardShortcut("o", modifiers: .command)
+
+            Menu("Open Recent") {
+                RecentPDFDocumentsMenu()
+            }
         }
 
         CommandGroup(replacing: .saveItem) {
