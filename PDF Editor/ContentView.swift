@@ -332,7 +332,7 @@ struct ContentView: View {
                 HStack(spacing: 0) {
                     if showsToolPanel {
                         toolSidebar
-                            .frame(width: 270)
+                            .frame(width: 200)
                         Divider()
                     }
                     if showsCommentList {
@@ -958,12 +958,10 @@ struct ContentView: View {
     }
 
     private func togglePagePanel() {
-        withAnimation {
-            showsPagePanel.toggle()
-            if showsPagePanel {
-                showsToolPanel = false
-                showsCommentList = false
-            }
+        showsPagePanel.toggle()
+        if showsPagePanel {
+            showsToolPanel = false
+            showsCommentList = false
         }
     }
 
