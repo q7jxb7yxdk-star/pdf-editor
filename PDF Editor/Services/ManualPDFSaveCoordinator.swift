@@ -1,6 +1,10 @@
 import Foundation
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 nonisolated enum ManualPDFSaveDestinationPolicy {
     static func updatesReferenceSnapshot(
         originalURL: URL?,
@@ -91,6 +95,11 @@ struct ManualPDFSaveCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(saveAsAction == nil)
+
+            Button("Close") {
+                (NSApp.keyWindow ?? NSApp.mainWindow)?.performClose(nil)
+            }
+            .keyboardShortcut("w", modifiers: .command)
         }
     }
 }
