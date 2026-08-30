@@ -256,6 +256,12 @@ struct ContentView: View {
     @State private var pendingCommentPlacement: PDFCommentPlacement?
     @State private var showsToolPanel = true
     @State private var showsPagePanel = false
+    @State private var showsBookmarkPanel = false
+    @State private var bookmarks: [PDFBookmarkSnapshot] = []
+    @State private var showsAddBookmarkPrompt = false
+    @State private var showsRenameBookmarkPrompt = false
+    @State private var bookmarkTitle = ""
+    @State private var bookmarkBeingRenamed: PDFBookmarkSnapshot?
     @State private var usesInlinePanels = false
 
     private let annotationService = PDFAnnotationService()
@@ -301,7 +307,15 @@ struct ContentView: View {
             .focusedValue(\.manualPDFSaveAction, saveDocument)
             .focusedValue(\.manualPDFSaveAsAction, saveDocumentAs)
             .task {
+                // A newly opened macOS document can be moved into a tab while
+                // this task is awaiting PDFium preparation. Load the outline
+                // first so cancellation during that transition cannot leave
+                // the Bookmark rows and their edit controls empty until the
+                // user switches tabs.
+                loadBookmarks()
                 await document.prepareEditingSessionForInteraction()
+                guard !Task.isCancelled else { return }
+                loadBookmarks()
             }
 #if os(macOS)
             .onAppear {
@@ -347,6 +361,11 @@ struct ContentView: View {
                         pageSidebar
                             .frame(width: 180)
                     }
+                    if showsBookmarkPanel {
+                        Divider()
+                        bookmarkSidebar
+                            .frame(width: 260)
+                    }
                     Divider()
                     rightPanel
                         .frame(width: 52)
@@ -362,6 +381,13 @@ struct ContentView: View {
                         pageSidebar
                             .frame(
                                 width: min(180, max(160, proxy.size.width * 0.45))
+                            )
+                    }
+                    if showsBookmarkPanel {
+                        Divider()
+                        bookmarkSidebar
+                            .frame(
+                                width: min(260, max(220, proxy.size.width * 0.55))
                             )
                     }
                     Divider()
@@ -421,6 +447,7 @@ struct ContentView: View {
             pageObjectCacheRevision = editorState.revision
             loadCanvasObjects()
             loadCanvasAnnotations()
+            loadBookmarks()
         }
         .onChange(of: editorState.annotationColorUpdate) { _, event in
             guard let event else { return }
@@ -479,6 +506,23 @@ struct ContentView: View {
                 .disabled(newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("Text will be added to the center of the current page. You can move or edit it from the PDF Objects panel.")
+        }
+        .alert("Add Bookmark", isPresented: $showsAddBookmarkPrompt) {
+            TextField("Bookmark name", text: $bookmarkTitle)
+            Button("Cancel", role: .cancel) { bookmarkTitle = "" }
+            Button("Add", action: addBookmark)
+                .disabled(bookmarkTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("The bookmark will point to the current page and be saved inside the PDF.")
+        }
+        .alert("Rename Bookmark", isPresented: $showsRenameBookmarkPrompt) {
+            TextField("Bookmark name", text: $bookmarkTitle)
+            Button("Cancel", role: .cancel) {
+                bookmarkTitle = ""
+                bookmarkBeingRenamed = nil
+            }
+            Button("Rename", action: renameBookmark)
+                .disabled(bookmarkTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .sheet(isPresented: $showsObjectInspector) {
             PageObjectInspectorView(
@@ -624,6 +668,18 @@ struct ContentView: View {
             onRotate: rotatePage,
             onDelete: deletePage,
             onClose: { showsPagePanel = false }
+        )
+    }
+
+    private var bookmarkSidebar: some View {
+        PDFBookmarksPanel(
+            bookmarks: bookmarks,
+            selectedPageIndex: selectedPageIndex,
+            onNavigate: { selectedPageIndex = $0 },
+            onAdd: beginAddingBookmark,
+            onRename: beginRenamingBookmark,
+            onDelete: deleteBookmark,
+            onClose: { showsBookmarkPanel = false }
         )
     }
 
@@ -834,7 +890,9 @@ struct ContentView: View {
             selectedPageIndex: $selectedPageIndex,
             pageCount: document.pageCount,
             isPagesPanelPresented: showsPagePanel,
+            isBookmarksPanelPresented: showsBookmarkPanel,
             onTogglePages: togglePagePanel,
+            onToggleBookmarks: toggleBookmarkPanel,
             onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
             onFullScreen: toggleFullScreen
         )
@@ -951,6 +1009,7 @@ struct ContentView: View {
         showsToolPanel = willShow
         if willShow {
             showsPagePanel = false
+            showsBookmarkPanel = false
         }
         if !showsToolPanel {
             showsCommentList = false
@@ -962,6 +1021,85 @@ struct ContentView: View {
         if showsPagePanel {
             showsToolPanel = false
             showsCommentList = false
+            showsBookmarkPanel = false
+        }
+    }
+
+    private func toggleBookmarkPanel() {
+        showsBookmarkPanel.toggle()
+        if showsBookmarkPanel {
+            showsToolPanel = false
+            showsCommentList = false
+            showsPagePanel = false
+            loadBookmarks()
+        }
+    }
+
+    private func loadBookmarks() {
+        bookmarks = document.bookmarkSnapshots()
+    }
+
+    private func beginAddingBookmark() {
+        guard let selectedPageIndex else { return }
+        bookmarkTitle = "Page \(selectedPageIndex + 1)"
+        showsAddBookmarkPrompt = true
+    }
+
+    private func addBookmark() {
+        guard let selectedPageIndex else { return }
+        do {
+            try document.addBookmark(
+                title: bookmarkTitle,
+                pageIndex: selectedPageIndex,
+                undoManager: undoManager
+            )
+            bookmarkTitle = ""
+            loadBookmarks()
+        } catch {
+            presentBookmarkError(error)
+        }
+    }
+
+    private func beginRenamingBookmark(_ bookmark: PDFBookmarkSnapshot) {
+        bookmarkBeingRenamed = bookmark
+        bookmarkTitle = bookmark.title
+        showsRenameBookmarkPrompt = true
+    }
+
+    private func renameBookmark() {
+        guard let bookmark = bookmarkBeingRenamed else { return }
+        do {
+            try document.renameBookmark(
+                at: bookmark.path,
+                title: bookmarkTitle,
+                undoManager: undoManager
+            )
+            bookmarkTitle = ""
+            bookmarkBeingRenamed = nil
+            loadBookmarks()
+        } catch {
+            presentBookmarkError(error)
+        }
+    }
+
+    private func deleteBookmark(_ bookmark: PDFBookmarkSnapshot) {
+        do {
+            try document.deleteBookmark(
+                at: bookmark.path,
+                undoManager: undoManager
+            )
+            loadBookmarks()
+        } catch {
+            presentBookmarkError(error)
+        }
+    }
+
+    private func presentBookmarkError(_ error: Error) {
+        if let editingError = error as? PDFEditingError,
+           editingError == .digitalSignatureConsentRequired {
+            showsSignatureWarning = true
+        } else {
+            present(error)
         }
     }
 
@@ -1813,6 +1951,7 @@ struct ContentView: View {
         pageObjects = cachedObjects ?? []
 
         pageObjectLoadTask = Task { @MainActor in
+            var isPrefetching = false
             do {
                 if cachedObjects == nil {
                     let objects = try await document.pageObjectsForDisplay(at: index)
@@ -1829,14 +1968,36 @@ struct ContentView: View {
                 let nextIndex = index + 1
                 guard nextIndex < document.pageCount,
                       pageObjectCache[nextIndex] == nil else { return }
+                isPrefetching = true
                 let prefetched = try await document.pageObjectsForDisplay(at: nextIndex)
                 try Task.checkCancellation()
                 guard editorState.revision == revision else { return }
                 pageObjectCache[nextIndex] = prefetched
             } catch is CancellationError {
                 return
+            } catch let error as PDFObjectEditingError
+                where error == .objectInspectionFailed {
+                guard !isPrefetching,
+                      selectedPageIndex == index,
+                      editorState.revision == revision else { return }
+                pageObjectCache[index] = []
+                pageObjects = []
+            } catch let error as PDFEditingError
+                where error == .invalidDocument {
+                // PDFKit can display some PDFs that PDFium cannot inspect. A
+                // passive canvas scan must not make the document appear to
+                // have failed to open; explicit object editing still reports
+                // the PDFium error through loadObjects().
+                guard !isPrefetching,
+                      selectedPageIndex == index,
+                      editorState.revision == revision else { return }
+                pageObjectCache[index] = []
+                pageObjects = []
             } catch {
-                guard selectedPageIndex == index,
+                // Failure while prefetching the next page is not an error on
+                // the page currently shown to the user.
+                guard !isPrefetching,
+                      selectedPageIndex == index,
                       editorState.revision == revision else { return }
                 present(error)
             }

@@ -15,7 +15,9 @@ nonisolated private struct PreparedPDFAnnotationSession: @unchecked Sendable {
 final class PDFEditorDocument: ReferenceFileDocument {
     typealias Snapshot = Data
 
-    private static let pdfiumAccessLock = NSRecursiveLock()
+    // Use the session layer's lock as well as its transaction boundary. A
+    // separate document lock would not protect UI queries or session deinit.
+    private static let pdfiumAccessLock = PDFiumAccess.lock
 
     final class EditorState: ObservableObject {
         @Published private(set) var revision = 0
@@ -83,6 +85,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private var presentationPassword: String?
     private var allowsInvalidatingDigitalSignatures = false
 
+    private let bookmarkService = PDFBookmarkService()
+    private let incrementalBookmarkWriter = PDFIncrementalBookmarkWriter()
+
     var pageCount: Int {
         pdfDocument.pageCount
     }
@@ -96,11 +101,53 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     var hasDigitalSignatures: Bool {
-        (editingSession as? any PDFObjectEditingSession)?.hasDigitalSignatures == true
+        if (editingSession as? any PDFObjectEditingSession)?.hasDigitalSignatures == true {
+            return true
+        }
+        // A signature widget may be an empty form field. /ByteRange identifies
+        // an applied signature without blocking otherwise unsigned forms.
+        return sourceData.range(of: Data("/ByteRange".utf8)) != nil
     }
 
     var requiresDigitalSignatureConsent: Bool {
         hasDigitalSignatures && !allowsInvalidatingDigitalSignatures
+    }
+
+    func bookmarkSnapshots() -> [PDFBookmarkSnapshot] {
+        bookmarkService.snapshots(in: pdfDocument)
+    }
+
+    func addBookmark(
+        title: String,
+        pageIndex: Int,
+        undoManager: UndoManager?
+    ) throws {
+        try mutateBookmarks(undoManager: undoManager, actionName: "Add Bookmark") {
+            try bookmarkService.addBookmark(
+                title: title,
+                pageIndex: pageIndex,
+                to: $0
+            )
+        }
+    }
+
+    func renameBookmark(
+        at path: PDFBookmarkPath,
+        title: String,
+        undoManager: UndoManager?
+    ) throws {
+        try mutateBookmarks(undoManager: undoManager, actionName: "Rename Bookmark") {
+            try bookmarkService.renameBookmark(at: path, title: title, in: $0)
+        }
+    }
+
+    func deleteBookmark(
+        at path: PDFBookmarkPath,
+        undoManager: UndoManager?
+    ) throws {
+        try mutateBookmarks(undoManager: undoManager, actionName: "Delete Bookmark") {
+            try bookmarkService.deleteBookmark(at: path, in: $0)
+        }
     }
 
     func authorizeDigitalSignatureInvalidation() {
@@ -415,6 +462,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 interactionPreparationTask = nil
             }
             if let editingSession { return editingSession }
+            guard interactionPreparationID == preparationID else {
+                throw PDFObjectEditingError.objectMutationFailed
+            }
             guard editorState.revision == preparationRevision else {
                 throw PDFObjectEditingError.objectMutationFailed
             }
@@ -743,7 +793,17 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let service = PDFAcroFormService()
         guard service.hasAcroFormFields(in: pdfDocument) else { return }
         let currentFields = service.snapshots(in: pdfDocument)
-        let previousData = try currentData()
+        let previousData: Data
+        if let editingSession {
+            previousData = try editingSession.dataRepresentation(
+                options: PDFExportOptions()
+            )
+        } else {
+            // PDFKit may support an interactive form even when PDFium rejects
+            // the source PDF. Compare against the last accepted bytes instead
+            // of forcing PDFium preparation or serializing the edited view.
+            previousData = sourceData
+        }
         guard let previousDocument = PDFDocument(data: previousData) else {
             throw PDFAcroFormError.serializationFailed
         }
@@ -758,24 +818,102 @@ final class PDFEditorDocument: ReferenceFileDocument {
             to: currentFields
         ) else { return }
 
-        try mutate(
-            undoManager: undoManager,
-            actionName: "填寫 PDF 表單",
-            refreshesPDFKitDocument: false
-        ) {
-            guard let presentationData = pdfDocument.dataRepresentation() else {
-                throw PDFAcroFormError.serializationFailed
-            }
-            let normalizedData = try normalizePresentationSecurity(presentationData)
-            let session = try PDFiumEditingEngine().makeSession(
-                data: normalizedData,
-                password: authorizedPassword
-            )
-            let verifiedData = try session.dataRepresentation(options: PDFExportOptions())
-            try service.verify(currentFields, in: verifiedData, password: authorizedPassword)
-            editingSession = session
-            sourceData = normalizedData
+        if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
+            throw PDFEditingError.digitalSignatureConsentRequired
         }
+        guard let presentationData = pdfDocument.dataRepresentation() else {
+            throw PDFAcroFormError.serializationFailed
+        }
+        let normalizedData = try normalizePresentationSecurity(presentationData)
+        try service.verify(
+            currentFields,
+            in: normalizedData,
+            password: authorizedPassword
+        )
+        guard let verifiedDocument = PDFDocument(data: normalizedData) else {
+            throw PDFAcroFormError.serializationFailed
+        }
+        if verifiedDocument.isLocked {
+            guard let authorizedPassword,
+                  verifiedDocument.unlock(withPassword: authorizedPassword) else {
+                throw PDFEditingError.invalidPassword
+            }
+        }
+        let expectedEncryption = previousDocument.isEncrypted
+        guard verifiedDocument.pageCount == previousDocument.pageCount,
+              verifiedDocument.isEncrypted == expectedEncryption,
+              bookmarkRoundTripPreservesPages(
+                  from: previousData,
+                  workingDocument: previousDocument,
+                  to: normalizedData,
+                  verifiedDocument: verifiedDocument,
+                  checksPageResources: !expectedEncryption
+              ) else {
+            throw PDFAcroFormError.serializationFailed
+        }
+
+        let verifiedSession = acroFormSessionIfRoundTripSafe(
+            data: normalizedData,
+            expectedFields: currentFields,
+            sourceDocument: verifiedDocument
+        )
+        invalidateInteractionPreparation()
+        editingSession = verifiedSession
+        sourceData = normalizedData
+        // The displayed PDFDocument already contains the committed field
+        // value. Replacing its identity here makes PDFView reload and resets
+        // the user's scroll position after every form edit.
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
+
+        if let undoManager {
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restorePDFKitCompatibleMutation(
+                    data: previousData,
+                    actionName: "填寫 PDF 表單",
+                    undoManager: undoManager
+                )
+            }
+            undoManager.setActionName("填寫 PDF 表單")
+        }
+    }
+
+    private func acroFormSessionIfRoundTripSafe(
+        data: Data,
+        expectedFields: [PDFAcroFormFieldSnapshot],
+        sourceDocument: PDFDocument
+    ) -> (any PDFEditingSession)? {
+        let service = PDFAcroFormService()
+        guard let session = try? PDFiumEditingEngine().makeSession(
+            data: data,
+            password: authorizedPassword
+        ),
+        let exportedData = try? session.dataRepresentation(
+            options: PDFExportOptions()
+        ),
+        let exportedDocument = PDFDocument(data: exportedData) else {
+            return nil
+        }
+        if exportedDocument.isLocked {
+            guard let authorizedPassword,
+                  exportedDocument.unlock(withPassword: authorizedPassword) else {
+                return nil
+            }
+        }
+        guard (try? service.verify(
+            expectedFields,
+            in: exportedData,
+            password: authorizedPassword
+        )) != nil,
+        bookmarkRoundTripPreservesPages(
+            from: data,
+            workingDocument: sourceDocument,
+            to: exportedData,
+            verifiedDocument: exportedDocument,
+            checksPageResources: !sourceDocument.isEncrypted
+        ) else {
+            return nil
+        }
+        return session
     }
 
     func annotationSnapshots(onPage pageIndex: Int) throws -> [PDFAnnotationSnapshot] {
@@ -1285,6 +1423,373 @@ final class PDFEditorDocument: ReferenceFileDocument {
         return result
     }
 
+    private func mutateBookmarks(
+        undoManager: UndoManager?,
+        actionName: String,
+        _ mutation: (PDFDocument) throws -> Void
+    ) throws {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let activeSession = editingSession ?? (try? prepareEditingSessionIfNeeded())
+        if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
+            throw PDFEditingError.digitalSignatureConsentRequired
+        }
+
+        let previousData: Data
+        if let activeSession {
+            do {
+                previousData = try activeSession.dataRepresentation(
+                    options: PDFExportOptions()
+                )
+            } catch PDFEditingError.invalidDocument {
+                throw PDFBookmarkMutationError.sourcePDFiumExportFailed
+            } catch PDFEditingError.exportFailed {
+                throw PDFBookmarkMutationError.sourcePDFiumExportFailed
+            }
+        } else {
+            // Bookmark updates are incremental and do not require PDFium to
+            // rewrite page content. Preserve the exact bytes accepted by
+            // PDFKit when PDFium cannot open an otherwise readable PDF.
+            previousData = sourceData
+        }
+        guard let workingDocument = PDFDocument(data: previousData) else {
+            throw PDFBookmarkMutationError.sourcePDFKitOpenFailed
+        }
+        let expectedPageCount = workingDocument.pageCount
+        let expectedEncryption = workingDocument.isEncrypted
+        guard !expectedEncryption else {
+            throw PDFIncrementalBookmarkWriterError.encryptedDocumentUnsupported
+        }
+        try unlockForBookmarkEditing(workingDocument)
+        try mutation(workingDocument)
+        let expectedBookmarks = bookmarkService.snapshots(in: workingDocument)
+        let formService = PDFAcroFormService()
+        let expectedFields = formService.snapshots(in: workingDocument)
+        let annotationService = PDFAnnotationService()
+        let expectedAnnotations = (0..<expectedPageCount).flatMap { pageIndex in
+            workingDocument.page(at: pageIndex).map {
+                annotationService.snapshots(on: $0, pageIndex: pageIndex)
+            } ?? []
+        }
+        var serializedData = try incrementalBookmarkWriter.write(
+            sourceData: previousData,
+            bookmarks: expectedBookmarks
+        )
+        var candidateStage = PDFBookmarkDataStage.incremental
+        func diagnostics(
+            for data: Data?,
+            stage: PDFBookmarkDataStage
+        ) -> PDFBookmarkDataDiagnostics {
+            PDFBookmarkDataDiagnostics(
+                stage: stage,
+                sourceByteCount: previousData.count,
+                candidateByteCount: data?.count,
+                expectedFieldCount: expectedFields.count
+            )
+        }
+
+        let verifiedSession: (any PDFEditingSession)?
+        do {
+            verifiedSession = try PDFiumEditingEngine().makeSession(
+                data: serializedData,
+                password: authorizedPassword
+            )
+        } catch PDFEditingError.invalidDocument {
+            if activeSession == nil {
+                verifiedSession = nil
+            } else {
+                let code = PDFiumEditingEngine().openErrorCode(
+                    data: serializedData,
+                    password: authorizedPassword
+                )
+                // Only retry a format rejection. Never relax verification for
+                // passwords, security handlers or other PDFium failures.
+                guard code == 3 else {
+                    throw PDFBookmarkMutationError.updatedPDFiumOpenFailed(
+                        code: code,
+                        diagnostics: diagnostics(for: serializedData, stage: .incremental)
+                    )
+                }
+                guard let rewrittenData = workingDocument.dataRepresentation() else {
+                    throw PDFBookmarkMutationError.fallbackRewriteFailed(
+                        diagnostics: diagnostics(for: nil, stage: .rewrite)
+                    )
+                }
+                do {
+                    verifiedSession = try PDFiumEditingEngine().makeSession(
+                        data: rewrittenData,
+                        password: authorizedPassword
+                    )
+                } catch {
+                    // Report the fallback's stage and error, not the rejected
+                    // incremental candidate's error code.
+                    let failure = PDFBookmarkMutationError.updatedPDFiumOpenFailed(
+                        code: PDFiumEditingEngine().openErrorCode(
+                            data: rewrittenData,
+                            password: authorizedPassword
+                        ),
+                        diagnostics: diagnostics(for: rewrittenData, stage: .rewrite)
+                    )
+#if DEBUG
+                    throw bookmarkFailureWithDebugSnapshots(
+                        failure,
+                        source: previousData,
+                        incremental: serializedData,
+                        rewritten: rewrittenData
+                    )
+#else
+                    throw failure
+#endif
+                }
+                serializedData = rewrittenData
+                candidateStage = .rewrite
+            }
+        } catch PDFEditingError.invalidPassword {
+            if activeSession == nil {
+                verifiedSession = nil
+            } else {
+                let code = PDFiumEditingEngine().openErrorCode(
+                    data: serializedData,
+                    password: authorizedPassword
+                )
+                throw PDFBookmarkMutationError.updatedPDFiumOpenFailed(
+                    code: code,
+                    diagnostics: diagnostics(for: serializedData, stage: .incremental)
+                )
+            }
+        }
+        if let verifiedMetadata = verifiedSession?.metadata {
+            guard verifiedMetadata.pageCount == expectedPageCount,
+                  verifiedMetadata.isEncrypted == expectedEncryption else {
+                throw PDFBookmarkServiceError.roundTripVerificationFailed
+            }
+        }
+        func verifyCandidate(_ data: Data, stage: PDFBookmarkDataStage) throws -> PDFDocument {
+            guard let candidate = PDFDocument(data: data) else {
+                throw PDFBookmarkMutationError.updatedPDFKitOpenFailed(
+                    diagnostics: diagnostics(for: data, stage: stage)
+                )
+            }
+            try unlockForBookmarkEditing(candidate)
+            guard candidate.isEncrypted == expectedEncryption,
+                  bookmarkService.snapshots(in: candidate) == expectedBookmarks,
+                  candidate.pageCount == expectedPageCount,
+                  formService.snapshots(in: candidate).count == expectedFields.count,
+                  bookmarkRoundTripPreservesPages(
+                      from: previousData,
+                      workingDocument: workingDocument,
+                      to: data,
+                      verifiedDocument: candidate,
+                      checksPageResources: !expectedEncryption
+                  ) else {
+                throw PDFBookmarkServiceError.roundTripVerificationFailed
+            }
+            try formService.verify(expectedFields, in: data, password: authorizedPassword)
+            for annotation in expectedAnnotations {
+                try annotationService.verify(annotation, in: candidate)
+            }
+            return candidate
+        }
+        let verifiedData = serializedData
+        let verifiedDocument = try verifyCandidate(verifiedData, stage: candidateStage)
+        if let verifiedSession {
+            // Save later serializes this session; reopening alone does not
+            // prove that export preserves the outline or interactive fields.
+            let exportStage: PDFBookmarkDataStage = candidateStage == .rewrite
+                ? .exportAfterRewrite : .exportAfterIncremental
+            let exportedData: Data
+            do {
+                exportedData = try verifiedSession.dataRepresentation(options: PDFExportOptions())
+            } catch PDFEditingError.exportFailed {
+                throw PDFBookmarkMutationError.updatedPDFiumExportFailed(
+                    diagnostics: diagnostics(for: nil, stage: exportStage)
+                )
+            }
+            _ = try verifyCandidate(exportedData, stage: exportStage)
+        }
+
+        // Bookmark-only changes must not replace PDFView's document or pages:
+        // doing so tears down its rendered content and causes a black flash.
+        // Rebind verified destinations to the existing presentation pages.
+        try bookmarkService.synchronizeOutline(from: verifiedDocument, to: pdfDocument)
+        invalidateInteractionPreparation()
+        editingSession = verifiedSession
+        sourceData = verifiedData
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
+
+        if let undoManager {
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restorePDFKitCompatibleMutation(
+                    data: previousData,
+                    actionName: actionName,
+                    undoManager: undoManager,
+                    bookmarksOnly: true
+                )
+            }
+            undoManager.setActionName(actionName)
+        }
+    }
+
+#if DEBUG
+    /// User-approved, local-only capture of the exact rejected bytes. Do not
+    /// reserialize them: the source is already a PDFium export in this path.
+    /// These PDFs contain document contents and filled form values.
+    private func bookmarkFailureWithDebugSnapshots(
+        _ failure: PDFBookmarkMutationError,
+        source: Data,
+        incremental: Data,
+        rewritten: Data
+    ) -> Error {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory.appendingPathComponent(
+            "PDFEditor-BookmarkFailure-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let snapshots: [(String, Data)] = [
+            ("01-source-pdfium-export.pdf", source),
+            ("02-incremental-bookmarks.pdf", incremental),
+            ("03-pdfkit-fallback-rewrite.pdf", rewritten),
+        ]
+        var directoryCreated = false
+        var savedCount = 0
+        let captureDescription: String
+        do {
+            // Each failure owns a new private directory; never touch the
+            // original PDF, earlier captures, or a shared fixed filename.
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+            directoryCreated = true
+            for (filename, data) in snapshots {
+                let url = directory.appendingPathComponent(filename)
+                try data.write(to: url, options: .withoutOverwriting)
+                savedCount += 1
+            }
+            captureDescription = "Debug PDF snapshots saved (3/3): \(directory.path)"
+        } catch {
+            // Capture is diagnostic only. Preserve the original bookmark
+            // failure even if storage is unavailable; keep any partial files.
+            captureDescription = directoryCreated
+                ? "Debug PDF snapshot capture incomplete (\(savedCount)/3): \(directory.path)"
+                : "Debug PDF snapshot capture failed; no snapshot directory was created."
+        }
+        return NSError(
+            domain: "PDFEditor.BookmarkDebugSnapshots",
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey: failure.localizedDescription + "\n\n" +
+                    captureDescription +
+                    "\nSnapshots contain PDF contents and filled form values. They are local only and may be removed by the system.",
+                NSUnderlyingErrorKey: failure,
+            ]
+        )
+    }
+#endif
+
+    private func restorePDFKitCompatibleMutation(
+        data: Data,
+        actionName: String,
+        undoManager: UndoManager,
+        bookmarksOnly: Bool = false
+    ) {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let redoData = sourceData
+        guard let restoredDocument = PDFDocument(data: data),
+              (try? unlockForBookmarkEditing(restoredDocument)) != nil else {
+            return
+        }
+        let restoredSession = try? PDFiumEditingEngine().makeSession(
+            data: data,
+            password: authorizedPassword
+        )
+        if bookmarksOnly {
+            guard (try? bookmarkService.synchronizeOutline(
+                from: restoredDocument,
+                to: pdfDocument
+            )) != nil else { return }
+        } else {
+            // AcroForm undo uses this helper too and must still restore its
+            // page annotations and field values, not just the outline.
+            pdfDocument = restoredDocument
+        }
+        invalidateInteractionPreparation()
+        editingSession = restoredSession
+        sourceData = data
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
+        undoManager.registerUndo(withTarget: self) { document in
+            document.restorePDFKitCompatibleMutation(
+                data: redoData,
+                actionName: actionName,
+                undoManager: undoManager,
+                bookmarksOnly: bookmarksOnly
+            )
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    private func invalidateInteractionPreparation() {
+        interactionPreparationTask?.cancel()
+        interactionPreparationTask = nil
+        interactionPreparationID &+= 1
+    }
+
+    private func unlockForBookmarkEditing(_ document: PDFDocument) throws {
+        guard document.isLocked else { return }
+        guard let authorizedPassword,
+              document.unlock(withPassword: authorizedPassword) else {
+            throw PDFEditingError.invalidPassword
+        }
+    }
+
+    private func bookmarkRoundTripPreservesPages(
+        from previousData: Data,
+        workingDocument: PDFDocument,
+        to verifiedData: Data,
+        verifiedDocument: PDFDocument,
+        checksPageResources: Bool
+    ) -> Bool {
+        guard workingDocument.pageCount == verifiedDocument.pageCount else {
+            return false
+        }
+        for pageIndex in 0..<workingDocument.pageCount {
+            guard (!checksPageResources ||
+                PDFPageResourceIntegrityService.preservesPageResources(
+                    from: previousData,
+                    to: verifiedData,
+                    pageIndex: pageIndex
+                )),
+            let before = workingDocument.page(at: pageIndex),
+            let after = verifiedDocument.page(at: pageIndex),
+            before.rotation == after.rotation,
+            approximatelyEqual(
+                before.bounds(for: .mediaBox),
+                after.bounds(for: .mediaBox)
+            ),
+            approximatelyEqual(
+                before.bounds(for: .cropBox),
+                after.bounds(for: .cropBox)
+            ),
+            before.annotations.count == after.annotations.count else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func approximatelyEqual(
+        _ lhs: CGRect,
+        _ rhs: CGRect,
+        accuracy: CGFloat = 0.01
+    ) -> Bool {
+        abs(lhs.minX - rhs.minX) <= accuracy &&
+            abs(lhs.minY - rhs.minY) <= accuracy &&
+            abs(lhs.width - rhs.width) <= accuracy &&
+            abs(lhs.height - rhs.height) <= accuracy
+    }
+
     private func restore(
         data: Data,
         actionName: String,
@@ -1383,6 +1888,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
 
         pdfDocument.documentAttributes = document.documentAttributes
+        pdfDocument.outlineRoot = document.outlineRoot
     }
 
     private static func makeBlankPDF() -> Data {

@@ -3,6 +3,13 @@ import CPDFiumBridge
 import Foundation
 import PDFKit
 
+/// PDFium's runtime is process-wide, so even different document handles must
+/// not enter its API concurrently. Document transactions and session entry
+/// points share this recursive lock; private session helpers run under it.
+nonisolated enum PDFiumAccess {
+    static let lock = NSRecursiveLock()
+}
+
 nonisolated enum PDFPageObjectKind: Int32, Equatable, Sendable {
     case unknown = 0
     case text = 1
@@ -191,11 +198,12 @@ nonisolated protocol PDFAnnotationEditingSession: AnyObject {
 }
 
 nonisolated final class PDFiumEditingEngine: PDFEditingEngine {
-    private let runtime = PDFiumRuntime.shared
-
     func makeSession(data: Data, password: String? = nil) throws -> any PDFEditingSession {
-        _ = runtime
         return try PDFiumEditingSession(originalData: data, password: password)
+    }
+
+    func openErrorCode(data: Data, password: String? = nil) -> UInt32? {
+        return PDFiumEditingSession.openErrorCode(data: data, password: password)
     }
 }
 
@@ -207,16 +215,25 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     private var authorizedPassword: String?
 
     init(originalData: Data, password: String?) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
+        // Access the once-initialized runtime only after acquiring the shared
+        // lock, including when a session is constructed directly.
+        _ = PDFiumRuntime.shared
         self.originalData = originalData
         authorizedPassword = password
         handle = try Self.open(data: originalData, password: password)
     }
 
     deinit {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         PEPDFDocumentClose(handle)
     }
 
     var metadata: PDFDocumentMetadata {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         let currentData = try? dataRepresentation(options: PDFExportOptions())
         let pdfKitDocument = currentData.flatMap(PDFDocument.init(data:))
         let attributes = pdfKitDocument?.documentAttributes ?? [:]
@@ -238,10 +255,14 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     var hasDigitalSignatures: Bool {
-        PEPDFDocumentSignatureCount(handle) > 0
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
+        return PEPDFDocumentSignatureCount(handle) > 0
     }
 
     func unlock(withPassword password: String) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         let newHandle = try Self.open(data: originalData, password: password)
         PEPDFDocumentClose(handle)
         handle = newHandle
@@ -249,6 +270,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func apply(_ command: PDFEditingCommand) throws -> PDFEditingCommandResult {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         switch command {
         case .setDocumentInfo:
             return try applyMetadataCommandWithPDFKit(command)
@@ -389,7 +412,9 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func dataRepresentation(options: PDFExportOptions = PDFExportOptions()) throws -> Data {
-        try dataRepresentation(options: options, subsetNewFonts: true)
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
+        return try dataRepresentation(options: options, subsetNewFonts: true)
     }
 
     private func dataRepresentation(
@@ -422,6 +447,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         annotationIndex: Int,
         color: PDFAnnotationColor
     ) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         let component: (CGFloat) -> UInt32 = { value in
             UInt32((min(max(value, 0), 1) * 255).rounded())
@@ -443,6 +470,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         pageIndex: Int,
         annotationIndex: Int
     ) throws -> PDFAnnotationColor {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         var red: UInt32 = 0
         var green: UInt32 = 0
@@ -468,6 +497,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func objects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         let count = Int(PEPDFPageObjectCountRecursive(handle, Int32(pageIndex)))
         return try (0..<count).map { flatIndex in
@@ -479,6 +510,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func displayObjects(onPage pageIndex: Int) throws -> [PDFPageObjectSnapshot] {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         var pathIndices: UnsafeMutablePointer<Int32>?
         var pathOffsets: UnsafeMutablePointer<Int32>?
@@ -532,6 +565,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func fontData(pageIndex: Int, path: PDFPageObjectPath) throws -> Data? {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         let object = try object(onPage: pageIndex, path: path)
         guard object.kind == .text else {
@@ -547,6 +582,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         style: PDFTextStyle,
         fallbackFontData: Data
     ) throws -> PDFTextReplacementResult {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         let object = try object(onPage: pageIndex, path: path)
         guard object.kind == .text else {
             throw PDFObjectEditingError.invalidObjectType
@@ -643,6 +680,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func translateObject(pageIndex: Int, path: PDFPageObjectPath, by offset: CGSize) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         let beforeObject = try object(onPage: pageIndex, path: path)
         let beforeData = try dataRepresentation(options: PDFExportOptions())
         do {
@@ -677,6 +716,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         path: PDFPageObjectPath,
         transform: CGAffineTransform
     ) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         _ = try object(onPage: pageIndex, path: path)
         guard transform.a.isFinite, transform.b.isFinite,
               transform.c.isFinite, transform.d.isFinite,
@@ -712,6 +753,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         path: PDFPageObjectPath,
         to destinationIndex: Int
     ) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         guard destinationIndex >= 0, !path.indices.isEmpty else {
             throw PDFObjectEditingError.objectMutationFailed
         }
@@ -744,6 +787,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func deleteObject(pageIndex: Int, path: PDFPageObjectPath) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         _ = try object(onPage: pageIndex, path: path)
         let beforeData = try dataRepresentation(options: PDFExportOptions())
         let beforeCount = PEPDFPageObjectCountRecursive(handle, Int32(pageIndex))
@@ -778,6 +823,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         fontSize: CGFloat,
         color: PDFObjectColor
     ) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         guard text.unicodeScalars.allSatisfy({ $0.value <= 0xFF }) else {
             throw PDFObjectEditingError.unsupportedTextForStandardFont
@@ -807,6 +854,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func addJPEG(_ data: Data, pageIndex: Int, bounds: CGRect) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         guard data.starts(with: [0xFF, 0xD8]) else {
             throw PDFObjectEditingError.imageMustBeJPEG
@@ -829,6 +878,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func addBitmap(_ payload: PDFBitmapPayload, pageIndex: Int, bounds: CGRect) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         try validate(payload: payload)
         guard bounds.width.isFinite, bounds.height.isFinite,
@@ -876,6 +927,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         path: PDFPageObjectPath,
         with payload: PDFBitmapPayload
     ) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         let beforeObject = try object(onPage: pageIndex, path: path)
         guard beforeObject.kind == .image else {
             throw PDFObjectEditingError.invalidObjectType
@@ -917,6 +970,8 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         fontData: Data,
         invisible: Bool
     ) throws {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         try validatePageIndex(pageIndex)
         guard !items.isEmpty else { return }
 
@@ -1368,6 +1423,33 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     private static func open(data: Data, password: String?) throws -> OpaquePointer {
+        let result = createHandle(data: data, password: password)
+        guard let handle = result.handle else {
+            if result.errorCode == 4 {
+                throw PDFEditingError.invalidPassword
+            }
+            throw PDFEditingError.invalidDocument
+        }
+        return handle
+    }
+
+    fileprivate static func openErrorCode(
+        data: Data,
+        password: String?
+    ) -> UInt32? {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
+        _ = PDFiumRuntime.shared
+        let result = createHandle(data: data, password: password)
+        guard let handle = result.handle else { return result.errorCode }
+        PEPDFDocumentClose(handle)
+        return nil
+    }
+
+    private static func createHandle(
+        data: Data,
+        password: String?
+    ) -> (handle: OpaquePointer?, errorCode: UInt32) {
         var errorCode: UInt32 = 0
         let handle = data.withUnsafeBytes { bytes -> OpaquePointer? in
             guard let address = bytes.bindMemory(to: UInt8.self).baseAddress else {
@@ -1380,13 +1462,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
             }
             return PEPDFDocumentCreate(address, bytes.count, nil, &errorCode)
         }
-        guard let handle else {
-            if errorCode == 4 {
-                throw PDFEditingError.invalidPassword
-            }
-            throw PDFEditingError.invalidDocument
-        }
-        return handle
+        return (handle, errorCode)
     }
 }
 
@@ -1394,10 +1470,13 @@ nonisolated private final class PDFiumRuntime: @unchecked Sendable {
     static let shared = PDFiumRuntime()
 
     private init() {
+        // All shared-instance lookups occur while PDFiumAccess.lock is held.
         PEPDFLibraryInitialize()
     }
 
     deinit {
+        PDFiumAccess.lock.lock()
+        defer { PDFiumAccess.lock.unlock() }
         PEPDFLibraryDestroy()
     }
 }

@@ -744,7 +744,9 @@ struct PDFRightPanel: View {
     @Binding var selectedPageIndex: Int?
     let pageCount: Int
     let isPagesPanelPresented: Bool
+    let isBookmarksPanelPresented: Bool
     let onTogglePages: () -> Void
+    let onToggleBookmarks: () -> Void
     let onViewerCommand: (PDFViewerCommand.Action) -> Void
     let onFullScreen: () -> Void
 
@@ -759,6 +761,12 @@ struct PDFRightPanel: View {
                     systemImage: "rectangle.stack",
                     isSelected: isPagesPanelPresented,
                     action: onTogglePages
+                )
+                iconButton(
+                    "Bookmarks",
+                    systemImage: "bookmark",
+                    isSelected: isBookmarksPanelPresented,
+                    action: onToggleBookmarks
                 )
                 iconButton(
                     "Single-page view",
@@ -913,6 +921,116 @@ struct PDFRightPanel: View {
         }
         .help(title)
         .accessibilityLabel(title)
+    }
+}
+
+struct PDFBookmarksPanel: View {
+    let bookmarks: [PDFBookmarkSnapshot]
+    let selectedPageIndex: Int?
+    let onNavigate: (Int) -> Void
+    let onAdd: () -> Void
+    let onRename: (PDFBookmarkSnapshot) -> Void
+    let onDelete: (PDFBookmarkSnapshot) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "bookmark")
+                    .foregroundStyle(.tint)
+                Text("Bookmarks")
+                    .font(.headline)
+                Spacer()
+                Button(action: onAdd) {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedPageIndex == nil)
+                .help("Add Bookmark for Current Page")
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .help("Close Bookmarks")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            List {
+                OutlineGroup(bookmarks, children: \.outlineChildren) { bookmark in
+                    bookmarkRow(bookmark)
+                }
+            }
+            .listStyle(.sidebar)
+            .overlay {
+                if bookmarks.isEmpty {
+                    ContentUnavailableView(
+                        "No Bookmarks",
+                        systemImage: "bookmark",
+                        description: Text("Add a bookmark for the current page.")
+                    )
+                }
+            }
+        }
+        .background(.background)
+    }
+
+    private func bookmarkRow(_ bookmark: PDFBookmarkSnapshot) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                if let pageIndex = bookmark.pageIndex {
+                    onNavigate(pageIndex)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: bookmark.pageIndex == nil ? "bookmark.slash" : "bookmark.fill")
+                        .foregroundStyle(
+                            bookmark.pageIndex == nil
+                                ? Color.secondary
+                                : Color.accentColor
+                        )
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(bookmark.title)
+                            .lineLimit(2)
+                        if let pageIndex = bookmark.pageIndex {
+                            Text("Page \(pageIndex + 1)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("External or unavailable destination")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(bookmark.pageIndex == nil)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Menu {
+                Button("Rename") { onRename(bookmark) }
+                Button("Delete", role: .destructive) { onDelete(bookmark) }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .frame(width: 28, height: 28)
+            .layoutPriority(1)
+            .help("Bookmark Actions")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 3)
     }
 }
 

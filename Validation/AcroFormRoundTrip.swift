@@ -3,9 +3,17 @@ import CoreGraphics
 import Foundation
 import PDFKit
 
+#if ACROFORM_PDFIUM_VALIDATION
+import CPDFiumBridge
+#endif
+
 @main
 struct AcroFormRoundTripValidation {
     static func main() throws {
+#if ACROFORM_PDFIUM_VALIDATION
+        PEPDFLibraryInitialize()
+        defer { PEPDFLibraryDestroy() }
+#endif
         let document = try makeDocument()
         guard let page = document.page(at: 0) else {
             throw ValidationFailure("Missing validation page")
@@ -94,8 +102,62 @@ struct AcroFormRoundTripValidation {
               reopenedFields.first(where: { $0.fieldName == "meal" })?.value == "Dinner" else {
             throw ValidationFailure("Text or choice value did not persist")
         }
+#if ACROFORM_PDFIUM_VALIDATION
+        try validatePDFKitOnlyFallback(sourceData: data, service: service)
+        print("AcroForm PDFKit-only fallback validation passed (PDFium error 3 source).")
+#endif
         print("AcroForm round-trip validation passed (text, checkbox, radio, and choice).")
     }
+
+#if ACROFORM_PDFIUM_VALIDATION
+    private static func validatePDFKitOnlyFallback(
+        sourceData: Data,
+        service: PDFAcroFormService
+    ) throws {
+        var pdfKitOnlyData = Data(repeating: 0x20, count: 2_048)
+        pdfKitOnlyData.append(sourceData)
+        guard pdfiumOpenErrorCode(pdfKitOnlyData) == 3,
+              let document = PDFDocument(data: pdfKitOnlyData),
+              let page = document.page(at: 0),
+              let text = page.annotations.first(where: {
+                  $0.fieldName == "person_name"
+              }) else {
+            throw ValidationFailure("Could not create PDFium error 3 form fixture")
+        }
+        text.widgetStringValue = "PDFKit-only value"
+        let expected = service.snapshots(in: document)
+        guard let serialized = document.dataRepresentation() else {
+            throw ValidationFailure("Could not serialize PDFKit-only form")
+        }
+        try service.verify(expected, in: serialized, password: nil)
+        guard let reopened = PDFDocument(data: serialized),
+              reopened.pageCount == document.pageCount,
+              PDFPageResourceIntegrityService.preservesPageResources(
+                  from: pdfKitOnlyData,
+                  to: serialized,
+                  pageIndex: 0
+              ) else {
+            throw ValidationFailure("PDFKit-only form did not preserve its page")
+        }
+    }
+
+    private static func pdfiumOpenErrorCode(_ data: Data) -> UInt32 {
+        var errorCode: UInt32 = 0
+        let document = data.withUnsafeBytes { bytes in
+            PEPDFDocumentCreate(
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                bytes.count,
+                nil,
+                &errorCode
+            )
+        }
+        if let document {
+            PEPDFDocumentClose(document)
+            return 0
+        }
+        return errorCode
+    }
+#endif
 
     private static func makeDocument() throws -> PDFDocument {
         let data = NSMutableData()
