@@ -1273,10 +1273,21 @@ extension PDFKitView {
                 displayBounds = viewBounds
             }
             setOverlayHidden(false)
+            let usesFreeTextEditorFrame = selectedAnnotation.wrappedValue?.kind == .freeText
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             outlineLayer.frame = pdfView.bounds
-            outlineLayer.path = CGPath(rect: displayBounds, transform: nil)
+            outlineLayer.lineWidth = usesFreeTextEditorFrame ? 1 : 2
+            outlineLayer.lineDashPattern = usesFreeTextEditorFrame ? nil : [6, 4]
+            outlineLayer.opacity = usesFreeTextEditorFrame ? 0.75 : 1
+            outlineLayer.path = usesFreeTextEditorFrame
+                ? CGPath(
+                    roundedRect: displayBounds,
+                    cornerWidth: 3,
+                    cornerHeight: 3,
+                    transform: nil
+                )
+                : CGPath(rect: displayBounds, transform: nil)
             let points = [
                 CGPoint(x: displayBounds.minX, y: displayBounds.minY),
                 CGPoint(x: displayBounds.maxX, y: displayBounds.minY),
@@ -1284,8 +1295,12 @@ extension PDFKitView {
                 CGPoint(x: displayBounds.minX, y: displayBounds.maxY),
             ]
             for (layer, point) in zip(handleLayers, points) {
+                layer.isHidden = usesFreeTextEditorFrame
                 layer.frame = CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)
                 layer.path = CGPath(ellipseIn: layer.bounds, transform: nil)
+            }
+            if usesFreeTextEditorFrame, inlineEditingAnnotation != nil {
+                outlineLayer.isHidden = true
             }
             CATransaction.commit()
             updateAnnotationActionBar(
