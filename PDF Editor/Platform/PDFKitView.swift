@@ -2852,8 +2852,11 @@ extension PDFKitView {
                 page.bounds(for: .cropBox),
                 from: page
             ).standardized
+            let minimumWidth = text.isEmpty
+                ? min(minimumFrame.width, pageFrame.width)
+                : min(24, pageFrame.width)
             let width = min(
-                max(minimumFrame.width, ceil(widestLine) + 12),
+                max(minimumWidth, ceil(widestLine) + 12),
                 pageFrame.width
             )
             let renderedHeight = (text as NSString).boundingRect(
@@ -2864,12 +2867,16 @@ extension PDFKitView {
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: attributes
             ).height
-            let measuredHeight = max(
+            let contentHeight = max(
                 lineHeight * CGFloat(max(lines.count, 1)),
                 ceil(renderedHeight)
-            ) + 8
+            )
+            let measuredHeight = contentHeight + 8
+            let minimumHeight = text.isEmpty
+                ? min(minimumFrame.height, pageFrame.height)
+                : CGFloat.zero
             let height = min(
-                max(minimumFrame.height, measuredHeight),
+                max(minimumHeight, measuredHeight),
                 pageFrame.height
             )
             let origin = CGPoint(
@@ -2887,11 +2894,7 @@ extension PDFKitView {
                 size: CGSize(width: width, height: height)
             )
             field.frame = fittedFrame
-            let contentHeight = max(
-                lineHeight * CGFloat(max(lines.count, 1)),
-                ceil(renderedHeight)
-            )
-            let verticalInset = max(4, (height - contentHeight) / 2)
+            let verticalInset = max(0, (height - contentHeight) / 2)
 #if os(macOS)
             field.textContainerInset = NSSize(width: 6, height: verticalInset)
 #else

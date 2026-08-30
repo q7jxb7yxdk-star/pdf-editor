@@ -113,9 +113,9 @@ nonisolated final class PDFAnnotationService {
 
         let requestsStyleChange = update.color != nil || update.fontColor != nil ||
             update.fontSize != nil || update.lineWidth != nil
-        let regeneratesFreeTextContents = annotation.type == "FreeText" &&
-            update.contents != nil
-        if annotation.hasAppearanceStream, regeneratesFreeTextContents {
+        let regeneratesFreeTextLayout = annotation.type == "FreeText" &&
+            (update.bounds != nil || update.contents != nil || update.fontSize != nil)
+        if annotation.hasAppearanceStream, regeneratesFreeTextLayout {
             annotation.removeValue(forAnnotationKey: appearanceDictionaryKey)
             annotation.removeValue(forAnnotationKey: appearanceStateKey)
         }
@@ -165,6 +165,9 @@ nonisolated final class PDFAnnotationService {
             let border = annotation.border ?? PDFBorder()
             border.lineWidth = min(max(lineWidth, 0.5), 24)
             annotation.border = border
+        }
+        if annotation.type == "FreeText", regeneratesFreeTextLayout {
+            applyFreeTextContentInsets(to: annotation)
         }
         annotation.modificationDate = Date()
         return snapshot(annotation, reference: reference)
@@ -221,6 +224,7 @@ nonisolated final class PDFAnnotationService {
         annotation.fontColor = labelColor
         annotation.color = .clear
         annotation.alignment = .left
+        applyFreeTextContentInsets(to: annotation)
         page.addAnnotation(annotation)
         return annotation
     }
@@ -572,7 +576,7 @@ nonisolated final class PDFAnnotationService {
         let widestLine = lines.reduce(CGFloat.zero) { width, line in
             max(width, (line as NSString).size(withAttributes: attributes).width)
         }
-        let minimumWidth = min(72, pageBounds.width)
+        let minimumWidth = min(24, pageBounds.width)
         let width = min(
             max(minimumWidth, ceil(widestLine) + 12),
             pageBounds.width
@@ -594,9 +598,8 @@ nonisolated final class PDFAnnotationService {
             lineHeight * CGFloat(max(lines.count, 1)),
             ceil(renderedHeight)
         )
-        let minimumHeight = min(28, pageBounds.height)
         let height = min(
-            max(minimumHeight, contentHeight + 8),
+            max(8, contentHeight + 8),
             pageBounds.height
         )
         let maximumX = max(pageBounds.minX, pageBounds.maxX - width)
@@ -605,6 +608,46 @@ nonisolated final class PDFAnnotationService {
         let preferredY = currentBounds.maxY - height
         let y = min(max(preferredY, pageBounds.minY), maximumY)
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private func applyFreeTextContentInsets(to annotation: PDFAnnotation) {
+        let bounds = annotation.bounds.standardized
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let font = annotation.font ?? .systemFont(ofSize: 11)
+        let text = annotation.contents ?? ""
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let lines = text.components(separatedBy: "\n")
+        let renderedHeight = (text as NSString).boundingRect(
+            with: CGSize(
+                width: max(bounds.width - 12, 1),
+                height: CGFloat.greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes
+        ).height
+#if os(macOS)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+#else
+        let lineHeight = ceil(font.lineHeight)
+#endif
+        let contentHeight = max(
+            lineHeight * CGFloat(max(lines.count, 1)),
+            ceil(renderedHeight)
+        )
+        let horizontalInset = min(6, max(bounds.width / 2 - 0.01, 0))
+        let verticalInset = min(
+            max((bounds.height - contentHeight) / 2, 0),
+            max(bounds.height / 2 - 0.01, 0)
+        )
+        annotation.setValue(
+            [
+                NSNumber(value: Double(horizontalInset)),
+                NSNumber(value: Double(verticalInset)),
+                NSNumber(value: Double(horizontalInset)),
+                NSNumber(value: Double(verticalInset)),
+            ],
+            forAnnotationKey: differenceRectangleKey
+        )
     }
 
     private func platformColor(_ color: PDFAnnotationColor) -> PlatformColor {
@@ -620,6 +663,7 @@ nonisolated final class PDFAnnotationService {
     private var replacementMaskSubjectKey: PDFAnnotationKey {
         PDFAnnotationKey(rawValue: "/Subj")
     }
+    private var differenceRectangleKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/RD") }
     private var appearanceDictionaryKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/AP") }
     private var appearanceStateKey: PDFAnnotationKey { PDFAnnotationKey(rawValue: "/AS") }
 
