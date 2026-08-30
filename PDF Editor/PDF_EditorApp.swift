@@ -14,35 +14,32 @@ import AppKit
 @main
 struct PDF_EditorApp: App {
 #if os(macOS)
-    init() {
-        NSWindow.allowsAutomaticWindowTabbing = true
-    }
+    @NSApplicationDelegateAdaptor(PDFEditorApplicationDelegate.self)
+    private var applicationDelegate
 #endif
 
+    @SceneBuilder
     var body: some Scene {
+#if os(macOS)
+        Settings {
+            EmptyView()
+        }
+        .commands {
+            VersionlessPDFDocumentCommands()
+        }
+#else
         DocumentGroup(newDocument: { PDFEditorDocument() }) { configuration in
             ContentView(
                 document: configuration.document,
                 fileURL: configuration.fileURL
             )
-#if os(macOS)
-                .background {
-                    WindowConfigurationView(
-                        fillsWindowOnAttach: configuration.fileURL != nil
-                    )
-                }
-#endif
-        }
-#if os(macOS)
-        .commands {
-            ManualPDFSaveCommands()
         }
 #endif
     }
 }
 
 #if os(macOS)
-private struct WindowConfigurationView: NSViewRepresentable {
+struct WindowConfigurationView: NSViewRepresentable {
     let fillsWindowOnAttach: Bool
 
     @MainActor
@@ -79,7 +76,7 @@ private struct WindowConfigurationView: NSViewRepresentable {
     }
 }
 
-private final class WindowAttachmentView: NSView {
+final class WindowAttachmentView: NSView {
     var onWindowAttached: ((NSWindow) -> Void)?
     private var windowDidBecomeKeyObserver: NSObjectProtocol?
 

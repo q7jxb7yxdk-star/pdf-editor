@@ -78,23 +78,37 @@ extension FocusedValues {
 }
 
 #if os(macOS)
-struct ManualPDFSaveCommands: Commands {
-    @FocusedValue(\.manualPDFSaveAction) private var saveAction
-    @FocusedValue(\.manualPDFSaveAsAction) private var saveAsAction
-
+struct VersionlessPDFDocumentCommands: Commands {
     var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New") {
+                do {
+                    try NSDocumentController.shared
+                        .openUntitledDocumentAndDisplay(true)
+                } catch {
+                    NSApp.presentError(error)
+                }
+            }
+            .keyboardShortcut("n", modifiers: .command)
+
+            Button("Open…") {
+                NSDocumentController.shared.openDocument(nil)
+            }
+            .keyboardShortcut("o", modifiers: .command)
+        }
+
         CommandGroup(replacing: .saveItem) {
             Button("Save") {
-                saveAction?()
+                NSDocumentController.shared.currentDocument?.save(nil)
             }
             .keyboardShortcut("s", modifiers: .command)
-            .disabled(saveAction == nil)
+            .disabled(NSDocumentController.shared.currentDocument == nil)
 
             Button("Save As…") {
-                saveAsAction?()
+                NSDocumentController.shared.currentDocument?.saveAs(nil)
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(saveAsAction == nil)
+            .disabled(NSDocumentController.shared.currentDocument == nil)
 
             Button("Close") {
                 (NSApp.keyWindow ?? NSApp.mainWindow)?.performClose(nil)

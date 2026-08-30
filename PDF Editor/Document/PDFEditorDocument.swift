@@ -116,6 +116,18 @@ final class PDFEditorDocument: ReferenceFileDocument {
         pdfDocument = PDFDocument(data: data) ?? PDFDocument()
     }
 
+    init(data: Data) throws {
+        guard let document = PDFDocument(data: data) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        sourceData = data
+        persistedData = data
+        authorizedPassword = nil
+        presentationPassword = nil
+        pdfDocument = document
+    }
+
     required init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents,
               let document = PDFDocument(data: data) else {
@@ -721,6 +733,48 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 data: data,
                 expected: allAnnotationSnapshots()
             )
+        }
+    }
+
+    func synchronizeAcroFormChangesIfNeeded(undoManager: UndoManager?) throws {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+
+        let service = PDFAcroFormService()
+        guard service.hasAcroFormFields(in: pdfDocument) else { return }
+        let currentFields = service.snapshots(in: pdfDocument)
+        let previousData = try currentData()
+        guard let previousDocument = PDFDocument(data: previousData) else {
+            throw PDFAcroFormError.serializationFailed
+        }
+        if previousDocument.isLocked {
+            guard let authorizedPassword,
+                  previousDocument.unlock(withPassword: authorizedPassword) else {
+                throw PDFEditingError.invalidPassword
+            }
+        }
+        guard service.hasValueChanges(
+            from: service.snapshots(in: previousDocument),
+            to: currentFields
+        ) else { return }
+
+        try mutate(
+            undoManager: undoManager,
+            actionName: "填寫 PDF 表單",
+            refreshesPDFKitDocument: false
+        ) {
+            guard let presentationData = pdfDocument.dataRepresentation() else {
+                throw PDFAcroFormError.serializationFailed
+            }
+            let normalizedData = try normalizePresentationSecurity(presentationData)
+            let session = try PDFiumEditingEngine().makeSession(
+                data: normalizedData,
+                password: authorizedPassword
+            )
+            let verifiedData = try session.dataRepresentation(options: PDFExportOptions())
+            try service.verify(currentFields, in: verifiedData, password: authorizedPassword)
+            editingSession = session
+            sourceData = normalizedData
         }
     }
 

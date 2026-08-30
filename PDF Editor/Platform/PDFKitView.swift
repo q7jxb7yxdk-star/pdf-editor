@@ -449,6 +449,7 @@ struct PDFKitView: NSViewRepresentable {
     let onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
+    let onAcroFormChange: () -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
 
@@ -523,6 +524,7 @@ struct PDFKitView: UIViewRepresentable {
     let onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
     let onOpenObject: (PDFPageObjectSnapshot) -> Void
     let onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
+    let onAcroFormChange: () -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
 
@@ -578,7 +580,8 @@ private extension PDFKitView {
             onUpdateAnnotation: onUpdateAnnotation,
             onDeleteAnnotation: onDeleteAnnotation,
             onOpenObject: onOpenObject,
-            onOpenAnnotation: onOpenAnnotation
+            onOpenAnnotation: onOpenAnnotation,
+            onAcroFormChange: onAcroFormChange
         )
     }
 
@@ -642,6 +645,7 @@ private extension PDFKitView {
         coordinator.onDeleteAnnotation = onDeleteAnnotation
         coordinator.onOpenObject = onOpenObject
         coordinator.onOpenAnnotation = onOpenAnnotation
+        coordinator.onAcroFormChange = onAcroFormChange
         coordinator.updateGestureAvailability()
     }
 
@@ -814,6 +818,7 @@ extension PDFKitView {
         var onDeleteAnnotation: (PDFAnnotationSnapshot) -> Void
         var onOpenObject: (PDFPageObjectSnapshot) -> Void
         var onOpenAnnotation: (PDFAnnotationSnapshot) -> Void
+        var onAcroFormChange: () -> Void
         var lastViewerCommandID: UUID?
         var pendingPageNavigationIndex: Int?
 
@@ -960,6 +965,8 @@ extension PDFKitView {
         private var hiddenFreeTextAnnotation: HiddenFreeTextAnnotation?
         private var isFinishingInlineTextEditing = false
         private var overlayRefreshScheduled = false
+        private var acroFormBaseline: [PDFAcroFormFieldSnapshot]?
+        private var acroFormCheckGeneration = 0
 
         init(
             selectedPageIndex: Binding<Int?>,
@@ -997,7 +1004,8 @@ extension PDFKitView {
             onUpdateAnnotation: @escaping (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void,
             onDeleteAnnotation: @escaping (PDFAnnotationSnapshot) -> Void,
             onOpenObject: @escaping (PDFPageObjectSnapshot) -> Void,
-            onOpenAnnotation: @escaping (PDFAnnotationSnapshot) -> Void
+            onOpenAnnotation: @escaping (PDFAnnotationSnapshot) -> Void,
+            onAcroFormChange: @escaping () -> Void
         ) {
             self.selectedPageIndex = selectedPageIndex
             self.selection = selection
@@ -1029,6 +1037,7 @@ extension PDFKitView {
             self.onDeleteAnnotation = onDeleteAnnotation
             self.onOpenObject = onOpenObject
             self.onOpenAnnotation = onOpenAnnotation
+            self.onAcroFormChange = onAcroFormChange
             super.init()
             configureOverlay()
         }
@@ -1092,7 +1101,66 @@ extension PDFKitView {
                     object: pdfView,
                     queue: .main
                 ) { [weak self] _ in self?.scheduleOverlayRefresh() },
+                center.addObserver(
+                    forName: .PDFViewAnnotationWillHit,
+                    object: pdfView,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.beginAcroFormInteractionIfNeeded()
+                },
+                center.addObserver(
+                    forName: .PDFViewAnnotationHit,
+                    object: pdfView,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.scheduleAcroFormChangeCheck()
+                },
             ]
+#if os(macOS)
+            observers.append(center.addObserver(
+                forName: NSControl.textDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleDebouncedAcroFormChangeCheck()
+            })
+            observers.append(center.addObserver(
+                forName: NSControl.textDidEndEditingNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleAcroFormChangeCheck()
+            })
+#elseif os(iOS)
+            observers.append(center.addObserver(
+                forName: UITextField.textDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleDebouncedAcroFormChangeCheck()
+            })
+            observers.append(center.addObserver(
+                forName: UITextView.textDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleDebouncedAcroFormChangeCheck()
+            })
+            observers.append(center.addObserver(
+                forName: UITextField.textDidEndEditingNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleAcroFormChangeCheck()
+            })
+            observers.append(center.addObserver(
+                forName: UITextView.textDidEndEditingNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleAcroFormChangeCheck()
+            })
+#endif
 #if os(macOS)
             if let scrollWheelEventMonitor {
                 NSEvent.removeMonitor(scrollWheelEventMonitor)
@@ -1144,6 +1212,8 @@ extension PDFKitView {
             restoreHiddenFreeTextAnnotation()
             pendingTextActivation = nil
             hoveredCommentReference = nil
+            acroFormBaseline = nil
+            acroFormCheckGeneration &+= 1
             observers.forEach(NotificationCenter.default.removeObserver)
             observers.removeAll()
 #if os(macOS)
@@ -1190,6 +1260,8 @@ extension PDFKitView {
             finishInlineTextEditing(commit: false)
             restoreHiddenFreeTextAnnotation()
             pendingTextActivation = nil
+            acroFormBaseline = nil
+            acroFormCheckGeneration &+= 1
 #if os(macOS)
             hideSignaturePreview()
             cancelFreehandStraightLine()
@@ -1215,6 +1287,48 @@ extension PDFKitView {
                 pdfView?.clearSelection()
                 refreshOverlay()
             }
+        }
+
+        private func beginAcroFormInteractionIfNeeded() {
+            guard acroFormBaseline == nil,
+                  let document = pdfView?.document else { return }
+            let service = PDFAcroFormService()
+            guard service.hasAcroFormFields(in: document) else { return }
+            acroFormBaseline = service.snapshots(in: document)
+        }
+
+        private func scheduleAcroFormChangeCheck() {
+            guard let document = pdfView?.document,
+                  PDFAcroFormService().hasAcroFormFields(in: document) else { return }
+            acroFormCheckGeneration &+= 1
+            let generation = acroFormCheckGeneration
+            DispatchQueue.main.async { [weak self] in
+                self?.commitAcroFormChangeIfNeeded(generation: generation)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.commitAcroFormChangeIfNeeded(generation: generation)
+            }
+        }
+
+        private func scheduleDebouncedAcroFormChangeCheck() {
+            guard let document = pdfView?.document,
+                  PDFAcroFormService().hasAcroFormFields(in: document) else { return }
+            acroFormCheckGeneration &+= 1
+            let generation = acroFormCheckGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.commitAcroFormChangeIfNeeded(generation: generation)
+            }
+        }
+
+        private func commitAcroFormChangeIfNeeded(generation: Int) {
+            guard generation == acroFormCheckGeneration,
+                  let document = pdfView?.document else { return }
+            let service = PDFAcroFormService()
+            let current = service.snapshots(in: document)
+            if let baseline = acroFormBaseline,
+               !service.hasValueChanges(from: baseline, to: current) { return }
+            acroFormBaseline = nil
+            onAcroFormChange()
         }
 
         func refreshOverlay(previewBounds: CGRect? = nil) {

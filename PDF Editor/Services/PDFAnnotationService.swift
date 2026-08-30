@@ -56,6 +56,7 @@ nonisolated final class PDFAnnotationService {
             // Keep replacement masks created by older app versions out of the
             // annotation editing UI. New text edits never create these masks.
             guard annotation.type != "Popup",
+                  annotation.type != "Widget",
                   annotation.value(forAnnotationKey: replacementMaskSubjectKey)
                     as? String != "Text Replacement Mask" else {
                 return nil

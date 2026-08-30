@@ -7,6 +7,8 @@
 		<dict>
 			<key>CFBundleTypeName</key>
 			<string>PDF Document</string>
+			<key>NSDocumentClass</key>
+			<string>PDFEditorNSDocument</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSHandlerRank</key>

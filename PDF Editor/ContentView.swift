@@ -258,13 +258,30 @@ struct ContentView: View {
     private let annotationService = PDFAnnotationService()
     private let ocrService = VisionOCRService()
     private let documentFileURL: URL?
+#if os(macOS)
+    private let nativeDocumentReference: PDFEditorNativeDocumentReference?
+#endif
 
+#if os(macOS)
+    init(
+        document: PDFEditorDocument,
+        fileURL: URL?,
+        nativeDocumentReference: PDFEditorNativeDocumentReference? = nil
+    ) {
+        self.document = document
+        documentFileURL = fileURL
+        self.nativeDocumentReference = nativeDocumentReference
+        _editorState = ObservedObject(wrappedValue: document.editorState)
+        _saveURL = State(initialValue: fileURL)
+    }
+#else
     init(document: PDFEditorDocument, fileURL: URL?) {
         self.document = document
         documentFileURL = fileURL
         _editorState = ObservedObject(wrappedValue: document.editorState)
         _saveURL = State(initialValue: fileURL)
     }
+#endif
 
     private var undoManager: UndoManager? {
         environmentUndoManager
@@ -283,10 +300,26 @@ struct ContentView: View {
             .task {
                 await document.prepareEditingSessionForInteraction()
             }
+#if os(macOS)
+            .onAppear {
+                configureNativeDocumentSaving()
+                synchronizeNativeDocumentEditedState()
+            }
+            .onChange(of: editorState.hasUnsavedChanges) {
+                synchronizeNativeDocumentEditedState()
+            }
+            .onChange(of: pendingTextEditStore.edits.isEmpty) {
+                synchronizeNativeDocumentEditedState()
+            }
+#endif
             .onDisappear {
                 ocrBatchTask?.cancel()
                 imageExportTask?.cancel()
                 pageObjectLoadTask?.cancel()
+#if os(macOS)
+                nativeDocumentReference?.document?.prepareSave = nil
+                nativeDocumentReference?.document?.saveActivityDidChange = nil
+#endif
             }
     }
 
@@ -650,6 +683,7 @@ struct ContentView: View {
                     onDeleteAnnotation: deleteAnnotation,
                     onOpenObject: openObject,
                     onOpenAnnotation: openAnnotation,
+                    onAcroFormChange: synchronizeAcroFormChanges,
                     viewerMode: viewerMode,
                     viewerCommand: viewerCommand
                 )
@@ -922,6 +956,22 @@ struct ContentView: View {
 
     private func performSave(choosingNewDestination: Bool) {
         guard !isSaving else { return }
+#if os(macOS)
+        if let nativeDocument = nativeDocumentReference?.document {
+            if choosingNewDestination || nativeDocument.fileURL == nil {
+                nativeDocument.saveAs(nil)
+            } else {
+                nativeDocument.save(nil)
+            }
+            return
+        }
+#endif
+        do {
+            try document.synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
+        } catch {
+            present(error)
+            return
+        }
         isSaving = true
 #if os(macOS)
         if choosingNewDestination || saveURL == nil {
@@ -968,6 +1018,44 @@ struct ContentView: View {
             }
         }
     }
+
+#if os(macOS)
+    private func configureNativeDocumentSaving() {
+        guard let nativeDocument = nativeDocumentReference?.document else { return }
+        nativeDocument.prepareSave = {
+            try await prepareNativeDocumentSave()
+        }
+        nativeDocument.saveActivityDidChange = { saving in
+            isSaving = saving
+        }
+    }
+
+    private func prepareNativeDocumentSave() async throws
+        -> PDFEditorNativeSavePreparation {
+        try document.synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
+        // AcroForm synchronization publishes its revision on the next main-queue
+        // turn after PDFKit has committed the field editor. Let that publication
+        // settle before the background save candidate captures its revision.
+        await Task.yield()
+        let pendingSave = try await preparePendingManualSave()
+        return PDFEditorNativeSavePreparation(
+            data: pendingSave.preparation.data
+        ) { url in
+            try await finishSuccessfulManualSave(
+                pendingSave,
+                at: url,
+                didAdoptDestination: true
+            )
+            synchronizeNativeDocumentEditedState()
+        }
+    }
+
+    private func synchronizeNativeDocumentEditedState() {
+        nativeDocumentReference?.document?.synchronizeEditedState(
+            editorState.hasUnsavedChanges || !pendingTextEditStore.edits.isEmpty
+        )
+    }
+#endif
 
     private var suggestedSaveFilename: String {
         guard let saveURL else { return "Untitled" }
@@ -2261,6 +2349,14 @@ struct ContentView: View {
 
     private func refreshAnnotationsIfNeeded() {
         loadCanvasAnnotations()
+    }
+
+    private func synchronizeAcroFormChanges() {
+        do {
+            try document.synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
+        } catch {
+            present(error)
+        }
     }
 
     private func updateAnnotation(
