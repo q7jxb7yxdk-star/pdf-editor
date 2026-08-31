@@ -39,6 +39,7 @@ This repository uses the following terms:
 - Register document mutations and pending text replacements with the focused document Undo manager. The temporary macOS inline text view uses an isolated Undo history that is cleared before the view is removed.
 
 - View nested bookmarks, jump to their pages, add a bookmark for the current page, and rename or delete bookmarks through each row's ellipsis Menu. Bookmark changes support Undo/Redo and are stored inside the PDF on explicit Save. Verified changes update only the displayed outline, remapping destinations to existing pages instead of replacing the whole PDFView document. The ellipsis remains a Menu with a plain style and an explicit adaptive foreground color; it does not rely on forced refreshes when focus or tabs change. Final visual behavior remains a manual check.
+- Choosing Rename replaces the bookmark title with a focused inline text field instead of opening a dialog. Return or the checkmark confirms; Escape on macOS or the cancel icon discards the draft. Blank names are rejected, and a failed rename retains the draft. Add and the row Rename/Delete actions are unavailable while renaming. Closing the panel or changing the outline cancels the draft; Add Bookmark still uses its existing dialog.
 
 ### Experimental or inactive paths
 
@@ -173,6 +174,8 @@ Third-party licensing is documented separately:
 - `Packages/PDFiumBridge/Vendor/NOTICE.md` records PDFium provenance and identifies the outstanding requirement to generate complete notices for the pinned build and its transitive components.
 
 ## Verification status
+
+The inline Bookmark rename update passed Swift syntax/type checks and `git diff --check`. Keyboard focus, confirm/cancel behavior, failure-draft retention, and interaction with nested outlines and tabs still require manual app verification. No Xcode Build/Test was run for this update.
 
 For the 2026-08-31 Bookmark/AcroForm changes, Swift syntax/type checks and `git diff --check` passed. Static checks cover shared PDFium lock entry points and bookmark-only presentation updates. Read-only diagnostics reopened all three captured failure snapshots with the app-embedded PDFium in a separate process and compared their 42 form fields; this does not prove the original in-app failure is resolved. Scoped macOS Open/Cancel inspection observed low-contrast ellipsis icons, with recovery after Cancel in that run. The final plain Menu/adaptive-color change, absence of bookmark black flashes, and app-level concurrency behavior still require manual verification. No new Xcode Build/Test was run for these changes.
 

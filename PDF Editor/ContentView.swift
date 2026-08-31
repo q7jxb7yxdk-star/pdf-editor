@@ -259,9 +259,7 @@ struct ContentView: View {
     @State private var showsBookmarkPanel = false
     @State private var bookmarks: [PDFBookmarkSnapshot] = []
     @State private var showsAddBookmarkPrompt = false
-    @State private var showsRenameBookmarkPrompt = false
     @State private var bookmarkTitle = ""
-    @State private var bookmarkBeingRenamed: PDFBookmarkSnapshot?
     @State private var usesInlinePanels = false
 
     private let annotationService = PDFAnnotationService()
@@ -515,15 +513,6 @@ struct ContentView: View {
         } message: {
             Text("The bookmark will point to the current page and be saved inside the PDF.")
         }
-        .alert("Rename Bookmark", isPresented: $showsRenameBookmarkPrompt) {
-            TextField("Bookmark name", text: $bookmarkTitle)
-            Button("Cancel", role: .cancel) {
-                bookmarkTitle = ""
-                bookmarkBeingRenamed = nil
-            }
-            Button("Rename", action: renameBookmark)
-                .disabled(bookmarkTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
         .sheet(isPresented: $showsObjectInspector) {
             PageObjectInspectorView(
                 objects: $pageObjects,
@@ -677,7 +666,7 @@ struct ContentView: View {
             selectedPageIndex: selectedPageIndex,
             onNavigate: { selectedPageIndex = $0 },
             onAdd: beginAddingBookmark,
-            onRename: beginRenamingBookmark,
+            onRename: renameBookmark,
             onDelete: deleteBookmark,
             onClose: { showsBookmarkPanel = false }
         )
@@ -1060,25 +1049,18 @@ struct ContentView: View {
         }
     }
 
-    private func beginRenamingBookmark(_ bookmark: PDFBookmarkSnapshot) {
-        bookmarkBeingRenamed = bookmark
-        bookmarkTitle = bookmark.title
-        showsRenameBookmarkPrompt = true
-    }
-
-    private func renameBookmark() {
-        guard let bookmark = bookmarkBeingRenamed else { return }
+    private func renameBookmark(_ bookmark: PDFBookmarkSnapshot, title: String) -> Bool {
         do {
             try document.renameBookmark(
                 at: bookmark.path,
-                title: bookmarkTitle,
+                title: title,
                 undoManager: undoManager
             )
-            bookmarkTitle = ""
-            bookmarkBeingRenamed = nil
             loadBookmarks()
+            return true
         } catch {
             presentBookmarkError(error)
+            return false
         }
     }
 

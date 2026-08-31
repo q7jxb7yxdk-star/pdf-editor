@@ -929,9 +929,14 @@ struct PDFBookmarksPanel: View {
     let selectedPageIndex: Int?
     let onNavigate: (Int) -> Void
     let onAdd: () -> Void
-    let onRename: (PDFBookmarkSnapshot) -> Void
+    let onRename: (PDFBookmarkSnapshot, String) -> Bool
     let onDelete: (PDFBookmarkSnapshot) -> Void
     let onClose: () -> Void
+
+    @State private var bookmarkBeingRenamed: PDFBookmarkSnapshot?
+    @State private var renameDraft = ""
+    @State private var renameSourceBookmarks: [PDFBookmarkSnapshot] = []
+    @FocusState private var isRenameFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -945,7 +950,7 @@ struct PDFBookmarksPanel: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.plain)
-                .disabled(selectedPageIndex == nil)
+                .disabled(selectedPageIndex == nil || bookmarkBeingRenamed != nil)
                 .help("Add Bookmark for Current Page")
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -975,47 +980,55 @@ struct PDFBookmarksPanel: View {
             }
         }
         .background(.background)
+        .onChange(of: bookmarks) { _, updatedBookmarks in
+            // Paths are positional: an outline change can make the draft target another bookmark.
+            if bookmarkBeingRenamed != nil, updatedBookmarks != renameSourceBookmarks {
+                cancelRenaming()
+            }
+        }
+        .onDisappear(perform: cancelRenaming)
     }
 
     private func bookmarkRow(_ bookmark: PDFBookmarkSnapshot) -> some View {
         HStack(spacing: 4) {
-            Button {
-                if let pageIndex = bookmark.pageIndex {
-                    onNavigate(pageIndex)
+            if bookmarkBeingRenamed?.path == bookmark.path {
+                bookmarkLabel(bookmark, isEditing: true)
+
+                Button(action: commitRenaming) {
+                    Image(systemName: "checkmark")
+                        .frame(width: 24, height: 28)
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: bookmark.pageIndex == nil ? "bookmark.slash" : "bookmark.fill")
-                        .foregroundStyle(
-                            bookmark.pageIndex == nil
-                                ? Color.secondary
-                                : Color.accentColor
-                        )
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(bookmark.title)
-                            .lineLimit(2)
-                        if let pageIndex = bookmark.pageIndex {
-                            Text("Page \(pageIndex + 1)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("External or unavailable destination")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                .buttonStyle(.plain)
+                .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel("Save Bookmark Name")
+                .help("Save Bookmark Name")
+
+                Button(action: cancelRenaming) {
+                    Image(systemName: "xmark")
+                        .frame(width: 24, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel Rename")
+                .help("Cancel Rename")
+            } else {
+                Button {
+                    if let pageIndex = bookmark.pageIndex {
+                        onNavigate(pageIndex)
                     }
-                    Spacer(minLength: 0)
+                } label: {
+                    bookmarkLabel(bookmark)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .disabled(bookmark.pageIndex == nil)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(bookmark.pageIndex == nil)
-            .frame(maxWidth: .infinity, alignment: .leading)
 
             Menu {
-                Button("Rename") { onRename(bookmark) }
+                Button("Rename") { beginRenaming(bookmark) }
+                    .disabled(bookmarkBeingRenamed != nil)
                 Button("Delete", role: .destructive) { onDelete(bookmark) }
+                    .disabled(bookmarkBeingRenamed != nil)
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(Color.primary)
@@ -1031,6 +1044,66 @@ struct PDFBookmarksPanel: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 3)
+    }
+
+    private func bookmarkLabel(_ bookmark: PDFBookmarkSnapshot, isEditing: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: bookmark.pageIndex == nil ? "bookmark.slash" : "bookmark.fill")
+                .foregroundStyle(bookmark.pageIndex == nil ? Color.secondary : Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                if isEditing {
+                    TextField("Bookmark name", text: $renameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Bookmark name")
+                        .focused($isRenameFocused)
+                        .onSubmit(commitRenaming)
+#if os(macOS)
+                        .onExitCommand(perform: cancelRenaming)
+#endif
+                        .task { isRenameFocused = true }
+                } else {
+                    Text(bookmark.title)
+                        .lineLimit(2)
+                }
+                if let pageIndex = bookmark.pageIndex {
+                    Text("Page \(pageIndex + 1)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("External or unavailable destination")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func beginRenaming(_ bookmark: PDFBookmarkSnapshot) {
+        renameDraft = bookmark.title
+        renameSourceBookmarks = bookmarks
+        bookmarkBeingRenamed = bookmark
+    }
+
+    private func commitRenaming() {
+        guard let bookmark = bookmarkBeingRenamed else { return }
+        guard bookmarks == renameSourceBookmarks else {
+            cancelRenaming()
+            return
+        }
+        let title = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        if title == bookmark.title || onRename(bookmark, title) {
+            cancelRenaming()
+        }
+    }
+
+    private func cancelRenaming() {
+        isRenameFocused = false
+        bookmarkBeingRenamed = nil
+        renameDraft = ""
+        renameSourceBookmarks = []
     }
 }
 
