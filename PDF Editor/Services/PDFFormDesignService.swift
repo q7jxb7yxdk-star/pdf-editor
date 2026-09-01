@@ -377,7 +377,7 @@ nonisolated struct PDFFormDesignService {
             annotation.buttonWidgetStateString = field.exportValue
             annotation.buttonWidgetState = .offState
             if field.kind == .radioButton {
-                annotation.allowsToggleToOff = false
+                annotation.allowsToggleToOff = true
                 annotation.radiosInUnison = false
             }
             let defaultOption = allFields.first {

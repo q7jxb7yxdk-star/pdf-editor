@@ -1602,14 +1602,38 @@ extension PDFKitView {
             guard let field = selectedFormField.wrappedValue,
                   let page = pdfView.document?.page(at: field.pageIndex) else { return false }
             let rect = pdfView.convert(field.bounds, from: page).standardized
+            let hitRadius = formResizeHandleHitRadius(for: rect)
             return [CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY),
                     CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.maxY)]
-                .contains { hypot($0.x - point.x, $0.y - point.y) <= 20 }
+                .contains { hypot($0.x - point.x, $0.y - point.y) <= hitRadius }
+        }
+
+        private func formResizeHandleHitRadius(for rect: CGRect) -> CGFloat {
+            min(14, max(6, min(rect.width, rect.height) * 0.25))
+        }
+
+        private func selectedFormFieldContains(_ point: CGPoint, in pdfView: PDFView) -> Bool {
+            guard let field = selectedFormField.wrappedValue,
+                  let page = pdfView.document?.page(at: field.pageIndex) else { return false }
+            return pdfView.convert(field.bounds, from: page).standardized.contains(point)
+        }
+
+        private func formFieldInteractionContains(_ point: CGPoint, in pdfView: PDFView) -> Bool {
+            selectedFormFieldContains(point, in: pdfView) ||
+                formResizeHandleContains(point, in: pdfView)
         }
 
         @discardableResult
         private func selectAuthoredFormField(at point: CGPoint, in pdfView: PDFView) -> Bool {
             guard let field = authoredFormField(at: point, in: pdfView) else { return false }
+            selectAuthoredFormField(field, in: pdfView)
+            return true
+        }
+
+        private func selectAuthoredFormField(
+            _ field: PDFFormDesignField,
+            in pdfView: PDFView
+        ) {
             selectedObject.wrappedValue = nil
             selectedAnnotation.wrappedValue = nil
             selectedFormField.wrappedValue = field
@@ -1618,7 +1642,14 @@ extension PDFKitView {
             selection.wrappedValue = nil
             updateGestureAvailability()
             refreshOverlay()
-            return true
+        }
+
+        private func prepareFormFieldPan(at point: CGPoint, in pdfView: PDFView) -> Bool {
+            if let field = authoredFormField(at: point, in: pdfView),
+               selectedFormField.wrappedValue?.id != field.id {
+                selectAuthoredFormField(field, in: pdfView)
+            }
+            return formFieldInteractionContains(point, in: pdfView)
         }
 
         private func beginAcroFormInteractionIfNeeded() {
@@ -4689,12 +4720,26 @@ extension PDFKitView {
                     CGPoint(x: selectionRect.maxX, y: selectionRect.maxY),
                     CGPoint(x: selectionRect.minX, y: selectionRect.maxY),
                 ]
-                guard let cornerIndex = corners.indices.min(by: {
+                let cornerIndex = corners.indices.min(by: {
                     hypot(corners[$0].x - viewPoint.x, corners[$0].y - viewPoint.y) <
                         hypot(corners[$1].x - viewPoint.x, corners[$1].y - viewPoint.y)
-                }), hypot(corners[cornerIndex].x - viewPoint.x, corners[cornerIndex].y - viewPoint.y) <= 20 else { return }
+                })
+                let hitRadius = formResizeHandleHitRadius(for: selectionRect)
+                let touchesCorner = cornerIndex.map {
+                    hypot(corners[$0].x - viewPoint.x, corners[$0].y - viewPoint.y) <= hitRadius
+                } ?? false
+                guard touchesCorner || selectionRect.contains(viewPoint),
+                      let cornerIndex else { return }
                 interactionFormField = field
-                interactionFormAnchorPoint = pdfView.convert(corners[(cornerIndex + 2) % 4], to: page)
+                if touchesCorner {
+                    interactionFormAnchorPoint = pdfView.convert(
+                        corners[(cornerIndex + 2) % 4], to: page
+                    )
+                    dragMode = .scale
+                } else {
+                    interactionFormAnchorPoint = nil
+                    dragMode = .move
+                }
                 pageIndex = field.pageIndex
                 bounds = field.bounds
             } else if annotationEditingEnabled,
@@ -4726,7 +4771,7 @@ extension PDFKitView {
                 CGPoint(x: selectionRect.minX, y: selectionRect.maxY),
             ]
             if interactionFormField != nil {
-                dragMode = .scale
+                // The field branch selected move or scale from its body/handle hit.
             } else if interactionAnnotation?.kind == .note {
                 dragMode = .move
             } else {
@@ -4745,17 +4790,26 @@ extension PDFKitView {
                     width: current.x - interactionStartPoint.x,
                     height: current.y - interactionStartPoint.y
                 )
-                refreshOverlay(previewBounds: interactionStartBounds.offsetBy(
-                    dx: offset.width,
-                    dy: offset.height
-                ))
-                if finished, abs(offset.width) + abs(offset.height) > 0.01 {
-                    if let annotation = interactionAnnotation {
+                let translatedBounds = interactionStartBounds.offsetBy(
+                    dx: offset.width, dy: offset.height
+                )
+                if let field = interactionFormField {
+                    let bounds = PDFFormPageGeometry(
+                        cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+                    ).clamped(translatedBounds)
+                    refreshOverlay(previewBounds: bounds)
+                    let changed = abs(bounds.minX - interactionStartBounds.minX) +
+                        abs(bounds.minY - interactionStartBounds.minY) > 0.01
+                    if finished, changed { onSetFormFieldBounds(field, bounds) }
+                } else {
+                    refreshOverlay(previewBounds: translatedBounds)
+                    if finished, abs(offset.width) + abs(offset.height) > 0.01,
+                       let annotation = interactionAnnotation {
                         onSetAnnotationBounds(
-                            annotation,
-                            interactionStartBounds.offsetBy(dx: offset.width, dy: offset.height)
+                            annotation, translatedBounds
                         )
-                    } else if let object = interactionObject {
+                    } else if finished, abs(offset.width) + abs(offset.height) > 0.01,
+                              let object = interactionObject {
                         onTranslateObject(object, offset)
                     }
                 }
@@ -5491,15 +5545,27 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
 extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegate {
 
+    private func interactionStartPoint(
+        for gestureRecognizer: NSGestureRecognizer,
+        in pdfView: PDFView
+    ) -> CGPoint {
+        let point = gestureRecognizer.location(in: pdfView)
+        guard let pan = gestureRecognizer as? NSPanGestureRecognizer else { return point }
+        let translation = pan.translation(in: pdfView)
+        return CGPoint(x: point.x - translation.x, y: point.y - translation.y)
+    }
+
     func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
         guard !formPlacementActive else { return false }
         guard inlineTextField == nil, let pdfView else { return false }
-        let point = gestureRecognizer.location(in: pdfView)
-        if authoredWidgetOwnsInput(at: point, in: pdfView),
-           !formResizeHandleContains(point, in: pdfView) { return false }
+        let point = interactionStartPoint(for: gestureRecognizer, in: pdfView)
+        if authoredWidgetOwnsInput(at: point, in: pdfView) {
+            guard gestureRecognizer is NSPanGestureRecognizer else { return false }
+            guard prepareFormFieldPan(at: point, in: pdfView) else { return false }
+        }
         return shouldBeginInteractionGesture(
             gestureRecognizer,
-            at: gestureRecognizer.location(in: pdfView),
+            at: point,
             in: pdfView
         )
     }
@@ -5534,7 +5600,7 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
         let bounds: CGRect
         let isTextObject: Bool
         if let field = selectedFormField.wrappedValue,
-           formResizeHandleContains(viewPoint, in: pdfView) {
+           formFieldInteractionContains(viewPoint, in: pdfView) {
             pageIndex = field.pageIndex
             bounds = field.bounds
             isTextObject = false
@@ -5563,13 +5629,18 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
         shouldAttemptToRecognizeWith event: NSEvent
     ) -> Bool {
         guard let pdfView else { return false }
-        let point = pdfView.convert(event.locationInWindow, from: nil)
-        if inlineEditorContains(point) {
+        let eventPoint = pdfView.convert(event.locationInWindow, from: nil)
+        if inlineEditorContains(eventPoint) {
+            return false
+        }
+        if gestureRecognizer is NSPanGestureRecognizer,
+           authoredWidgetOwnsInput(at: eventPoint, in: pdfView),
+           !prepareFormFieldPan(at: eventPoint, in: pdfView) {
             return false
         }
         return shouldBeginInteractionGesture(
             gestureRecognizer,
-            at: point,
+            at: eventPoint,
             in: pdfView
         )
     }
@@ -5624,6 +5695,16 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
 
 #if os(iOS)
 extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegate {
+    private func interactionStartPoint(
+        for gestureRecognizer: UIGestureRecognizer,
+        in pdfView: PDFView
+    ) -> CGPoint {
+        let point = gestureRecognizer.location(in: pdfView)
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return point }
+        let translation = pan.translation(in: pdfView)
+        return CGPoint(x: point.x - translation.x, y: point.y - translation.y)
+    }
+
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldReceive touch: UITouch
@@ -5631,8 +5712,7 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         guard !formPlacementActive else { return false }
         if let pdfView, authoredWidgetOwnsInput(at: touch.location(in: pdfView), in: pdfView) {
             return gestureRecognizer is UITapGestureRecognizer ||
-                (gestureRecognizer is UIPanGestureRecognizer &&
-                 formResizeHandleContains(touch.location(in: pdfView), in: pdfView))
+                gestureRecognizer is UIPanGestureRecognizer
         }
         guard let touchedView = touch.view else { return true }
         if let annotationActionContainer,
@@ -5646,13 +5726,15 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard !formPlacementActive else { return false }
-        if let pdfView,
-           authoredWidgetOwnsInput(at: gestureRecognizer.location(in: pdfView), in: pdfView) {
-            if gestureRecognizer is UITapGestureRecognizer { return true }
-            if gestureRecognizer is UIPanGestureRecognizer {
-                return formResizeHandleContains(gestureRecognizer.location(in: pdfView), in: pdfView)
+        if let pdfView {
+            let point = interactionStartPoint(for: gestureRecognizer, in: pdfView)
+            if authoredWidgetOwnsInput(at: point, in: pdfView) {
+                if gestureRecognizer is UITapGestureRecognizer { return true }
+                if gestureRecognizer is UIPanGestureRecognizer {
+                    return prepareFormFieldPan(at: point, in: pdfView)
+                }
+                return false
             }
-            return false
         }
         if gestureRecognizer === freehandGesture {
             guard freehandDrawingEnabled, let pdfView else { return false }
@@ -5674,11 +5756,15 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         guard let pdfView else { return false }
         let pageIndex: Int
         let bounds: CGRect
+        var interactionPoint = gestureRecognizer.location(in: pdfView)
         if let field = selectedFormField.wrappedValue,
            gestureRecognizer is UIPanGestureRecognizer,
-           formResizeHandleContains(gestureRecognizer.location(in: pdfView), in: pdfView) {
+           formFieldInteractionContains(
+               interactionStartPoint(for: gestureRecognizer, in: pdfView), in: pdfView
+           ) {
             pageIndex = field.pageIndex
             bounds = field.bounds
+            interactionPoint = interactionStartPoint(for: gestureRecognizer, in: pdfView)
         } else if annotationEditingEnabled,
            gestureRecognizer is UIPanGestureRecognizer,
            let page = pdfView.page(
@@ -5701,9 +5787,8 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         } else { return false }
         guard let page = pdfView.document?.page(at: pageIndex) else { return false }
         if gestureRecognizer is UIPanGestureRecognizer {
-            let point = gestureRecognizer.location(in: pdfView)
             let rect = pdfView.convert(bounds, from: page).standardized
-            return rect.insetBy(dx: -18, dy: -18).contains(point)
+            return rect.insetBy(dx: -18, dy: -18).contains(interactionPoint)
         }
         return true
     }

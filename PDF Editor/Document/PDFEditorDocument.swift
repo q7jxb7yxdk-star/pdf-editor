@@ -845,8 +845,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
         return field
     }
 
-    /// Resize one app-authored Widget through the same verified byte transaction
-    /// used by placement. Foreign fields cannot enter this path.
+    /// Move or resize one app-authored Widget through the same verified byte
+    /// transaction used by placement. Foreign fields cannot enter this path.
     @discardableResult
     func resizeAuthoredFormField(
         id: UUID, bounds: CGRect, undoManager: UndoManager?
@@ -864,6 +864,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFFormDesignError.documentChanged
         }
         var fields = session.fields
+        let previousBounds = fields[index].bounds
         fields[index].bounds = PDFFormPageGeometry(
             cropBox: page.bounds(for: .cropBox), rotation: page.rotation
         ).clamped(bounds.standardized)
@@ -874,7 +875,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
             fields, session: session, undoManager: undoManager,
             preparedPresentationUpdate: presentationUpdate
         )
-        undoManager?.setActionName("Resize \(fields[index].kind.title)")
+        let sizeChanged = abs(previousBounds.width - fields[index].bounds.width) +
+            abs(previousBounds.height - fields[index].bounds.height) > 0.01
+        undoManager?.setActionName(
+            "\(sizeChanged ? "Resize" : "Move") \(fields[index].kind.title)"
+        )
         return fields[index]
     }
 

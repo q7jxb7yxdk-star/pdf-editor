@@ -141,7 +141,7 @@ nonisolated struct PDFFormFieldTreeWriter {
             let kids = group.map { widgets[$0.id]! }
             let selected = group.first(where: \.isSelected)?.exportValue ?? "Off"
             let defaultChoice = group.first(where: \.isDefaultSelected)?.exportValue ?? "Off"
-            objects[parent] = Array(("<< /FT /Btn /T \(Self.pdfString(name)) /Ff 49152 " +
+            objects[parent] = Array(("<< /FT /Btn /T \(Self.pdfString(name)) /Ff 32768 " +
                 "/Kids \(Self.array(kids)) /V /\(selected) /DV /\(defaultChoice) /PDFEditorFormGroup true >>").utf8)
             for ref in kids {
                 var widget = try body(ref)
