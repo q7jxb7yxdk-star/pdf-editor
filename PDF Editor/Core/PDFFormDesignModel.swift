@@ -20,6 +20,10 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         case .radioButton: "smallcircle.filled.circle"
         }
     }
+
+    var minimumDimension: CGFloat {
+        self == .text ? 12 : 11
+    }
 }
 
 nonisolated struct PDFFormDesignField: Identifiable, Equatable, Sendable {
@@ -104,9 +108,9 @@ nonisolated struct PDFFormPageGeometry {
 
     var displaySize: CGSize { cropBox.applying(transform).size }
 
-    func clamped(_ rect: CGRect) -> CGRect {
-        let width = min(max(rect.width, 12), cropBox.width)
-        let height = min(max(rect.height, 12), cropBox.height)
+    func clamped(_ rect: CGRect, minimumDimension: CGFloat = 12) -> CGRect {
+        let width = min(max(rect.width, minimumDimension), cropBox.width)
+        let height = min(max(rect.height, minimumDimension), cropBox.height)
         return CGRect(x: min(max(rect.minX, cropBox.minX), cropBox.maxX - width),
                       y: min(max(rect.minY, cropBox.minY), cropBox.maxY - height),
                       width: width, height: height)

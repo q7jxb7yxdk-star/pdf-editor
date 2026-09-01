@@ -142,10 +142,13 @@ nonisolated struct PDFFormDesignService {
             guard let page = document.page(at: field.pageIndex),
                   [field.bounds.minX, field.bounds.minY, field.bounds.width, field.bounds.height,
                    field.fontSize].allSatisfy(\.isFinite),
-                  field.bounds.width >= 12, field.bounds.height >= 12,
+                  field.bounds.width >= field.kind.minimumDimension,
+                  field.bounds.height >= field.kind.minimumDimension,
                   page.bounds(for: .cropBox).insetBy(dx: -0.01, dy: -0.01).contains(field.bounds),
                   (6...72).contains(field.fontSize) else {
-                throw PDFFormDesignError.invalidField("Keep each field inside its page, at least 12 points wide and high, with a 6–72 point font.")
+                throw PDFFormDesignError.invalidField(
+                    "Keep text fields at least 12 points wide and high, buttons at least 11 points, and every field inside its page with a 6–72 point font."
+                )
             }
             if field.kind != .text {
                 // A PDF button's on-state is a Name. Keep export values portable

@@ -1656,7 +1656,7 @@ extension PDFKitView {
         }
 
         private func formResizeHandleHitRadius(for rect: CGRect) -> CGFloat {
-            min(14, max(6, min(rect.width, rect.height) * 0.25))
+            min(10, max(3.5, min(rect.width, rect.height) * 0.22))
         }
 
         private func selectedFormFieldContains(_ point: CGPoint, in pdfView: PDFView) -> Bool {
@@ -1821,9 +1821,15 @@ extension PDFKitView {
                 CGPoint(x: displayBounds.maxX, y: displayBounds.maxY),
                 CGPoint(x: displayBounds.minX, y: displayBounds.maxY),
             ]
+            let handleDiameter: CGFloat = selectedFormField.wrappedValue?.kind == .text ? 10 : 6
             for (layer, point) in zip(handleLayers, points) {
                 layer.isHidden = usesFreeTextEditorFrame
-                layer.frame = CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)
+                layer.frame = CGRect(
+                    x: point.x - handleDiameter / 2,
+                    y: point.y - handleDiameter / 2,
+                    width: handleDiameter,
+                    height: handleDiameter
+                )
                 layer.path = CGPath(ellipseIn: layer.bounds, transform: nil)
             }
             if usesFreeTextEditorFrame, inlineEditingAnnotation != nil {
@@ -4843,7 +4849,10 @@ extension PDFKitView {
                 if let field = interactionFormField {
                     let bounds = PDFFormPageGeometry(
                         cropBox: page.bounds(for: .cropBox), rotation: page.rotation
-                    ).clamped(translatedBounds)
+                    ).clamped(
+                        translatedBounds,
+                        minimumDimension: field.kind.minimumDimension
+                    )
                     refreshOverlay(previewBounds: bounds)
                     let changed = abs(bounds.minX - interactionStartBounds.minX) +
                         abs(bounds.minY - interactionStartBounds.minY) > 0.01
@@ -4872,7 +4881,7 @@ extension PDFKitView {
                 ), 20)
                 let operation = scaleTransform(factor: factor, center: center)
                 if let field = interactionFormField, let anchor = interactionFormAnchorPoint {
-                    let minimum: CGFloat = 12
+                    let minimum = field.kind.minimumDimension
                     let width = max(abs(current.x - anchor.x), minimum)
                     let height = max(abs(current.y - anchor.y), minimum)
                     let rawBounds = CGRect(
@@ -4882,7 +4891,7 @@ extension PDFKitView {
                     )
                     let bounds = PDFFormPageGeometry(
                         cropBox: page.bounds(for: .cropBox), rotation: page.rotation
-                    ).clamped(rawBounds)
+                    ).clamped(rawBounds, minimumDimension: minimum)
                     refreshOverlay(previewBounds: bounds)
                     if finished { onSetFormFieldBounds(field, bounds) }
                 } else if let annotation = interactionAnnotation {

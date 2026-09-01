@@ -122,14 +122,16 @@ final class PDFFormPlacementView: PDFFormPlacementNativeView {
     private func rectangle(from start: CGPoint, to end: CGPoint, on page: PDFPage) -> CGRect {
         let a = pagePoint(start, on: page), b = pagePoint(end, on: page)
         let bounds = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
-        return PDFFormPageGeometry(cropBox: page.bounds(for: .cropBox), rotation: page.rotation).clamped(bounds)
+        let minimumDimension = configuration?.request.kind.minimumDimension ?? 12
+        return PDFFormPageGeometry(cropBox: page.bounds(for: .cropBox), rotation: page.rotation)
+            .clamped(bounds, minimumDimension: minimumDimension)
     }
 
     private func defaultBounds(at point: CGPoint, on page: PDFPage) -> CGRect {
         let isText = configuration?.request.kind == .text
         let scale = max(pdfView?.scaleFactor ?? 1, 0.01)
-        return rectangle(from: point, to: CGPoint(x: point.x + (isText ? 180 : 22) * scale,
-                                                  y: point.y + (isText ? 28 : 22) * scale), on: page)
+        return rectangle(from: point, to: CGPoint(x: point.x + (isText ? 180 : 11) * scale,
+                                                  y: point.y + (isText ? 28 : 11) * scale), on: page)
     }
 
     private func begin(at point: CGPoint) {

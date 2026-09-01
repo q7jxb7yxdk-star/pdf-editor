@@ -885,7 +885,10 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let previousBounds = fields[index].bounds
         fields[index].bounds = PDFFormPageGeometry(
             cropBox: page.bounds(for: .cropBox), rotation: page.rotation
-        ).clamped(bounds.standardized)
+        ).clamped(
+            bounds.standardized,
+            minimumDimension: fields[index].kind.minimumDimension
+        )
         let presentationUpdate = try PDFFormDesignService().prepareBoundsUpdate(
             for: fields[index], in: pdfDocument
         )

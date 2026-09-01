@@ -183,7 +183,10 @@ struct PDFFormDesignerView: View {
                                 onSelect: { selectedID = field.id; placementKind = nil },
                                 onChangeBounds: { displayBounds in
                                     var changed = field
-                                    changed.bounds = geometry.clamped(displayBounds.applying(geometry.transform.inverted()))
+                                    changed.bounds = geometry.clamped(
+                                        displayBounds.applying(geometry.transform.inverted()),
+                                        minimumDimension: field.kind.minimumDimension
+                                    )
                                     update(changed)
                                 }
                             )
@@ -276,7 +279,10 @@ struct PDFFormDesignerView: View {
                           let page = session.previewDocument.page(at: current.pageIndex) else { return }
                     current.bounds[keyPath: keyPath] = CGFloat(value)
                     current.bounds = PDFFormPageGeometry(cropBox: page.bounds(for: .cropBox), rotation: page.rotation)
-                        .clamped(current.bounds)
+                        .clamped(
+                            current.bounds,
+                            minimumDimension: current.kind.minimumDimension
+                        )
                     update(current)
                 }), format: .number.precision(.fractionLength(0...2)))
         }
@@ -312,8 +318,14 @@ struct PDFFormDesignerView: View {
             .union(fields.map(\.name))
         var number = 1
         while existing.contains("\(prefix)\(number)") { number += 1 }
-        let bounds = geometry.clamped(CGRect(x: point.x, y: point.y - 24,
-                                            width: kind == .text ? 180 : 22, height: kind == .text ? 28 : 22))
+        let bounds = geometry.clamped(
+            CGRect(
+                x: point.x, y: point.y - 24,
+                width: kind == .text ? 180 : 11,
+                height: kind == .text ? 28 : 11
+            ),
+            minimumDimension: kind.minimumDimension
+        )
         let field = PDFFormDesignField(pageIndex: pageIndex, kind: kind, name: "\(prefix)\(number)", bounds: bounds,
                                        exportValue: kind == .radioButton ? "Option1" : "Yes")
         var next = fields + [field]
@@ -321,7 +333,10 @@ struct PDFFormDesignerView: View {
             var option = field
             option.id = UUID()
             option.exportValue = "Option2"
-            option.bounds = geometry.clamped(bounds.offsetBy(dx: 40, dy: 0))
+            option.bounds = geometry.clamped(
+                bounds.offsetBy(dx: 40, dy: 0),
+                minimumDimension: kind.minimumDimension
+            )
             next.append(option)
         }
         change(next)
@@ -340,7 +355,10 @@ struct PDFFormDesignerView: View {
         while used.contains("Option\(number)") { number += 1 }
         option.exportValue = "Option\(number)"
         option.bounds = PDFFormPageGeometry(cropBox: page.bounds(for: .cropBox), rotation: page.rotation)
-            .clamped(field.bounds.offsetBy(dx: 40, dy: 0))
+            .clamped(
+                field.bounds.offsetBy(dx: 40, dy: 0),
+                minimumDimension: field.kind.minimumDimension
+            )
         change(fields + [option])
         selectedID = option.id
     }
@@ -382,6 +400,8 @@ private struct PDFFormDesignOverlay: View {
     @GestureState private var resize = CGSize.zero
 
     var body: some View {
+        let handleSize: CGFloat = field.kind == .text ? 12 : 6
+        let handlePadding: CGFloat = field.kind == .text ? 5 : 2
         ZStack(alignment: .bottomTrailing) {
             Rectangle().fill(Color.accentColor.opacity(selected ? 0.22 : 0.10))
                 .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: selected ? 2 : 1))
@@ -400,21 +420,35 @@ private struct PDFFormDesignOverlay: View {
                                                      dy: value.translation.height / scale))
                     })
             if selected {
-                Rectangle().fill(Color.accentColor).frame(width: 12, height: 12)
-                    .padding(5).contentShape(Rectangle())
-                    .offset(x: 5, y: 5)
+                Rectangle().fill(Color.accentColor).frame(width: handleSize, height: handleSize)
+                    .padding(handlePadding).contentShape(Rectangle())
+                    .offset(x: handlePadding, y: handlePadding)
                     .gesture(DragGesture(minimumDistance: 1)
                         .updating($resize) { value, state, _ in state = value.translation }
                         .onEnded { value in
                             onChangeBounds(CGRect(origin: rect.origin, size: CGSize(
-                                width: max(12, rect.width + value.translation.width / scale),
-                                height: max(12, rect.height + value.translation.height / scale))))
+                                width: max(
+                                    field.kind.minimumDimension,
+                                    rect.width + value.translation.width / scale
+                                ),
+                                height: max(
+                                    field.kind.minimumDimension,
+                                    rect.height + value.translation.height / scale
+                                ))))
                         })
                     .accessibilityLabel("Resize field")
             }
         }
-        .frame(width: max(12 * scale, rect.width * scale + resize.width),
-               height: max(12 * scale, rect.height * scale + resize.height))
+        .frame(
+            width: max(
+                field.kind.minimumDimension * scale,
+                rect.width * scale + resize.width
+            ),
+            height: max(
+                field.kind.minimumDimension * scale,
+                rect.height * scale + resize.height
+            )
+        )
         .offset(x: rect.minX * scale + move.width, y: rect.minY * scale + move.height)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(field.kind.title): \(field.name)")
