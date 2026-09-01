@@ -840,8 +840,26 @@ final class PDFEditorDocument: ReferenceFileDocument {
             kind: kind, pageIndex: pageIndex, bounds: bounds,
             radioGroupName: radioGroupName, in: session.sourceDocument
         )
-        try applyFormDesign(session.fields + [field], session: session, undoManager: undoManager)
-        undoManager?.setActionName("Add \(kind.title)")
+        let previousData = session.sourceData
+        try applyFormDesign(
+            session.fields + [field], session: session, undoManager: undoManager,
+            registersUndo: false
+        )
+        if let undoManager {
+            let addedData = sourceData
+            let actionName = "Add \(kind.title)"
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restoreAuthoredFormFieldExistenceMutation(
+                    data: previousData,
+                    alternateData: addedData,
+                    fieldID: field.id,
+                    restoresField: false,
+                    actionName: actionName,
+                    undoManager: undoManager
+                )
+            }
+            undoManager.setActionName(actionName)
+        }
         return field
     }
 
@@ -964,7 +982,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             let deletedData = sourceData
             let actionName = "Delete \(deletedField.kind.title)"
             undoManager.registerUndo(withTarget: self) { document in
-                document.restoreDeletedFormFieldMutation(
+                document.restoreAuthoredFormFieldExistenceMutation(
                     data: previousData,
                     alternateData: deletedData,
                     fieldID: deletedField.id,
@@ -1076,10 +1094,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
     }
 
-    /// Field deletion has a narrower Undo/Redo path than other byte snapshots:
-    /// install the already verified canonical document without rebuilding it.
+    /// Field addition and deletion use a narrower Undo/Redo path than other
+    /// byte snapshots: install the already verified canonical document without
+    /// rebuilding it.
     /// PDFView shields this identity change until its replacement view is ready.
-    private func restoreDeletedFormFieldMutation(
+    private func restoreAuthoredFormFieldExistenceMutation(
         data: Data,
         alternateData: Data,
         fieldID: UUID,
@@ -1140,7 +1159,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         formPresentationDocument = nil
         publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
         undoManager.registerUndo(withTarget: self) { document in
-            document.restoreDeletedFormFieldMutation(
+            document.restoreAuthoredFormFieldExistenceMutation(
                 data: alternateData,
                 alternateData: data,
                 fieldID: fieldID,
