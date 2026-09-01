@@ -320,6 +320,7 @@ struct ContentView: View {
     @State private var selectedFormField: PDFFormDesignField?
     @State private var formPlacementPreparationID: UUID?
     @State private var radioPlacementGroupName = ""
+    @State private var choicePlacementOptionsText = "Option 1\nOption 2\nOption 3"
 #if os(macOS)
     @StateObject private var formDesignFocusRecovery = PDFFormDesignFocusRecovery()
 #endif
@@ -1207,6 +1208,9 @@ struct ContentView: View {
         guard let request = formPlacementRequest else { return nil }
         return PDFFormPlacementConfiguration(
             request: request,
+            defaultSize: request.kind.placementSize(
+                choices: request.kind.isChoice ? choicePlacementOptions : []
+            ),
             onPlace: { source, pageIndex, bounds in
                 placeFormField(request, source: source, pageIndex: pageIndex, bounds: bounds)
             },
@@ -1231,6 +1235,17 @@ struct ContentView: View {
                         .textFieldStyle(.roundedBorder)
                 }
                 Text("Use the same group for related options, or enter a new group name.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if request.kind.isChoice {
+                TextEditor(text: $choicePlacementOptionsText)
+                    .frame(minHeight: 72, maxHeight: 120)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.35))
+                    }
+                    .accessibilityLabel("Options, one per line")
+                Text("Enter one Dropdown or List Box option per line.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -1304,6 +1319,7 @@ struct ContentView: View {
             let field = try document.addPlacedFormField(
                 kind: request.kind, pageIndex: pageIndex, bounds: bounds,
                 radioGroupName: request.kind == .radioButton ? radioPlacementGroupName : nil,
+                choiceOptions: request.kind.isChoice ? choicePlacementOptions : [],
                 undoManager: undoManager
             )
             if request.kind == .radioButton { radioPlacementGroupName = field.name }
@@ -1311,6 +1327,13 @@ struct ContentView: View {
             // the clicked page can differ; assigning it would navigate/scroll
             // PDFView even though its document and pages were retained.
         } catch { present(error) }
+    }
+
+    private var choicePlacementOptions: [String] {
+        choicePlacementOptionsText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private func formDesignDidDismiss() {
@@ -2897,9 +2920,10 @@ struct ContentView: View {
     private func setFormFieldFontSize(
         _ field: PDFFormDesignField, fontSize: CGFloat
     ) {
-        guard field.kind == .text, abs(field.fontSize - fontSize) > 0.01 else { return }
+        guard field.kind == .text || field.kind.isChoice,
+              abs(field.fontSize - fontSize) > 0.01 else { return }
         do {
-            selectedFormField = try document.setAuthoredTextFieldFontSize(
+            selectedFormField = try document.setAuthoredFormFieldFontSize(
                 id: field.id, fontSize: fontSize, undoManager: undoManager
             )
         } catch { present(error) }

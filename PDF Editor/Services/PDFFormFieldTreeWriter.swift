@@ -108,7 +108,7 @@ nonisolated struct PDFFormFieldTreeWriter {
         // Empty text appearances have no font resources in PDFKit output.
         // Supply a portable default for subsequent filling in other readers.
         var form = oldForm
-        if fields.contains(where: { $0.kind == .text }) {
+        if fields.contains(where: { $0.kind == .text || $0.kind.isChoice }) {
             var resources = try resolvedValue("DR", form) ?? Array("<< >>".utf8)
             var fonts = try resolvedValue("Font", resources) ?? Array("<< >>".utf8)
             let font = allocate()
@@ -119,7 +119,7 @@ nonisolated struct PDFFormFieldTreeWriter {
             // Preserve raw bytes, including non-UTF8 strings in foreign resources.
             resources = try Self.setBytes("Font", fonts, in: resources)
             form = try Self.setBytes("DR", resources, in: form)
-            for field in fields where field.kind == .text {
+            for field in fields where field.kind == .text || field.kind.isChoice {
                 let ref = widgets[field.id]!
                 let appearance = "(/\(fontName) \(field.fontSize) Tf 0 g)"
                 objects[ref] = try Self.set("DA", appearance, in: body(ref))
@@ -131,6 +131,18 @@ nonisolated struct PDFFormFieldTreeWriter {
             if field.kind == .checkBox {
                 widget = try Self.set("DV", "/" + (field.isDefaultSelected ? field.exportValue : "Off"), in: widget)
                 widget = try Self.set("PDFEditorDefaultChoice", nil, in: widget)
+            } else if field.kind.isChoice {
+                let options = "[" + field.choices.map {
+                    "[\(Self.pdfString($0)) \(Self.pdfString($0))]"
+                }.joined(separator: " ") + "]"
+                widget = try Self.set("FT", "/Ch", in: widget)
+                widget = try Self.set("Ff", field.kind == .dropdown ? "131072" : "0", in: widget)
+                widget = try Self.set("Opt", options, in: widget)
+                widget = try Self.set("V", field.value.isEmpty ? nil : Self.pdfString(field.value), in: widget)
+                // PDFKit treats an absent /DV as the current /V after reopen.
+                // Preserve an intentionally empty default with an empty string.
+                widget = try Self.set("DV", Self.pdfString(field.defaultValue), in: widget)
+                widget = try Self.set("I", nil, in: widget)
             }
             objects[ref] = widget
             roots.append(ref)

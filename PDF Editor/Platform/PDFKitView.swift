@@ -227,6 +227,7 @@ private struct PDFFormFieldActionBar: View {
 
     @State private var showsFontSizePicker = false
     private let fontSizeChoices: [CGFloat] = [8, 9, 10, 11, 12, 14, 18, 24, 30, 36, 48]
+    private var fieldTitle: String { field.kind == .text ? "Textbox" : field.kind.title }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -242,8 +243,8 @@ private struct PDFFormFieldActionBar: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Change text size")
-            .accessibilityLabel("Change text size")
+            .help("Change font size")
+            .accessibilityLabel("Change font size")
             .accessibilityValue("\(Int(field.fontSize)) points")
             .popover(isPresented: $showsFontSizePicker, arrowEdge: .bottom) {
                 VStack(spacing: 2) {
@@ -280,8 +281,8 @@ private struct PDFFormFieldActionBar: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Delete Textbox")
-            .accessibilityLabel("Delete Textbox")
+            .help("Delete \(fieldTitle)")
+            .accessibilityLabel("Delete \(fieldTitle)")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -296,6 +297,7 @@ private final class PDFAnnotationActionContainerView: NSView {}
 
 private protocol PDFInteractionMouseHandling: AnyObject {
     func shouldCaptureMouse(at point: CGPoint, in pdfView: PDFView) -> Bool
+    func usesLightNativeListBoxAppearance(at point: CGPoint, in pdfView: PDFView) -> Bool
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool
     func handleMouseMoved(_ event: NSEvent, in pdfView: PDFView)
     func handlePointerExited(in pdfView: PDFView)
@@ -307,6 +309,9 @@ private final class PDFInteractionPDFView: PDFView {
     weak var interactionHandler: PDFInteractionMouseHandling?
     private var hoverTrackingArea: NSTrackingArea?
     private var annotationHoverTrackingArea: NSTrackingArea?
+    private var listBoxAppearanceGeneration = 0
+    private var appearanceBeforeListBoxHit: NSAppearance?
+    private var isPreparingListBoxAppearance = false
 
     override func updateTrackingAreas() {
         if let hoverTrackingArea {
@@ -324,7 +329,18 @@ private final class PDFInteractionPDFView: PDFView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let preparesListBoxAppearance = NSApp.currentEvent?.type == .leftMouseDown &&
+            interactionHandler?.usesLightNativeListBoxAppearance(
+                at: point,
+                in: self
+            ) == true
+        if preparesListBoxAppearance {
+            prepareLightNativeListBoxAppearanceBeforeHit()
+        }
         let defaultHit = super.hitTest(point)
+        if preparesListBoxAppearance {
+            applyLightNativeListBoxAppearance()
+        }
         if defaultHit is PDFFormPlacementView { return defaultHit }
         if defaultHit?.isInsideAnnotationActionBar == true {
             return defaultHit
@@ -335,6 +351,12 @@ private final class PDFInteractionPDFView: PDFView {
         if interactionHandler?.shouldCaptureMouse(at: point, in: self) == true {
             return self
         }
+        if interactionHandler?.usesLightNativeListBoxAppearance(
+            at: point,
+            in: self
+        ) == true {
+            applyLightNativeListBoxAppearance()
+        }
         if let textView = defaultHit as? NSTextView,
            !(textView is PDFPassiveTextView) {
             return textView
@@ -342,11 +364,73 @@ private final class PDFInteractionPDFView: PDFView {
         return defaultHit
     }
 
+    private func prepareLightNativeListBoxAppearanceBeforeHit() {
+        if containsNativeListBoxTable(in: self) {
+            applyLightNativeListBoxAppearance()
+            return
+        }
+        if !isPreparingListBoxAppearance {
+            appearanceBeforeListBoxHit = appearance
+            isPreparingListBoxAppearance = true
+        }
+        listBoxAppearanceGeneration &+= 1
+        let generation = listBoxAppearanceGeneration
+        appearance = NSAppearance(named: .aqua)
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  generation == listBoxAppearanceGeneration else { return }
+            applyLightNativeListBoxAppearance()
+            appearance = appearanceBeforeListBoxHit
+            appearanceBeforeListBoxHit = nil
+            isPreparingListBoxAppearance = false
+        }
+    }
+
+    private func containsNativeListBoxTable(in view: NSView) -> Bool {
+        view is NSTableView || view.subviews.contains {
+            containsNativeListBoxTable(in: $0)
+        }
+    }
+
+    func applyLightNativeListBoxAppearance() {
+        let lightAppearance = NSAppearance(named: .aqua)
+        func style(_ view: NSView) {
+            if let tableView = view as? NSTableView {
+                tableView.appearance = lightAppearance
+                tableView.backgroundColor = .white
+                tableView.usesAlternatingRowBackgroundColors = false
+                if let scrollView = tableView.enclosingScrollView {
+                    scrollView.appearance = lightAppearance
+                    scrollView.drawsBackground = true
+                    scrollView.backgroundColor = .white
+                    scrollView.contentView.backgroundColor = .white
+                }
+                tableView.style = .plain
+                tableView.needsLayout = true
+                tableView.layoutSubtreeIfNeeded()
+                tableView.enclosingScrollView?.layoutSubtreeIfNeeded()
+                tableView.needsDisplay = true
+            }
+            if let textField = view as? NSTextField {
+                textField.textColor = .black
+                textField.drawsBackground = false
+            }
+            view.subviews.forEach(style)
+        }
+        subviews.forEach(style)
+    }
+
     override func mouseDown(with event: NSEvent) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        let stylesNativeListBox = interactionHandler?
+            .usesLightNativeListBoxAppearance(at: viewPoint, in: self) == true
         if interactionHandler?.handleMouseDown(event, in: self) == true {
             return
         }
         super.mouseDown(with: event)
+        if stylesNativeListBox {
+            applyLightNativeListBoxAppearance()
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -1431,6 +1515,7 @@ extension PDFKitView {
                     queue: .main
                 ) { [weak self] _ in
                     self?.scheduleAcroFormChangeCheck()
+                    self?.scheduleListBoxNativeAppearanceUpdateAfterHit()
                 },
             ]
             observers.append(center.addObserver(
@@ -1730,6 +1815,21 @@ extension PDFKitView {
             }
         }
 
+        private func scheduleListBoxNativeAppearanceUpdateAfterHit() {
+#if os(macOS)
+            // PDFKit creates an AppKit table for an active List Box. Style it
+            // after the native hit as well as during hit testing so controls
+            // created late in the event cycle retain the PDF's white surface.
+            DispatchQueue.main.async { [weak self, weak pdfView] in
+                guard let self, let pdfView,
+                      let field = selectedFormField.wrappedValue,
+                      field.kind == .listBox else { return }
+                (pdfView as? PDFInteractionPDFView)?
+                    .applyLightNativeListBoxAppearance()
+            }
+#endif
+        }
+
         private func commitAcroFormChangeIfNeeded(generation: Int) {
             guard generation == acroFormCheckGeneration,
                   let document = pdfView?.document else { return }
@@ -1821,7 +1921,8 @@ extension PDFKitView {
                 CGPoint(x: displayBounds.maxX, y: displayBounds.maxY),
                 CGPoint(x: displayBounds.minX, y: displayBounds.maxY),
             ]
-            let handleDiameter: CGFloat = selectedFormField.wrappedValue?.kind == .text ? 10 : 6
+            let handleDiameter: CGFloat = selectedFormField.wrappedValue?.kind.isButton == true
+                ? 6 : 10
             for (layer, point) in zip(handleLayers, points) {
                 layer.isHidden = usesFreeTextEditorFrame
                 layer.frame = CGRect(
@@ -2002,7 +2103,7 @@ extension PDFKitView {
             above fieldBounds: CGRect,
             in pdfView: PDFView
         ) {
-            guard field.kind == .text else {
+            guard field.kind == .text || field.kind.isChoice else {
                 removeAnnotationActionBar()
                 return
             }
@@ -5450,8 +5551,13 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     }
 
     func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
-        if authoredWidgetOwnsInput(at: viewPoint, in: pdfView) ||
-            formResizeHandleContains(viewPoint, in: pdfView) { return true }
+        if formResizeHandleContains(viewPoint, in: pdfView) { return true }
+        if let field = authoredFormField(at: viewPoint, in: pdfView) {
+            // PDFKit renders a List Box with an internal native selection view.
+            // Let hit testing reach it; the parent pan recognizer still handles
+            // authored-field movement and corner resizing.
+            return field.kind != .listBox
+        }
         if freehandDrawingEnabled {
             return pdfView.page(for: viewPoint, nearest: false) != nil
         }
@@ -5504,6 +5610,13 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
             }
         }
         return false
+    }
+
+    func usesLightNativeListBoxAppearance(
+        at viewPoint: CGPoint,
+        in pdfView: PDFView
+    ) -> Bool {
+        authoredFormField(at: viewPoint, in: pdfView)?.kind == .listBox
     }
 
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool {

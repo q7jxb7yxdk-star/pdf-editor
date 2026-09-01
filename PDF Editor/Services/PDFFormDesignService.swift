@@ -42,6 +42,8 @@ nonisolated struct PDFFormDesignService {
                 let kind: PDFFormDesignKind
                 if annotation.widgetFieldType == .text {
                     kind = .text
+                } else if annotation.widgetFieldType == .choice {
+                    kind = annotation.isListChoice ? .listBox : .dropdown
                 } else if annotation.widgetFieldType == .button,
                           annotation.widgetControlType == .checkBoxControl {
                     kind = .checkBox
@@ -49,27 +51,35 @@ nonisolated struct PDFFormDesignService {
                           annotation.widgetControlType == .radioButtonControl {
                     kind = .radioButton
                 } else { return nil }
-                let export = kind == .text ? "Yes" : annotation.buttonWidgetStateString
+                let export = kind.isButton ? annotation.buttonWidgetStateString : "Yes"
                 return PDFFormDesignField(
                     id: id, pageIndex: pageIndex, kind: kind,
                     name: annotation.fieldName ?? "", bounds: annotation.bounds,
-                    value: kind == .text ? annotation.widgetStringValue ?? "" : "",
-                    defaultValue: kind == .text ? annotation.widgetDefaultStringValue ?? "" : "",
-                    fontSize: kind == .text ? annotation.font?.pointSize ?? 12 : 12,
+                    value: (kind == .text || kind.isChoice) ? annotation.widgetStringValue ?? "" : "",
+                    defaultValue: (kind == .text || kind.isChoice) ? annotation.widgetDefaultStringValue ?? "" : "",
+                    fontSize: (kind == .text || kind.isChoice) ? annotation.font?.pointSize ?? 11 : 11,
                     isMultiline: kind == .text && annotation.isMultiline,
-                    exportValue: kind == .text ? "Yes" : export,
-                    isSelected: kind != .text && annotation.buttonWidgetState == .onState,
-                    isDefaultSelected: kind != .text && (
+                    exportValue: export,
+                    isSelected: kind.isButton && annotation.buttonWidgetState == .onState,
+                    isDefaultSelected: kind.isButton && (
                         annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/PDFEditorDefaultChoice")) as? String
                         ?? buttonDefaults[id] ?? annotation.widgetDefaultStringValue
-                    ) == export
+                    ) == export,
+                    choices: kind.isChoice ? annotation.choices ?? [] : []
                 )
             } ?? []
         }
     }
 
     func nextPlacementName(for kind: PDFFormDesignKind, in document: PDFDocument) -> String {
-        let prefix = kind == .text ? "Text" : kind == .checkBox ? "Checkbox" : "Radio"
+        let prefix: String
+        switch kind {
+        case .text: prefix = "Text"
+        case .checkBox: prefix = "Checkbox"
+        case .radioButton: prefix = "Radio"
+        case .dropdown: prefix = "Dropdown"
+        case .listBox: prefix = "ListBox"
+        }
         let names = (0..<document.pageCount).flatMap { index in
             document.page(at: index)?.annotations.compactMap { $0.type == "Widget" ? $0.fieldName : nil } ?? []
         }
@@ -85,7 +95,7 @@ nonisolated struct PDFFormDesignService {
     /// option gets a distinct export value. Imported fields remain protected.
     func fieldForPlacement(
         kind: PDFFormDesignKind, pageIndex: Int, bounds: CGRect,
-        radioGroupName: String?, in document: PDFDocument
+        radioGroupName: String?, choiceOptions: [String] = [], in document: PDFDocument
     ) throws -> PDFFormDesignField {
         let existing = fields(in: document)
         let name = kind == .radioButton
@@ -97,6 +107,8 @@ nonisolated struct PDFFormDesignService {
             var number = 1
             while used.contains("Option\(number)") { number += 1 }
             field.exportValue = "Option\(number)"
+        } else if kind.isChoice {
+            field.choices = choiceOptions
         }
         try validate(existing + [field], in: document)
         return field
@@ -147,10 +159,10 @@ nonisolated struct PDFFormDesignService {
                   page.bounds(for: .cropBox).insetBy(dx: -0.01, dy: -0.01).contains(field.bounds),
                   (6...72).contains(field.fontSize) else {
                 throw PDFFormDesignError.invalidField(
-                    "Keep text fields at least 12 points wide and high, buttons at least 11 points, and every field inside its page with a 6–72 point font."
+                    "Keep text and choice fields at least 12 points wide and high, buttons at least 11 points, and every field inside its page with a 6–72 point font."
                 )
             }
-            if field.kind != .text {
+            if field.kind.isButton {
                 // A PDF button's on-state is a Name. Keep export values portable
                 // and reserve Off for the unchecked state.
                 guard !field.exportValue.isEmpty, field.exportValue != "Off",
@@ -159,6 +171,19 @@ nonisolated struct PDFFormDesignService {
                           (48...57).contains($0) || $0 == 95 || $0 == 45
                       }) else {
                     throw PDFFormDesignError.invalidField("Button export values must use letters A–Z, numbers, underscores or hyphens, and cannot be Off.")
+                }
+            }
+            if field.kind.isChoice {
+                guard !field.choices.isEmpty,
+                      field.choices.allSatisfy({
+                          !$0.isEmpty && $0 == $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                      }),
+                      Set(field.choices).count == field.choices.count,
+                      field.value.isEmpty || field.choices.contains(field.value),
+                      field.defaultValue.isEmpty || field.choices.contains(field.defaultValue) else {
+                    throw PDFFormDesignError.invalidField(
+                        "Dropdown and List Box options must be nonempty, unique trimmed lines; current and default values must match an option."
+                    )
                 }
             }
         }
@@ -208,7 +233,7 @@ nonisolated struct PDFFormDesignService {
                 throw PDFFormDesignError.verificationFailed
             }
             let annotation = makeAnnotation(for: field, allFields: fields)
-            if field.kind != .text && field.isSelected { selectedButtons.append(annotation) }
+            if field.kind.isButton && field.isSelected { selectedButtons.append(annotation) }
             additions.append((page, annotation))
         }
         return PresentationUpdate(
@@ -254,14 +279,14 @@ nonisolated struct PDFFormDesignService {
         )
     }
 
-    /// Preserve the live text Widget while changing its font and fitted bounds. The caller
+    /// Preserve the live text or choice Widget while changing its font and fitted bounds. The caller
     /// still serializes and verifies the complete canonical candidate before
     /// applying this prepared presentation update.
     func prepareFontSizeUpdate(
         for field: PDFFormDesignField, in document: PDFDocument
     ) throws -> PresentationUpdate {
         let currentFields = fields(in: document)
-        guard field.kind == .text,
+        guard field.kind == .text || field.kind.isChoice,
               let index = currentFields.firstIndex(where: { $0.id == field.id }) else {
             throw PDFFormDesignError.documentChanged
         }
@@ -333,7 +358,7 @@ nonisolated struct PDFFormDesignService {
         }
         return PresentationUpdate(
             removals: [], additions: [(page: page, annotation: annotation)],
-            selectedButtons: field.kind != .text && field.isSelected ? [annotation] : [],
+            selectedButtons: field.kind.isButton && field.isSelected ? [annotation] : [],
             boundsUpdates: [], fontUpdates: []
         )
     }
@@ -373,6 +398,19 @@ nonisolated struct PDFFormDesignService {
             annotation.isMultiline = field.isMultiline
             annotation.widgetStringValue = field.value
             annotation.widgetDefaultStringValue = field.defaultValue
+        } else if field.kind.isChoice {
+            annotation.widgetFieldType = .choice
+            annotation.isListChoice = field.kind == .listBox
+            annotation.choices = field.choices
+            annotation.values = field.choices
+            annotation.widgetStringValue = field.value
+            annotation.widgetDefaultStringValue = field.defaultValue
+#if os(macOS)
+            annotation.font = NSFont.systemFont(ofSize: field.fontSize)
+#else
+            annotation.font = UIFont.systemFont(ofSize: field.fontSize)
+#endif
+            annotation.fontColor = .black
         } else {
             annotation.widgetFieldType = .button
             annotation.widgetControlType = field.kind == .checkBox
@@ -489,6 +527,13 @@ nonisolated struct PDFFormDesignService {
                       abs(found.fontSize - field.fontSize) < 0.05 else {
                     throw PDFFormDesignError.verificationFailed
                 }
+            } else if field.kind.isChoice {
+                guard found.value == field.value,
+                      found.defaultValue == field.defaultValue,
+                      found.choices == field.choices,
+                      abs(found.fontSize - field.fontSize) < 0.05 else {
+                    throw PDFFormDesignError.verificationFailed
+                }
             } else {
                 guard found.exportValue == field.exportValue,
                       found.isSelected == field.isSelected,
@@ -556,10 +601,13 @@ nonisolated struct PDFFormDesignService {
             throw PDFFormDesignError.verificationFailed
         }
         for field in expected {
+            let expectedType = field.kind == .text ? "Tx" : field.kind.isChoice ? "Ch" : "Btn"
             guard let record = registered[field.id], record.name == field.name,
-                  record.type == (field.kind == .text ? "Tx" : "Btn"),
-                  field.kind == .text || ((record.flags & (1 << 15)) != 0) == (field.kind == .radioButton),
-                  field.kind == .text || record.flags & (1 << 16) == 0 else {
+                  record.type == expectedType,
+                  !field.kind.isButton || ((record.flags & (1 << 15)) != 0) == (field.kind == .radioButton),
+                  !field.kind.isButton || record.flags & (1 << 16) == 0,
+                  !field.kind.isChoice || ((record.flags & (1 << 17)) != 0) == (field.kind == .dropdown),
+                  !field.kind.isChoice || record.flags & (1 << 21) == 0 else {
                 throw PDFFormDesignError.verificationFailed
             }
         }

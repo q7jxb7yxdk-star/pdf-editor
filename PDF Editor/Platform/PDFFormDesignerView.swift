@@ -218,6 +218,33 @@ struct PDFFormDesignerView: View {
                         TextField("Default text", text: binding(field, \.defaultValue), axis: .vertical)
                         Toggle("Multiline", isOn: binding(field, \.isMultiline))
                         Stepper("Font: \(Int(field.fontSize)) pt", value: binding(field, \.fontSize), in: 6...72)
+                    } else if field.kind.isChoice {
+                        TextEditor(text: choiceOptionsBinding(field))
+                            .frame(minHeight: 88, maxHeight: 160)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.35))
+                            }
+                            .accessibilityLabel("Options, one per line")
+                        Picker("Current value", selection: binding(field, \.value)) {
+                            Text("None").tag("")
+                            ForEach(
+                                Array(field.choices.filter { !$0.isEmpty }.enumerated()),
+                                id: \.offset
+                            ) { _, option in Text(option).tag(option) }
+                        }
+                        Picker("Default value", selection: binding(field, \.defaultValue)) {
+                            Text("None").tag("")
+                            ForEach(
+                                Array(field.choices.filter { !$0.isEmpty }.enumerated()),
+                                id: \.offset
+                            ) { _, option in Text(option).tag(option) }
+                        }
+                        Stepper(
+                            "Font: \(Int(field.fontSize)) pt",
+                            value: choiceFontSizeBinding(field),
+                            in: 6...72
+                        )
                     } else {
                         TextField("Export value", text: binding(field, \.exportValue))
                         Toggle("Selected", isOn: binding(field, \.isSelected))
@@ -237,7 +264,7 @@ struct PDFFormDesignerView: View {
                     Button(deleteTitle(field), role: .destructive) { delete(field) }
                 } else {
                     Text("Form Fields").font(.headline)
-                    Text("Add a field, then click or tap the page. Radio Button creates a group with two options.")
+                    Text("Add a field, then click or tap the page. Radio Button creates a group with two options; choice fields start with three editable options.")
                         .font(.callout)
                 }
                 Divider()
@@ -266,6 +293,62 @@ struct PDFFormDesignerView: View {
                     current[keyPath: keyPath] = value
                     update(current)
                 })
+    }
+
+    private func choiceOptionsBinding(_ field: PDFFormDesignField) -> Binding<String> {
+        Binding(
+            get: {
+                (fields.first { $0.id == field.id } ?? field).choices.joined(separator: "\n")
+            },
+            set: { value in
+                guard var current = fields.first(where: { $0.id == field.id }) else { return }
+                current.choices = value.components(separatedBy: .newlines)
+                if !current.value.isEmpty, !current.choices.contains(current.value) {
+                    current.value = ""
+                }
+                if !current.defaultValue.isEmpty,
+                   !current.choices.contains(current.defaultValue) {
+                    current.defaultValue = ""
+                }
+                fitChoiceFieldSize(&current)
+                update(current)
+            }
+        )
+    }
+
+    private func choiceFontSizeBinding(_ field: PDFFormDesignField) -> Binding<CGFloat> {
+        Binding(
+            get: { (fields.first { $0.id == field.id } ?? field).fontSize },
+            set: { value in
+                guard var current = fields.first(where: { $0.id == field.id }) else { return }
+                current.fontSize = value
+                fitChoiceFieldSize(&current)
+                update(current)
+            }
+        )
+    }
+
+    private func fitChoiceFieldSize(_ field: inout PDFFormDesignField) {
+        guard field.kind.isChoice,
+              let page = session.previewDocument.page(at: field.pageIndex) else { return }
+        let fittedSize = field.kind.placementSize(
+            choices: field.choices,
+            fontSize: field.fontSize
+        )
+        let fittedHeight = field.kind == .listBox
+            ? fittedSize.height : field.bounds.height
+        field.bounds = PDFFormPageGeometry(
+            cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+        ).clamped(
+            CGRect(
+                x: field.bounds.minX,
+                y: field.kind == .listBox
+                    ? field.bounds.maxY - fittedHeight : field.bounds.minY,
+                width: fittedSize.width,
+                height: fittedHeight
+            ),
+            minimumDimension: field.kind.minimumDimension
+        )
     }
 
     private func dimension(_ title: String, field: PDFFormDesignField,
@@ -313,21 +396,33 @@ struct PDFFormDesignerView: View {
     }
 
     private func addField(_ kind: PDFFormDesignKind, at point: CGPoint, geometry: PDFFormPageGeometry) {
-        let prefix = kind == .text ? "Text" : kind == .checkBox ? "Checkbox" : "Radio"
+        let prefix: String
+        switch kind {
+        case .text: prefix = "Text"
+        case .checkBox: prefix = "Checkbox"
+        case .radioButton: prefix = "Radio"
+        case .dropdown: prefix = "Dropdown"
+        case .listBox: prefix = "ListBox"
+        }
         let existing = Set(PDFAcroFormService().snapshots(in: session.sourceDocument).compactMap(\.fieldName))
             .union(fields.map(\.name))
         var number = 1
         while existing.contains("\(prefix)\(number)") { number += 1 }
+        let choices = kind.isChoice ? ["Option 1", "Option 2", "Option 3"] : []
+        let size = kind.placementSize(choices: choices)
         let bounds = geometry.clamped(
             CGRect(
                 x: point.x, y: point.y - 24,
-                width: kind == .text ? 180 : 11,
-                height: kind == .text ? 28 : 11
+                width: size.width,
+                height: size.height
             ),
             minimumDimension: kind.minimumDimension
         )
-        let field = PDFFormDesignField(pageIndex: pageIndex, kind: kind, name: "\(prefix)\(number)", bounds: bounds,
-                                       exportValue: kind == .radioButton ? "Option1" : "Yes")
+        var field = PDFFormDesignField(
+            pageIndex: pageIndex, kind: kind, name: "\(prefix)\(number)", bounds: bounds,
+            exportValue: kind == .radioButton ? "Option1" : "Yes"
+        )
+        field.choices = choices
         var next = fields + [field]
         if kind == .radioButton {
             var option = field
@@ -400,13 +495,17 @@ private struct PDFFormDesignOverlay: View {
     @GestureState private var resize = CGSize.zero
 
     var body: some View {
-        let handleSize: CGFloat = field.kind == .text ? 12 : 6
-        let handlePadding: CGFloat = field.kind == .text ? 5 : 2
+        let handleSize: CGFloat = field.kind.isButton ? 6 : 12
+        let handlePadding: CGFloat = field.kind.isButton ? 2 : 5
         ZStack(alignment: .bottomTrailing) {
             Rectangle().fill(Color.accentColor.opacity(selected ? 0.22 : 0.10))
                 .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: selected ? 2 : 1))
                 .overlay(alignment: .topLeading) {
-                    Text(field.kind == .text ? field.name : field.exportValue)
+                    Text(
+                        field.kind.isButton
+                            ? field.exportValue
+                            : (field.value.isEmpty ? field.name : field.value)
+                    )
                         .font(.system(size: max(8, min(12, 11 * scale))))
                         .foregroundStyle(.black).lineLimit(1).padding(2).allowsHitTesting(false)
                 }

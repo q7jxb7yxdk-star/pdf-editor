@@ -9,6 +9,7 @@ struct PDFFormPlacementRequest: Identifiable {
 
 struct PDFFormPlacementConfiguration {
     let request: PDFFormPlacementRequest
+    let defaultSize: CGSize
     let onPlace: (PDFDocument, Int, CGRect) -> Void
     let onCancel: () -> Void
 }
@@ -128,10 +129,13 @@ final class PDFFormPlacementView: PDFFormPlacementNativeView {
     }
 
     private func defaultBounds(at point: CGPoint, on page: PDFPage) -> CGRect {
-        let isText = configuration?.request.kind == .text
+        let size = configuration?.defaultSize ?? PDFFormDesignKind.text.defaultSize
         let scale = max(pdfView?.scaleFactor ?? 1, 0.01)
-        return rectangle(from: point, to: CGPoint(x: point.x + (isText ? 180 : 11) * scale,
-                                                  y: point.y + (isText ? 28 : 11) * scale), on: page)
+        return rectangle(
+            from: point,
+            to: CGPoint(x: point.x + size.width * scale, y: point.y + size.height * scale),
+            on: page
+        )
     }
 
     private func begin(at point: CGPoint) {

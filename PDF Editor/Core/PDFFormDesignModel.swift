@@ -1,9 +1,14 @@
 import CoreGraphics
 import Foundation
 import PDFKit
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable {
-    case text, checkBox, radioButton
+    case text, checkBox, radioButton, dropdown, listBox
 
     var id: Self { self }
     var title: String {
@@ -11,6 +16,8 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         case .text: "Text Field"
         case .checkBox: "Checkbox"
         case .radioButton: "Radio Button"
+        case .dropdown: "Dropdown"
+        case .listBox: "List Box"
         }
     }
     var symbol: String {
@@ -18,11 +25,60 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         case .text: "character.textbox"
         case .checkBox: "checkmark.square"
         case .radioButton: "smallcircle.filled.circle"
+        case .dropdown: "chevron.down.square"
+        case .listBox: "list.bullet.rectangle"
         }
     }
 
     var minimumDimension: CGFloat {
-        self == .text ? 12 : 11
+        switch self {
+        case .checkBox, .radioButton: 11
+        case .text, .dropdown, .listBox: 12
+        }
+    }
+
+    var defaultSize: CGSize {
+        switch self {
+        case .text: CGSize(width: 180, height: 28)
+        case .checkBox, .radioButton: CGSize(width: 11, height: 11)
+        case .dropdown: CGSize(width: 180, height: 28)
+        case .listBox: CGSize(width: 180, height: 72)
+        }
+    }
+
+    func placementSize(choices: [String], fontSize: CGFloat = 11) -> CGSize {
+        guard isChoice else { return defaultSize }
+#if os(macOS)
+        let font = NSFont.systemFont(ofSize: fontSize)
+        let lineHeight = font.ascender - font.descender + font.leading
+#else
+        let font = UIFont.systemFont(ofSize: fontSize)
+        let lineHeight = font.lineHeight
+#endif
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let widestOption = choices.reduce(CGFloat.zero) { width, option in
+            max(width, (option as NSString).size(withAttributes: attributes).width)
+        }
+        // Dropdown needs room for its native arrow. List Box also reserves
+        // space for PDFKit's scrollbar in addition to its text insets and border.
+        let controlSpace: CGFloat = self == .dropdown ? 32 : 36
+        let width = max(48, ceil(widestOption) + controlSpace)
+        let height: CGFloat
+        if self == .listBox {
+            let visibleRows = CGFloat(max(choices.count, 1))
+            height = max(defaultSize.height, ceil(lineHeight * visibleRows) + 12)
+        } else {
+            height = defaultSize.height
+        }
+        return CGSize(width: width, height: height)
+    }
+
+    var isChoice: Bool {
+        self == .dropdown || self == .listBox
+    }
+
+    var isButton: Bool {
+        self == .checkBox || self == .radioButton
     }
 }
 
@@ -39,6 +95,7 @@ nonisolated struct PDFFormDesignField: Identifiable, Equatable, Sendable {
     var exportValue = "Yes"
     var isSelected = false
     var isDefaultSelected = false
+    var choices: [String] = []
 }
 
 /// Presentation boundary around either a verified live Widget mutation or a

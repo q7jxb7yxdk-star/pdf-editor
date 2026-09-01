@@ -151,6 +151,18 @@ struct PDFToolSidebar: View {
                             action: .designForm(.radioButton),
                             enabled: canDesignForm && !isLocked && pageCount > 0
                         )
+                        tool(
+                            "Dropdown",
+                            icon: "chevron.down.square",
+                            action: .designForm(.dropdown),
+                            enabled: canDesignForm && !isLocked && pageCount > 0
+                        )
+                        tool(
+                            "List Box",
+                            icon: "list.bullet.rectangle",
+                            action: .designForm(.listBox),
+                            enabled: canDesignForm && !isLocked && pageCount > 0
+                        )
                     }
 
                     section("E-sign") {

@@ -8,6 +8,41 @@ import PDFKit
 struct FormDesignRoundTrip {
     static func main() throws {
         let service = PDFFormDesignService()
+        let shortDropdownSize = PDFFormDesignKind.dropdown.placementSize(
+            choices: ["Short"], fontSize: 11
+        )
+        let longDropdownSize = PDFFormDesignKind.dropdown.placementSize(
+            choices: ["A much longer Dropdown option"], fontSize: 11
+        )
+        let largeFontDropdownSize = PDFFormDesignKind.dropdown.placementSize(
+            choices: ["A much longer Dropdown option"], fontSize: 18
+        )
+        try require(
+            longDropdownSize.width > shortDropdownSize.width,
+            "Dropdown width did not follow its longest option"
+        )
+        try require(
+            largeFontDropdownSize.width > longDropdownSize.width,
+            "Dropdown width did not follow its font size"
+        )
+        let shortListBoxSize = PDFFormDesignKind.listBox.placementSize(
+            choices: ["Short"], fontSize: 11
+        )
+        let longListBoxSize = PDFFormDesignKind.listBox.placementSize(
+            choices: ["A much longer List Box option"], fontSize: 11
+        )
+        let largeFontListBoxSize = PDFFormDesignKind.listBox.placementSize(
+            choices: ["Option 1", "Option 2", "Option 3"], fontSize: 18
+        )
+        try require(
+            longListBoxSize.width > shortListBoxSize.width &&
+                longListBoxSize.height == PDFFormDesignKind.listBox.defaultSize.height,
+            "List Box width did not follow its longest option"
+        )
+        try require(
+            largeFontListBoxSize.height > PDFFormDesignKind.listBox.defaultSize.height,
+            "List Box height did not follow its row count and font size"
+        )
         let blank = try blankDocument()
         var placedOnBlank = try service.fieldForPlacement(
             kind: .text, pageIndex: 0, bounds: CGRect(x: 50, y: 600, width: 180, height: 28),
@@ -92,7 +127,19 @@ struct FormDesignRoundTrip {
                                      exportValue: "Yes", isSelected: true, isDefaultSelected: true)
         let no = PDFFormDesignField(pageIndex: 0, kind: .radioButton, name: "attending",
                                     bounds: CGRect(x: 100, y: 400, width: 22, height: 22), exportValue: "No")
-        var fields = [text, check, yes, no]
+        let dropdown = PDFFormDesignField(
+            pageIndex: 0, kind: .dropdown, name: "department",
+            bounds: CGRect(x: 40, y: 350, width: 180, height: 28),
+            value: "Sales", defaultValue: "Engineering", fontSize: 11,
+            choices: ["Engineering", "Sales", "Support"]
+        )
+        let listBox = PDFFormDesignField(
+            pageIndex: 0, kind: .listBox, name: "colour",
+            bounds: CGRect(x: 40, y: 250, width: 180, height: 72),
+            value: "Green", defaultValue: "Blue", fontSize: 11,
+            choices: ["Red", "Green", "Blue"]
+        )
+        var fields = [text, check, yes, no, dropdown, listBox]
         try service.replaceFields(fields, in: document)
         let reopened = try reopen(document)
         try service.verify(fields, in: reopened)
@@ -107,17 +154,27 @@ struct FormDesignRoundTrip {
               let checkWidget = fillPage.annotations.first(where: { $0.fieldName == "consent" }),
               let radioWidget = fillPage.annotations.first(where: {
                   $0.fieldName == "attending" && $0.buttonWidgetStateString == "No"
-              }) else { throw Failure("Missing fillable Widgets") }
+              }),
+              let dropdownWidget = fillPage.annotations.first(where: { $0.fieldName == "department" }),
+              let listWidget = fillPage.annotations.first(where: { $0.fieldName == "colour" }) else {
+            throw Failure("Missing fillable Widgets")
+        }
         let defaultsBefore = service.fields(in: filled).map(\.isDefaultSelected)
         textWidget.widgetStringValue = "新填寫 ABC"
         checkWidget.buttonWidgetState = .offState
         radioWidget.buttonWidgetState = .onState
+        dropdownWidget.widgetStringValue = "Support"
+        listWidget.widgetStringValue = "Red"
         let filledFields = service.fields(in: filled)
         try service.verify(filledFields, in: reopen(filled))
         try require(filledFields.first { $0.name == "name" }?.value == "新填寫 ABC", "Native text fill failed")
         try require(filledFields.first { $0.name == "consent" }?.isSelected == false, "Native checkbox fill failed")
         try require(filledFields.filter { $0.name == "attending" && $0.isSelected }.map(\.exportValue) == ["No"],
                     "Radio group is not exclusive")
+        try require(filledFields.first { $0.name == "department" }?.value == "Support",
+                    "Native Dropdown fill failed")
+        try require(filledFields.first { $0.name == "colour" }?.value == "Red",
+                    "Native List Box fill failed")
         try require(filledFields.map(\.isDefaultSelected) == defaultsBefore, "Filling changed defaults")
 
         // Reopening must retain designer IDs. Geometry/default-only edits must
@@ -126,6 +183,8 @@ struct FormDesignRoundTrip {
         fields[1].bounds = CGRect(x: 45, y: 445, width: 30, height: 26)
         fields[2].bounds = CGRect(x: 35, y: 390, width: 28, height: 30)
         fields[3].bounds = CGRect(x: 95, y: 390, width: 32, height: 28)
+        fields[4].bounds = CGRect(x: 60, y: 340, width: 210, height: 30)
+        fields[5].bounds = CGRect(x: 60, y: 230, width: 210, height: 84)
         fields[0].fontSize = 18
         fields[0].defaultValue = "New default"
         fields[2].isSelected = false
@@ -159,6 +218,9 @@ struct FormDesignRoundTrip {
         var duplicateOption = no
         duplicateOption.exportValue = yes.exportValue
         try rejects { try service.validate([yes, duplicateOption], in: empty) }
+        var invalidChoices = dropdown
+        invalidChoices.choices = ["Same", "Same"]
+        try rejects { try service.validate([invalidChoices], in: empty) }
 
         // Sidebar production factory: generated names, an individually saved
         // first radio option, then a sibling with a distinct choice on reopen.
@@ -192,6 +254,48 @@ struct FormDesignRoundTrip {
             _ = try service.fieldForPlacement(kind: .radioButton, pageIndex: 0, bounds: no.bounds,
                                                radioGroupName: "existing", in: firstOptionSaved)
         }
+        let placedDropdown = try service.fieldForPlacement(
+            kind: .dropdown, pageIndex: 0,
+            bounds: CGRect(x: 280, y: 350, width: 180, height: 28),
+            radioGroupName: nil,
+            choiceOptions: ["One", "Two", "Three"],
+            in: firstOptionSaved
+        )
+        try service.replaceFields(
+            [placedText, firstRadio, secondRadio, placedDropdown],
+            in: firstOptionSaved
+        )
+        let firstDropdownSaved = try reopen(firstOptionSaved)
+        try service.verify(
+            [placedText, firstRadio, secondRadio, placedDropdown],
+            in: firstDropdownSaved
+        )
+        let secondDropdown = try service.fieldForPlacement(
+            kind: .dropdown, pageIndex: 0,
+            bounds: CGRect(x: 280, y: 310, width: 180, height: 28),
+            radioGroupName: nil,
+            choiceOptions: ["One", "Two", "Three"],
+            in: firstDropdownSaved
+        )
+        try require(
+            placedDropdown.name != secondDropdown.name,
+            "Placement reused a Dropdown field name"
+        )
+        let placedList = try service.fieldForPlacement(
+            kind: .listBox, pageIndex: 0,
+            bounds: CGRect(x: 280, y: 250, width: 180, height: 72),
+            radioGroupName: nil,
+            choiceOptions: ["Alpha", "Beta", "Gamma"],
+            in: firstDropdownSaved
+        )
+        try service.replaceFields(
+            [placedText, firstRadio, secondRadio, placedDropdown, secondDropdown, placedList],
+            in: firstDropdownSaved
+        )
+        try service.verify(
+            [placedText, firstRadio, secondRadio, placedDropdown, secondDropdown, placedList],
+            in: reopen(firstDropdownSaved)
+        )
 
         let crop = CGRect(x: 20, y: 30, width: 400, height: 600)
         let point = CGPoint(x: 60, y: 100)
@@ -205,7 +309,7 @@ struct FormDesignRoundTrip {
             try require(displayed == target, "Incorrect placement on rotated/cropped page")
             try require(displayed.applying(geometry.transform.inverted()) == point, "Inverse placement failed")
         }
-        print("Form design creation, field tree, defaults, geometry, document-replacement deletion and rejection checks passed.")
+        print("Form design text/button/choice creation, field tree, defaults, geometry, document-replacement deletion and rejection checks passed.")
     }
 
     private static func blankDocument() throws -> PDFDocument {

@@ -831,14 +831,15 @@ final class PDFEditorDocument: ReferenceFileDocument {
     @discardableResult
     func addPlacedFormField(
         kind: PDFFormDesignKind, pageIndex: Int, bounds: CGRect,
-        radioGroupName: String?, undoManager: UndoManager?
+        radioGroupName: String?, choiceOptions: [String] = [], undoManager: UndoManager?
     ) throws -> PDFFormDesignField {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
         let session = try makeFormDesignSession(initialPageIndex: pageIndex, undoManager: undoManager)
         let field = try PDFFormDesignService().fieldForPlacement(
             kind: kind, pageIndex: pageIndex, bounds: bounds,
-            radioGroupName: radioGroupName, in: session.sourceDocument
+            radioGroupName: radioGroupName, choiceOptions: choiceOptions,
+            in: session.sourceDocument
         )
         let previousData = session.sourceData
         try applyFormDesign(
@@ -905,14 +906,14 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     @discardableResult
-    func setAuthoredTextFieldFontSize(
+    func setAuthoredFormFieldFontSize(
         id: UUID, fontSize: CGFloat, undoManager: UndoManager?
     ) throws -> PDFFormDesignField {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
         let service = PDFFormDesignService()
         guard let current = service.fields(in: pdfDocument).first(where: { $0.id == id }),
-              current.kind == .text else {
+              current.kind == .text || current.kind.isChoice else {
             throw PDFFormDesignError.documentChanged
         }
         let session = try makeFormDesignSession(
@@ -922,18 +923,39 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFFormDesignError.documentChanged
         }
         var fields = session.fields
-        let height = max(12, current.bounds.height + fontSize - current.fontSize)
         guard let page = session.sourceDocument.page(at: fields[index].pageIndex) else {
             throw PDFFormDesignError.documentChanged
         }
-        let fittedBounds = PDFFormPageGeometry(
+        let geometry = PDFFormPageGeometry(
             cropBox: page.bounds(for: .cropBox), rotation: page.rotation
-        ).clamped(CGRect(
-            x: current.bounds.minX,
-            y: current.bounds.midY - height / 2,
-            width: current.bounds.width,
-            height: height
-        ))
+        )
+        let fittedBounds: CGRect
+        if current.kind.isChoice {
+            let fittedSize = current.kind.placementSize(
+                choices: current.choices,
+                fontSize: fontSize
+            )
+            let fittedHeight = current.kind == .listBox
+                ? fittedSize.height : current.bounds.height
+            fittedBounds = geometry.clamped(
+                CGRect(
+                    x: current.bounds.midX - fittedSize.width / 2,
+                    y: current.kind == .listBox
+                        ? current.bounds.maxY - fittedHeight : current.bounds.minY,
+                    width: fittedSize.width,
+                    height: fittedHeight
+                ),
+                minimumDimension: current.kind.minimumDimension
+            )
+        } else {
+            let height = max(12, current.bounds.height + fontSize - current.fontSize)
+            fittedBounds = geometry.clamped(CGRect(
+                x: current.bounds.minX,
+                y: current.bounds.midY - height / 2,
+                width: current.bounds.width,
+                height: height
+            ))
+        }
         fields[index].fontSize = fontSize
         fields[index].bounds = fittedBounds
         // The verified session remains canonical for persistence, but PDFKit
@@ -950,7 +972,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             fields, session: session, undoManager: undoManager,
             preparedPresentationUpdate: presentationUpdate
         )
-        undoManager?.setActionName("Change Textbox Font Size")
+        undoManager?.setActionName("Change \(current.kind.title) Font Size")
         return fields[index]
     }
 
