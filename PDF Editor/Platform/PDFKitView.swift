@@ -482,7 +482,9 @@ enum PDFViewerMode: Equatable {
 final class PDFKitHostView: NSView {
     private(set) var activePDFView: PDFView
     private(set) var pendingPDFView: PDFView?
+    var initialPageIndex: Int?
     private var replacementGeneration = 0
+    private var initialWindowConfigurationObserver: NSObjectProtocol?
 
     init(pdfView: PDFView) {
         activePDFView = pdfView
@@ -498,6 +500,44 @@ final class PDFKitHostView: NSView {
         super.layout()
         activePDFView.frame = bounds
         pendingPDFView?.frame = bounds
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stopObservingInitialWindowConfiguration()
+        guard initialPageIndex != nil, let window else { return }
+        initialWindowConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .pdfEditorWindowDidFinishInitialConfiguration,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.positionInitialPageAtTopIfNeeded()
+            }
+        }
+    }
+
+    private func positionInitialPageAtTopIfNeeded() {
+        guard bounds.width > 0, bounds.height > 0,
+              let initialPageIndex,
+              let document = activePDFView.document,
+              let page = document.page(at: initialPageIndex) else { return }
+        self.initialPageIndex = nil
+        stopObservingInitialWindowConfiguration()
+        activePDFView.layoutSubtreeIfNeeded()
+        activePDFView.documentView?.layoutSubtreeIfNeeded()
+        let pageBounds = page.bounds(for: activePDFView.displayBox)
+        activePDFView.go(to: PDFDestination(
+            page: page,
+            at: CGPoint(x: pageBounds.minX, y: pageBounds.maxY)
+        ))
+    }
+
+    private func stopObservingInitialWindowConfiguration() {
+        guard let initialWindowConfigurationObserver else { return }
+        NotificationCenter.default.removeObserver(initialWindowConfigurationObserver)
+        self.initialWindowConfigurationObserver = nil
     }
 
     func stageReplacement(
@@ -544,6 +584,12 @@ final class PDFKitHostView: NSView {
         pendingPDFView?.removeFromSuperviewWithoutNeedingDisplay()
         pendingPDFView = nil
         activePDFView.alphaValue = 1
+    }
+
+    deinit {
+        if let initialWindowConfigurationObserver {
+            NotificationCenter.default.removeObserver(initialWindowConfigurationObserver)
+        }
     }
 }
 
@@ -605,6 +651,7 @@ struct PDFKitView: NSViewRepresentable {
     func makeNSView(context: Context) -> PDFKitHostView {
         let pdfView = makePDFView()
         let hostView = PDFKitHostView(pdfView: pdfView)
+        hostView.initialPageIndex = selectedPageIndex
         context.coordinator.observe(pdfView)
         loadDocument(into: pdfView)
         return hostView

@@ -39,6 +39,12 @@ struct PDF_EditorApp: App {
 }
 
 #if os(macOS)
+extension Notification.Name {
+    static let pdfEditorWindowDidFinishInitialConfiguration = Notification.Name(
+        "PDFEditorWindowDidFinishInitialConfiguration"
+    )
+}
+
 struct WindowConfigurationView: NSViewRepresentable {
     let fillsWindowOnAttach: Bool
 
@@ -50,17 +56,25 @@ struct WindowConfigurationView: NSViewRepresentable {
         view.onWindowAttached = { [weak view] window in
             window.tabbingMode = .preferred
             guard fillsWindowOnAttach else { return }
-            guard !Self.filledWindows.contains(window) else { return }
-            Self.filledWindows.add(window)
+            let shouldFillWindow = !Self.filledWindows.contains(window)
+            if shouldFillWindow {
+                Self.filledWindows.add(window)
+            }
             view?.whenWindowBecomesKey { [weak window] _ in
                 Task { @MainActor in
                     await Task.yield()
                     guard let window,
                           window.isKeyWindow,
                           window.attachedSheet == nil,
-                          NSApp.modalWindow == nil,
-                          !window.isZoomed else { return }
-                    fill(window)
+                          NSApp.modalWindow == nil else { return }
+                    if shouldFillWindow, !window.isZoomed {
+                        fill(window)
+                    }
+                    await Task.yield()
+                    NotificationCenter.default.post(
+                        name: .pdfEditorWindowDidFinishInitialConfiguration,
+                        object: window
+                    )
                     NSCursor.arrow.set()
                 }
             }
