@@ -220,6 +220,75 @@ private struct PDFAnnotationActionBar: View {
     }
 }
 
+private struct PDFFormFieldActionBar: View {
+    let field: PDFFormDesignField
+    let onChangeFontSize: (CGFloat) -> Void
+    let onDelete: () -> Void
+
+    @State private var showsFontSizePicker = false
+    private let fontSizeChoices: [CGFloat] = [8, 9, 10, 11, 12, 14, 18, 24, 30, 36, 48]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                showsFontSizePicker.toggle()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "textformat.size")
+                    Text("\(Int(field.fontSize))")
+                        .monospacedDigit()
+                }
+                .frame(minWidth: 48, minHeight: 28)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Change text size")
+            .accessibilityLabel("Change text size")
+            .accessibilityValue("\(Int(field.fontSize)) points")
+            .popover(isPresented: $showsFontSizePicker, arrowEdge: .bottom) {
+                VStack(spacing: 2) {
+                    ForEach(fontSizeChoices, id: \.self) { fontSize in
+                        Button {
+                            showsFontSizePicker = false
+                            DispatchQueue.main.async { onChangeFontSize(fontSize) }
+                        } label: {
+                            HStack {
+                                Text("\(Int(fontSize)) pt")
+                                Spacer()
+                                if abs(fontSize - field.fontSize) < 0.01 {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .frame(minWidth: 110, minHeight: 32)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+                .presentationCompactAdaptation(.popover)
+            }
+
+            Divider().frame(height: 18)
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+                    .frame(width: 32, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Delete Textbox")
+            .accessibilityLabel("Delete Textbox")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 #if os(macOS)
 import AppKit
 
@@ -256,6 +325,7 @@ private final class PDFInteractionPDFView: PDFView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let defaultHit = super.hitTest(point)
+        if defaultHit is PDFFormPlacementView { return defaultHit }
         if defaultHit?.isInsideAnnotationActionBar == true {
             return defaultHit
         }
@@ -280,6 +350,10 @@ private final class PDFInteractionPDFView: PDFView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        if let placement = subviews.compactMap({ $0 as? PDFFormPlacementView }).first {
+            placement.updatePointer(with: event)
+            return
+        }
         interactionHandler?.handleMouseMoved(event, in: self)
         super.mouseMoved(with: event)
     }
@@ -405,6 +479,74 @@ enum PDFViewerMode: Equatable {
     case scrolling
 }
 
+final class PDFKitHostView: NSView {
+    private(set) var activePDFView: PDFView
+    private(set) var pendingPDFView: PDFView?
+    private var replacementGeneration = 0
+
+    init(pdfView: PDFView) {
+        activePDFView = pdfView
+        super.init(frame: .zero)
+        addSubview(pdfView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        activePDFView.frame = bounds
+        pendingPDFView?.frame = bounds
+    }
+
+    func stageReplacement(
+        _ replacement: PDFView,
+        completion: @escaping (_ outgoing: PDFView, _ incoming: PDFView) -> Void
+    ) {
+        cancelPendingReplacement()
+        replacementGeneration &+= 1
+        let generation = replacementGeneration
+        let outgoing = activePDFView
+        pendingPDFView = replacement
+        replacement.frame = bounds
+        replacement.autoresizingMask = [.width, .height]
+        replacement.alphaValue = 1
+        addSubview(replacement, positioned: .below, relativeTo: outgoing)
+
+        // Both are live PDFViews in the window. Keep the fully rendered old view
+        // visible while PDFKit builds the replacement's page and annotation tiles.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) { [weak self, weak replacement] in
+            guard let self, let replacement,
+                  generation == self.replacementGeneration,
+                  self.pendingPDFView === replacement else { return }
+            replacement.layoutSubtreeIfNeeded()
+            replacement.documentView?.layoutSubtreeIfNeeded()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                outgoing.animator().alphaValue = 0
+            } completionHandler: { [weak self, weak replacement] in
+                guard let self, let replacement,
+                      generation == self.replacementGeneration,
+                      self.pendingPDFView === replacement else { return }
+                outgoing.removeFromSuperviewWithoutNeedingDisplay()
+                outgoing.alphaValue = 1
+                self.activePDFView = replacement
+                self.pendingPDFView = nil
+                completion(outgoing, replacement)
+            }
+        }
+    }
+
+    func cancelPendingReplacement() {
+        replacementGeneration &+= 1
+        pendingPDFView?.removeFromSuperviewWithoutNeedingDisplay()
+        pendingPDFView = nil
+        activePDFView.alphaValue = 1
+    }
+}
+
 struct PDFViewerCommand: Equatable {
     enum Action: Equatable {
         case fitPage
@@ -431,6 +573,10 @@ struct PDFKitView: NSViewRepresentable {
     @Binding var selectedAnnotation: PDFAnnotationSnapshot?
     let annotationEditingEnabled: Bool
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+    @Binding var selectedFormField: PDFFormDesignField?
+    let onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
+    let onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
+    let onDeleteFormField: (PDFFormDesignField) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
     let freeTextPlacementEnabled: Bool
@@ -452,22 +598,25 @@ struct PDFKitView: NSViewRepresentable {
     let onAcroFormChange: () -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
+    var formPlacement: PDFFormPlacementConfiguration? = nil
 
     func makeCoordinator() -> Coordinator { makeSharedCoordinator() }
 
-    func makeNSView(context: Context) -> PDFView {
+    func makeNSView(context: Context) -> PDFKitHostView {
         let pdfView = makePDFView()
+        let hostView = PDFKitHostView(pdfView: pdfView)
         context.coordinator.observe(pdfView)
         loadDocument(into: pdfView)
-        return pdfView
+        return hostView
     }
 
-    func updateNSView(_ pdfView: PDFView, context: Context) {
+    func updateNSView(_ hostView: PDFKitHostView, context: Context) {
         updateCoordinator(context.coordinator)
-        update(pdfView, coordinator: context.coordinator)
+        update(hostView, coordinator: context.coordinator)
     }
 
-    static func dismantleNSView(_ pdfView: PDFView, coordinator: Coordinator) {
+    static func dismantleNSView(_ hostView: PDFKitHostView, coordinator: Coordinator) {
+        hostView.cancelPendingReplacement()
         coordinator.stopObserving()
     }
 }
@@ -506,6 +655,10 @@ struct PDFKitView: UIViewRepresentable {
     @Binding var selectedAnnotation: PDFAnnotationSnapshot?
     let annotationEditingEnabled: Bool
     let onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+    @Binding var selectedFormField: PDFFormDesignField?
+    let onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
+    let onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
+    let onDeleteFormField: (PDFFormDesignField) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
     let freeTextPlacementEnabled: Bool
@@ -527,6 +680,7 @@ struct PDFKitView: UIViewRepresentable {
     let onAcroFormChange: () -> Void
     let viewerMode: PDFViewerMode
     let viewerCommand: PDFViewerCommand?
+    var formPlacement: PDFFormPlacementConfiguration? = nil
 
     func makeCoordinator() -> Coordinator { makeSharedCoordinator() }
 
@@ -563,6 +717,10 @@ private extension PDFKitView {
             selectedAnnotation: $selectedAnnotation,
             annotationEditingEnabled: annotationEditingEnabled,
             onSetAnnotationBounds: onSetAnnotationBounds,
+            selectedFormField: $selectedFormField,
+            onSetFormFieldBounds: onSetFormFieldBounds,
+            onSetFormFieldFontSize: onSetFormFieldFontSize,
+            onDeleteFormField: onDeleteFormField,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
             freeTextPlacementEnabled: freeTextPlacementEnabled,
@@ -603,18 +761,87 @@ private extension PDFKitView {
         goToSelectedPage(in: pdfView)
     }
 
+#if os(macOS)
+    func update(_ hostView: PDFKitHostView, coordinator: Coordinator) {
+        let activePDFView = hostView.activePDFView
+        if let pendingPDFView = hostView.pendingPDFView,
+           pendingPDFView.document === document {
+            applyViewerMode(to: pendingPDFView)
+            applyViewerCommand(to: pendingPDFView, coordinator: coordinator)
+            PDFFormPlacementView.install(on: pendingPDFView, configuration: formPlacement)
+            return
+        }
+
+        guard activePDFView.document !== document,
+              coordinator.isReplacingDocumentForFormTransition else {
+            if activePDFView.document !== document {
+                hostView.cancelPendingReplacement()
+            }
+            update(activePDFView, coordinator: coordinator)
+            return
+        }
+
+        let destination = activePDFView.currentDestination
+        let pageIndex = destination?.page.flatMap { activePDFView.document?.index(for: $0) }
+        let scale = activePDFView.scaleFactor
+        let autoScales = activePDFView.autoScales
+        coordinator.prepareForDocumentReplacement()
+
+        let replacement = makePDFView()
+        replacement.frame = hostView.bounds
+        replacement.document = document
+        applyViewerMode(to: replacement)
+        if let destination, let pageIndex, let page = document.page(at: pageIndex) {
+            replacement.scaleFactor = scale
+            replacement.autoScales = autoScales
+            replacement.go(to: PDFDestination(page: page, at: destination.point))
+        }
+        goToSelectedPage(in: replacement)
+        PDFFormPlacementView.install(on: replacement, configuration: formPlacement)
+        replacement.layoutSubtreeIfNeeded()
+        replacement.documentView?.layoutSubtreeIfNeeded()
+
+        hostView.stageReplacement(replacement) { [weak coordinator] _, incoming in
+            guard let coordinator else { return }
+            coordinator.stopObserving()
+            coordinator.observe(incoming)
+            coordinator.completeDocumentReplacement()
+        }
+    }
+#endif
+
     func update(_ pdfView: PDFView, coordinator: Coordinator) {
         if pdfView.document !== document {
+            let wasPlacing = pdfView.subviews.contains { $0 is PDFFormPlacementView }
+            let preservesFormTransition = coordinator.isReplacingDocumentForFormTransition
+            let destination = wasPlacing || preservesFormTransition
+                ? pdfView.currentDestination : nil
+            let pageIndex = destination?.page.flatMap { pdfView.document?.index(for: $0) }
+            let scale = pdfView.scaleFactor
+            let autoScales = pdfView.autoScales
+            if preservesFormTransition {
+                coordinator.prepareFormDisplayTransitionForDocumentReplacement(document)
+            }
             coordinator.prepareForDocumentReplacement()
             pdfView.document = document
+            if let destination, let pageIndex, let page = document.page(at: pageIndex) {
+                pdfView.scaleFactor = scale
+                pdfView.autoScales = autoScales
+                pdfView.go(to: PDFDestination(page: page, at: destination.point))
+            }
             coordinator.completeDocumentReplacement()
+            if preservesFormTransition {
+                coordinator.completeFormDisplayTransitionAfterDocumentReplacement()
+            }
         }
         goToSelectedPage(in: pdfView, coordinator: coordinator)
         applyViewerMode(to: pdfView)
         applyViewerCommand(to: pdfView, coordinator: coordinator)
+        PDFFormPlacementView.install(on: pdfView, configuration: formPlacement)
     }
 
     func updateCoordinator(_ coordinator: Coordinator) {
+        coordinator.formPlacementActive = formPlacement != nil
         coordinator.selectedPageIndex = $selectedPageIndex
         coordinator.selection = $selection
         coordinator.objects = objects
@@ -627,6 +854,10 @@ private extension PDFKitView {
         coordinator.selectedAnnotation = $selectedAnnotation
         coordinator.annotationEditingEnabled = annotationEditingEnabled
         coordinator.onSetAnnotationBounds = onSetAnnotationBounds
+        coordinator.selectedFormField = $selectedFormField
+        coordinator.onSetFormFieldBounds = onSetFormFieldBounds
+        coordinator.onSetFormFieldFontSize = onSetFormFieldFontSize
+        coordinator.onDeleteFormField = onDeleteFormField
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
         coordinator.freeTextPlacementEnabled = freeTextPlacementEnabled
@@ -703,6 +934,7 @@ private extension PDFKitView {
 extension PDFKitView {
     final class Coordinator: NSObject {
         enum DragMode { case move, scale }
+        var formPlacementActive = false
 
         var selectedPageIndex: Binding<Int?>
         var selection: Binding<PDFSelection?>
@@ -740,6 +972,10 @@ extension PDFKitView {
             }
         }
         var onSetAnnotationBounds: (PDFAnnotationSnapshot, CGRect) -> Void
+        var selectedFormField: Binding<PDFFormDesignField?>
+        var onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
+        var onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
+        var onDeleteFormField: (PDFFormDesignField) -> Void
         var commentPlacementEnabled: Bool {
             didSet {
                 guard oldValue != commentPlacementEnabled else { return }
@@ -829,6 +1065,8 @@ extension PDFKitView {
         private var handleLayers: [CAShapeLayer] = []
         private var interactionObject: PDFPageObjectSnapshot?
         private var interactionAnnotation: PDFAnnotationSnapshot?
+        private var interactionFormField: PDFFormDesignField?
+        private var interactionFormAnchorPoint: CGPoint?
         private var interactionPage: PDFPage?
         private var interactionStartPoint = CGPoint.zero
         private var interactionStartBounds = CGRect.zero
@@ -917,7 +1155,8 @@ extension PDFKitView {
         private var inlineEditingPDFStyle: PDFTextStyle = []
         private var inlineStyleBar: NSStackView?
         private var annotationActionContainer: PDFAnnotationActionContainerView?
-        private var annotationActionHost: NSHostingView<PDFAnnotationActionBar>?
+        private var annotationActionHost: NSHostingView<AnyView>?
+        private var formDisplayTransitionSnapshot: NSImageView?
         private var stagedTextByObjectID: [String: StagedTextEdit] = [:]
         private var stagedTextStylesByObjectID: [String: InlineTextStyle] = [:]
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
@@ -940,14 +1179,19 @@ extension PDFKitView {
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
         private var annotationActionContainer: UIView?
-        private var annotationActionHostingController: UIHostingController<PDFAnnotationActionBar>?
+        private var annotationActionHostingController: UIHostingController<AnyView>?
+        private var formDisplayTransitionSnapshot: UIView?
         private var inlineTextField: UITextView?
         private var inlineEditingBaseFont: UIFont?
         private var inlineEditingPDFStyle: PDFTextStyle = []
         private var inlineBoldButton: UIBarButtonItem?
         private var inlineItalicButton: UIBarButtonItem?
 #endif
-        private var annotationActionSnapshot: PDFAnnotationSnapshot?
+        private enum ActionBarIdentity: Equatable {
+            case annotation(PDFAnnotationSnapshot)
+            case formField(PDFFormDesignField)
+        }
+        private var actionBarIdentity: ActionBarIdentity?
         private var inlineEditingObject: PDFPageObjectSnapshot?
         private var inlineEditingAnnotation: PDFAnnotationSnapshot?
         private struct PendingFreeTextPlacement {
@@ -967,6 +1211,16 @@ extension PDFKitView {
         private var overlayRefreshScheduled = false
         private var acroFormBaseline: [PDFAcroFormFieldSnapshot]?
         private var acroFormCheckGeneration = 0
+        private var activeFormDisplayTransition: PDFFormDisplayTransition?
+        private var formDisplayTransitionGeneration = 0
+        private var formDisplayTransitionDocumentInstalled = false
+        private var formDisplayTransitionSawVisiblePages = false
+        private var formDisplayTransitionCompletionScheduled = false
+        private weak var formDisplayTransitionTargetDocument: PDFDocument?
+
+        var isReplacingDocumentForFormTransition: Bool {
+            activeFormDisplayTransition?.replacesDocument == true
+        }
 
         init(
             selectedPageIndex: Binding<Int?>,
@@ -981,6 +1235,10 @@ extension PDFKitView {
             selectedAnnotation: Binding<PDFAnnotationSnapshot?>,
             annotationEditingEnabled: Bool,
             onSetAnnotationBounds: @escaping (PDFAnnotationSnapshot, CGRect) -> Void,
+            selectedFormField: Binding<PDFFormDesignField?>,
+            onSetFormFieldBounds: @escaping (PDFFormDesignField, CGRect) -> Void,
+            onSetFormFieldFontSize: @escaping (PDFFormDesignField, CGFloat) -> Void,
+            onDeleteFormField: @escaping (PDFFormDesignField) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
             freeTextPlacementEnabled: Bool,
@@ -1019,6 +1277,10 @@ extension PDFKitView {
             self.selectedAnnotation = selectedAnnotation
             self.annotationEditingEnabled = annotationEditingEnabled
             self.onSetAnnotationBounds = onSetAnnotationBounds
+            self.selectedFormField = selectedFormField
+            self.onSetFormFieldBounds = onSetFormFieldBounds
+            self.onSetFormFieldFontSize = onSetFormFieldFontSize
+            self.onDeleteFormField = onDeleteFormField
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
             self.freeTextPlacementEnabled = freeTextPlacementEnabled
@@ -1081,6 +1343,9 @@ extension PDFKitView {
                         selectedPageIndex.wrappedValue = pageIndex
                         selectedObject.wrappedValue = nil
                         selectedAnnotation.wrappedValue = nil
+                        if selectedFormField.wrappedValue?.pageIndex != pageIndex {
+                            selectedFormField.wrappedValue = nil
+                        }
                     }
                     scheduleOverlayRefresh()
                 },
@@ -1095,12 +1360,17 @@ extension PDFKitView {
                     forName: .PDFViewScaleChanged,
                     object: pdfView,
                     queue: .main
-                ) { [weak self] _ in self?.scheduleOverlayRefresh() },
+                ) { [weak self] _ in
+                    self?.scheduleOverlayRefresh()
+                },
                 center.addObserver(
                     forName: .PDFViewVisiblePagesChanged,
                     object: pdfView,
                     queue: .main
-                ) { [weak self] _ in self?.scheduleOverlayRefresh() },
+                ) { [weak self] _ in
+                    self?.formDisplayTransitionVisiblePagesDidChange()
+                    self?.scheduleOverlayRefresh()
+                },
                 center.addObserver(
                     forName: .PDFViewAnnotationWillHit,
                     object: pdfView,
@@ -1116,6 +1386,20 @@ extension PDFKitView {
                     self?.scheduleAcroFormChangeCheck()
                 },
             ]
+            observers.append(center.addObserver(
+                forName: PDFFormDisplayTransitionEvent.willChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                self?.beginFormDisplayTransition(from: notification)
+            })
+            observers.append(center.addObserver(
+                forName: PDFFormDisplayTransitionEvent.didChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                self?.completeFormDisplayTransition(from: notification)
+            })
 #if os(macOS)
             observers.append(center.addObserver(
                 forName: NSControl.textDidChangeNotification,
@@ -1214,6 +1498,7 @@ extension PDFKitView {
             hoveredCommentReference = nil
             acroFormBaseline = nil
             acroFormCheckGeneration &+= 1
+            cancelFormDisplayTransition()
             observers.forEach(NotificationCenter.default.removeObserver)
             observers.removeAll()
 #if os(macOS)
@@ -1284,9 +1569,56 @@ extension PDFKitView {
                 selection.wrappedValue = nil
                 selectedObject.wrappedValue = nil
                 selectedAnnotation.wrappedValue = nil
+                selectedFormField.wrappedValue = nil
                 pdfView?.clearSelection()
                 refreshOverlay()
             }
+        }
+
+        /// Resolve only Widgets created by this app. Foreign form controls
+        /// continue to use PDFKit without exposing authoring handles.
+        func authoredFormField(at point: CGPoint, in pdfView: PDFView) -> PDFFormDesignField? {
+            guard !formPlacementActive, !commentPlacementEnabled, !freeTextPlacementEnabled,
+                  !signaturePlacementEnabled, !freehandDrawingEnabled, inlineTextField == nil,
+                  let document = pdfView.document,
+                  let page = pdfView.page(for: point, nearest: false) else { return nil }
+            let pageIndex = document.index(for: page)
+            let location = pdfView.convert(point, to: page)
+            let identifierKey = PDFAnnotationKey(rawValue: "/PDFEditorFormID")
+            guard let id = page.annotations
+                .filter({ $0.type == "Widget" && $0.bounds.contains(location) })
+                .compactMap({ ($0.value(forAnnotationKey: identifierKey) as? String).flatMap(UUID.init(uuidString:)) })
+                .first else { return nil }
+            return PDFFormDesignService().fields(in: document).first {
+                $0.id == id && $0.pageIndex == pageIndex
+            }
+        }
+
+        func authoredWidgetOwnsInput(at point: CGPoint, in pdfView: PDFView) -> Bool {
+            authoredFormField(at: point, in: pdfView) != nil
+        }
+
+        private func formResizeHandleContains(_ point: CGPoint, in pdfView: PDFView) -> Bool {
+            guard let field = selectedFormField.wrappedValue,
+                  let page = pdfView.document?.page(at: field.pageIndex) else { return false }
+            let rect = pdfView.convert(field.bounds, from: page).standardized
+            return [CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY),
+                    CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.maxY)]
+                .contains { hypot($0.x - point.x, $0.y - point.y) <= 20 }
+        }
+
+        @discardableResult
+        private func selectAuthoredFormField(at point: CGPoint, in pdfView: PDFView) -> Bool {
+            guard let field = authoredFormField(at: point, in: pdfView) else { return false }
+            selectedObject.wrappedValue = nil
+            selectedAnnotation.wrappedValue = nil
+            selectedFormField.wrappedValue = field
+            selectedPageIndex.wrappedValue = field.pageIndex
+            pdfView.clearSelection()
+            selection.wrappedValue = nil
+            updateGestureAvailability()
+            refreshOverlay()
+            return true
         }
 
         private func beginAcroFormInteractionIfNeeded() {
@@ -1352,7 +1684,10 @@ extension PDFKitView {
             }
             let pageIndex: Int
             let pageBounds: CGRect
-            if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
+            if let field = selectedFormField.wrappedValue {
+                pageIndex = field.pageIndex
+                pageBounds = previewBounds ?? field.bounds
+            } else if annotationEditingEnabled, let annotation = selectedAnnotation.wrappedValue {
                 pageIndex = annotation.reference.pageIndex
                 pageBounds = previewBounds ?? annotation.bounds
             } else if objectEditingEnabled, let object = selectedObject.wrappedValue {
@@ -1417,11 +1752,17 @@ extension PDFKitView {
                 outlineLayer.isHidden = true
             }
             CATransaction.commit()
-            updateAnnotationActionBar(
-                for: selectedAnnotation.wrappedValue,
-                above: displayBounds,
-                in: pdfView
-            )
+            if let field = selectedFormField.wrappedValue {
+                updateFormFieldActionBar(
+                    for: field, above: displayBounds, in: pdfView
+                )
+            } else {
+                updateAnnotationActionBar(
+                    for: selectedAnnotation.wrappedValue,
+                    above: displayBounds,
+                    in: pdfView
+                )
+            }
         }
 
         private func minimumVisibleSelectionRect(_ rect: CGRect) -> CGRect {
@@ -1566,16 +1907,269 @@ extension PDFKitView {
                 }
             )
 
+            presentActionBar(
+                AnyView(actionBar), identity: .annotation(annotation),
+                above: annotationBounds, in: pdfView
+            )
+        }
+
+        private func updateFormFieldActionBar(
+            for field: PDFFormDesignField,
+            above fieldBounds: CGRect,
+            in pdfView: PDFView
+        ) {
+            guard field.kind == .text else {
+                removeAnnotationActionBar()
+                return
+            }
+            let actionBar = PDFFormFieldActionBar(
+                field: field,
+                onChangeFontSize: { [weak self] fontSize in
+                    guard let self else { return }
+                    self.onSetFormFieldFontSize(field, fontSize)
+                    self.scheduleOverlayRefresh()
+                },
+                onDelete: { [weak self] in
+                    guard let self else { return }
+                    self.finishNativeFormEditingBeforeDeletion(in: pdfView)
+                    self.hideFormSelectionForMutation()
+                    self.onDeleteFormField(field)
+                    guard self.selectedFormField.wrappedValue?.id != field.id else {
+                        self.annotationActionContainer?.isHidden = false
+                        self.scheduleOverlayRefresh()
+                        return
+                    }
+                    self.setOverlayHidden(true)
+                    self.clearInteraction()
+                    self.updateGestureAvailability()
+                }
+            )
+            presentActionBar(
+                AnyView(actionBar), identity: .formField(field),
+                above: fieldBounds, in: pdfView
+            )
+        }
+
+        private func finishNativeFormEditingBeforeDeletion(in pdfView: PDFView) {
+#if os(macOS)
+            _ = pdfView.window?.makeFirstResponder(pdfView)
+#else
+            pdfView.endEditing(true)
+#endif
+        }
+
+        private func hideFormSelectionForMutation() {
+            outlineLayer.isHidden = true
+            handleLayers.forEach { $0.isHidden = true }
+            annotationActionContainer?.isHidden = true
+        }
+
+        private func beginFormDisplayTransition(from notification: Notification) {
+            guard let pdfView,
+                  let document = notification.object as? PDFDocument,
+                  document === pdfView.document,
+                  let transition = notification.userInfo?[
+                    PDFFormDisplayTransitionEvent.transitionUserInfoKey
+                  ] as? PDFFormDisplayTransition else { return }
+            cancelFormDisplayTransition()
+            activeFormDisplayTransition = transition
+#if os(iOS)
+            guard let snapshot = pdfView.snapshotView(afterScreenUpdates: false) else {
+                return
+            }
+            snapshot.autoresizingMask = []
+            snapshot.isUserInteractionEnabled = false
+            if let host = pdfView.superview {
+                snapshot.frame = host.convert(pdfView.bounds, from: pdfView)
+                host.addSubview(snapshot)
+                host.bringSubviewToFront(snapshot)
+            } else {
+                snapshot.frame = pdfView.bounds
+                pdfView.addSubview(snapshot)
+                pdfView.bringSubviewToFront(snapshot)
+            }
+            formDisplayTransitionSnapshot = snapshot
+#endif
+        }
+
+        private func completeFormDisplayTransition(from notification: Notification) {
+            guard let pdfView,
+                  let document = notification.object as? PDFDocument,
+                  document === pdfView.document,
+                  let transition = notification.userInfo?[
+                    PDFFormDisplayTransitionEvent.transitionUserInfoKey
+                  ] as? PDFFormDisplayTransition,
+                  transition == activeFormDisplayTransition else { return }
+#if os(macOS)
+            if transition.replacesDocument { return }
+#endif
+            completeFormDisplayTransition(transition, in: pdfView)
+        }
+
+        func prepareFormDisplayTransitionForDocumentReplacement(_ document: PDFDocument) {
+            guard let pdfView, isReplacingDocumentForFormTransition else { return }
+            formDisplayTransitionTargetDocument = document
+            formDisplayTransitionDocumentInstalled = false
+            formDisplayTransitionSawVisiblePages = false
+            formDisplayTransitionCompletionScheduled = false
+            keepFormDisplayTransitionSnapshotOnTop(in: pdfView)
+        }
+
+        func completeFormDisplayTransitionAfterDocumentReplacement() {
+            guard let pdfView,
+                  let transition = activeFormDisplayTransition,
+                  transition.replacesDocument,
+                  pdfView.document === formDisplayTransitionTargetDocument else { return }
+            formDisplayTransitionDocumentInstalled = true
+            layoutFormDisplayTransition(in: pdfView)
+            redrawFormDisplayTransition(transition, in: pdfView)
+            keepFormDisplayTransitionSnapshotOnTop(in: pdfView)
+            if formDisplayTransitionSawVisiblePages {
+                scheduleFormDisplayTransitionCompletion(transition, in: pdfView)
+            }
+            // Visible-pages notifications describe layout, not tile-render completion.
+            // Bound the shield lifetime when PDFKit does not send a notification.
+            let generation = formDisplayTransitionGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self, weak pdfView] in
+                guard let self, let pdfView,
+                      generation == self.formDisplayTransitionGeneration,
+                      self.activeFormDisplayTransition == transition else { return }
+                self.scheduleFormDisplayTransitionCompletion(transition, in: pdfView)
+            }
+        }
+
+        private func formDisplayTransitionVisiblePagesDidChange() {
+            guard let pdfView,
+                  let transition = activeFormDisplayTransition,
+                  transition.replacesDocument,
+                  formDisplayTransitionTargetDocument != nil,
+                  pdfView.document === formDisplayTransitionTargetDocument else { return }
+            // The document setter can deliver this synchronously, before the
+            // caller has restored the destination and scale.
+            formDisplayTransitionSawVisiblePages = true
+            guard formDisplayTransitionDocumentInstalled else { return }
+            scheduleFormDisplayTransitionCompletion(transition, in: pdfView)
+        }
+
+        private func completeFormDisplayTransition(
+            _ transition: PDFFormDisplayTransition,
+            in pdfView: PDFView
+        ) {
+            layoutFormDisplayTransition(in: pdfView)
+            redrawFormDisplayTransition(transition, in: pdfView)
+            keepFormDisplayTransitionSnapshotOnTop(in: pdfView)
+            scheduleFormDisplayTransitionCompletion(transition, in: pdfView)
+        }
+
+        private func scheduleFormDisplayTransitionCompletion(
+            _ transition: PDFFormDisplayTransition,
+            in pdfView: PDFView
+        ) {
+            guard !formDisplayTransitionCompletionScheduled else { return }
+            formDisplayTransitionCompletionScheduled = true
+            let generation = formDisplayTransitionGeneration
+            DispatchQueue.main.async { [weak self, weak pdfView] in
+                guard let self, let pdfView,
+                      generation == self.formDisplayTransitionGeneration else { return }
+                self.layoutFormDisplayTransition(in: pdfView)
+                self.redrawFormDisplayTransition(transition, in: pdfView)
+                self.keepFormDisplayTransitionSnapshotOnTop(in: pdfView)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak pdfView] in
+                    guard let self, let pdfView,
+                          generation == self.formDisplayTransitionGeneration else { return }
+                    self.layoutFormDisplayTransition(in: pdfView)
+                    // The replacement was redrawn while the shield was still up.
+                    // Do not invalidate the whole page again as we uncover it.
+                    if !transition.replacesDocument {
+                        self.redrawFormDisplayTransition(transition, in: pdfView)
+                    }
+                    self.cancelFormDisplayTransition()
+                }
+            }
+        }
+
+        private func redrawFormDisplayTransition(
+            _ transition: PDFFormDisplayTransition,
+            in pdfView: PDFView
+        ) {
+            guard let page = pdfView.document?.page(at: transition.pageIndex),
+                  let documentView = pdfView.documentView else { return }
+            let pageBounds = transition.replacesDocument
+                ? page.bounds(for: .cropBox)
+                : [transition.beforeBounds, transition.afterBounds]
+                    .compactMap { $0 }
+                    .reduce(CGRect.null) { $0.union($1) }
+            guard !pageBounds.isNull else { return }
+            let viewBounds = pdfView.convert(pageBounds, from: page)
+                .standardized.insetBy(dx: -4, dy: -4)
+            let documentBounds = documentView.convert(viewBounds, from: pdfView)
+#if os(macOS)
+            documentView.setNeedsDisplay(documentBounds)
+            documentView.displayIfNeeded()
+#else
+            documentView.setNeedsDisplay(documentBounds)
+            documentView.layoutIfNeeded()
+#endif
+        }
+
+        private func layoutFormDisplayTransition(in pdfView: PDFView) {
+#if os(macOS)
+            pdfView.layoutSubtreeIfNeeded()
+            pdfView.documentView?.layoutSubtreeIfNeeded()
+#else
+            pdfView.layoutIfNeeded()
+            pdfView.documentView?.layoutIfNeeded()
+#endif
+        }
+
+        private func keepFormDisplayTransitionSnapshotOnTop(in pdfView: PDFView) {
+            guard let snapshot = formDisplayTransitionSnapshot else { return }
+            // Stay outside PDFKit's internal view hierarchy throughout its rebuild.
+            let host = pdfView.superview ?? pdfView
+            snapshot.frame = host.convert(pdfView.bounds, from: pdfView)
+#if os(macOS)
+            host.addSubview(snapshot, positioned: .above, relativeTo: nil)
+#else
+            if snapshot.superview !== host {
+                snapshot.removeFromSuperview()
+                host.addSubview(snapshot)
+            }
+            host.bringSubviewToFront(snapshot)
+#endif
+        }
+
+        private func cancelFormDisplayTransition() {
+            formDisplayTransitionGeneration &+= 1
+            activeFormDisplayTransition = nil
+            formDisplayTransitionDocumentInstalled = false
+            formDisplayTransitionSawVisiblePages = false
+            formDisplayTransitionCompletionScheduled = false
+            formDisplayTransitionTargetDocument = nil
+#if os(macOS)
+            formDisplayTransitionSnapshot?.removeFromSuperviewWithoutNeedingDisplay()
+#else
+            formDisplayTransitionSnapshot?.removeFromSuperview()
+#endif
+            formDisplayTransitionSnapshot = nil
+        }
+
+        private func presentActionBar(
+            _ actionBar: AnyView,
+            identity: ActionBarIdentity,
+            above annotationBounds: CGRect,
+            in pdfView: PDFView
+        ) {
+
 #if os(macOS)
             let container: PDFAnnotationActionContainerView
-            let host: NSHostingView<PDFAnnotationActionBar>
+            let host: NSHostingView<AnyView>
             if let existingContainer = annotationActionContainer,
                let existingHost = annotationActionHost {
                 container = existingContainer
                 host = existingHost
-                if annotationActionSnapshot != annotation {
+                if actionBarIdentity != identity {
                     host.rootView = actionBar
-                    annotationActionSnapshot = annotation
+                    actionBarIdentity = identity
                 }
             } else {
                 container = PDFAnnotationActionContainerView(frame: .zero)
@@ -1584,21 +2178,21 @@ extension PDFKitView {
                 pdfView.addSubview(container)
                 annotationActionContainer = container
                 annotationActionHost = host
-                annotationActionSnapshot = annotation
+                actionBarIdentity = identity
             }
             let fittingSize = host.fittingSize
             let size = CGSize(width: max(fittingSize.width, 150), height: max(fittingSize.height, 32))
             host.frame = CGRect(origin: .zero, size: size)
 #else
             let container: UIView
-            let hostingController: UIHostingController<PDFAnnotationActionBar>
+            let hostingController: UIHostingController<AnyView>
             if let existingContainer = annotationActionContainer,
                let existingController = annotationActionHostingController {
                 container = existingContainer
                 hostingController = existingController
-                if annotationActionSnapshot != annotation {
+                if actionBarIdentity != identity {
                     hostingController.rootView = actionBar
-                    annotationActionSnapshot = annotation
+                    actionBarIdentity = identity
                 }
             } else {
                 container = UIView(frame: .zero)
@@ -1609,7 +2203,7 @@ extension PDFKitView {
                 pdfView.addSubview(container)
                 annotationActionContainer = container
                 annotationActionHostingController = hostingController
-                annotationActionSnapshot = annotation
+                actionBarIdentity = identity
             }
             let fittingSize = hostingController.sizeThatFits(
                 in: CGSize(width: 320, height: 80)
@@ -1706,7 +2300,7 @@ extension PDFKitView {
         }
 
         private func removeAnnotationActionBar() {
-            annotationActionSnapshot = nil
+            actionBarIdentity = nil
 #if os(macOS)
             annotationActionContainer?.removeFromSuperview()
             annotationActionContainer = nil
@@ -1725,6 +2319,7 @@ extension PDFKitView {
                 selectedObject.wrappedValue != nil
             let hasSelectedAnnotation = annotationEditingEnabled &&
                 selectedAnnotation.wrappedValue != nil
+            let hasSelectedFormField = selectedFormField.wrappedValue != nil
             for gesture in gestures {
                 if gesture === freehandGesture {
                     gesture.isEnabled = freehandDrawingEnabled
@@ -1735,7 +2330,7 @@ extension PDFKitView {
                 } else if gesture is NSMagnificationGestureRecognizer {
                     gesture.isEnabled = hasSelectedObject || hasSelectedAnnotation
                 } else {
-                    gesture.isEnabled = hasSelectedObject || hasSelectedAnnotation
+                    gesture.isEnabled = hasSelectedObject || hasSelectedAnnotation || hasSelectedFormField
                 }
             }
 #else
@@ -1750,7 +2345,8 @@ extension PDFKitView {
                         signaturePlacementEnabled ||
                         objectEditingEnabled || annotationEditingEnabled
                 } else {
-                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled
+                    gesture.isEnabled = objectEditingEnabled || annotationEditingEnabled ||
+                        selectedFormField.wrappedValue != nil
                 }
             }
 #endif
@@ -1952,6 +2548,8 @@ extension PDFKitView {
             pendingTextActivation = nil
             let pageIndex = document.index(for: page)
             let pagePoint = pdfView.convert(viewPoint, to: page)
+            if selectAuthoredFormField(at: viewPoint, in: pdfView) { return }
+            selectedFormField.wrappedValue = nil
             if freeTextPlacementEnabled {
                 beginFreeTextPlacement(
                     pageIndex: pageIndex,
@@ -2994,7 +3592,8 @@ extension PDFKitView {
                     height: CGFloat.greatestFiniteMagnitude
                 ),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: attributes
+                attributes: attributes,
+                context: nil
             ).height
             let contentHeight = max(
                 lineHeight * CGFloat(max(lines.count, 1)),
@@ -4081,7 +4680,24 @@ extension PDFKitView {
             let pagePoint = pdfView.convert(viewPoint, to: page)
             let pageIndex: Int
             let bounds: CGRect
-            if annotationEditingEnabled,
+            if let field = selectedFormField.wrappedValue {
+                guard field.pageIndex == touchedPageIndex else { return }
+                let selectionRect = pdfView.convert(field.bounds, from: page).standardized
+                let corners = [
+                    CGPoint(x: selectionRect.minX, y: selectionRect.minY),
+                    CGPoint(x: selectionRect.maxX, y: selectionRect.minY),
+                    CGPoint(x: selectionRect.maxX, y: selectionRect.maxY),
+                    CGPoint(x: selectionRect.minX, y: selectionRect.maxY),
+                ]
+                guard let cornerIndex = corners.indices.min(by: {
+                    hypot(corners[$0].x - viewPoint.x, corners[$0].y - viewPoint.y) <
+                        hypot(corners[$1].x - viewPoint.x, corners[$1].y - viewPoint.y)
+                }), hypot(corners[cornerIndex].x - viewPoint.x, corners[cornerIndex].y - viewPoint.y) <= 20 else { return }
+                interactionFormField = field
+                interactionFormAnchorPoint = pdfView.convert(corners[(cornerIndex + 2) % 4], to: page)
+                pageIndex = field.pageIndex
+                bounds = field.bounds
+            } else if annotationEditingEnabled,
                let annotation = annotation(at: pagePoint, pageIndex: touchedPageIndex) {
                 selectedObject.wrappedValue = nil
                 selectedAnnotation.wrappedValue = annotation
@@ -4109,7 +4725,9 @@ extension PDFKitView {
                 CGPoint(x: selectionRect.maxX, y: selectionRect.maxY),
                 CGPoint(x: selectionRect.minX, y: selectionRect.maxY),
             ]
-            if interactionAnnotation?.kind == .note {
+            if interactionFormField != nil {
+                dragMode = .scale
+            } else if interactionAnnotation?.kind == .note {
                 dragMode = .move
             } else {
                 dragMode = corners.contains {
@@ -4152,7 +4770,21 @@ extension PDFKitView {
                     0.05
                 ), 20)
                 let operation = scaleTransform(factor: factor, center: center)
-                if let annotation = interactionAnnotation {
+                if let field = interactionFormField, let anchor = interactionFormAnchorPoint {
+                    let minimum: CGFloat = 12
+                    let width = max(abs(current.x - anchor.x), minimum)
+                    let height = max(abs(current.y - anchor.y), minimum)
+                    let rawBounds = CGRect(
+                        x: current.x < anchor.x ? anchor.x - width : anchor.x,
+                        y: current.y < anchor.y ? anchor.y - height : anchor.y,
+                        width: width, height: height
+                    )
+                    let bounds = PDFFormPageGeometry(
+                        cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+                    ).clamped(rawBounds)
+                    refreshOverlay(previewBounds: bounds)
+                    if finished { onSetFormFieldBounds(field, bounds) }
+                } else if let annotation = interactionAnnotation {
                     applyAnnotationTransform(annotation, operation: operation, finished: finished)
                 } else if let object = interactionObject {
                     applyPageTransform(object: object, pageOperation: operation, finished: finished)
@@ -4239,6 +4871,8 @@ extension PDFKitView {
         private func clearInteraction() {
             interactionObject = nil
             interactionAnnotation = nil
+            interactionFormField = nil
+            interactionFormAnchorPoint = nil
             interactionPage = nil
         }
 
@@ -4392,6 +5026,7 @@ extension PDFKitView {
 #elseif os(iOS)
         private func installGestures(on pdfView: PDFView) {
             let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+            tap.cancelsTouchesInView = false
             let doubleTap = UITapGestureRecognizer(
                 target: self,
                 action: #selector(handleDoubleTap(_:))
@@ -4570,6 +5205,7 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
                 in: pdfView.convert(annotation.bounds, from: page)
             )
         }
+        selectedFormField.wrappedValue = nil
         selectedAnnotation.wrappedValue = annotation
         selectedPageIndex.wrappedValue = pageIndex
         onOpenAnnotation(annotation)
@@ -4704,6 +5340,8 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     }
 
     func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
+        if authoredWidgetOwnsInput(at: viewPoint, in: pdfView) ||
+            formResizeHandleContains(viewPoint, in: pdfView) { return true }
         if freehandDrawingEnabled {
             return pdfView.page(for: viewPoint, nearest: false) != nil
         }
@@ -4760,6 +5398,12 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool {
         let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
+        if selectAuthoredFormField(at: viewPoint, in: pdfView) {
+            // PDFView still receives the event, preserving native text/button use.
+            return false
+        }
+        if formResizeHandleContains(viewPoint, in: pdfView) { return false }
+        selectedFormField.wrappedValue = nil
         if inlineEditorContains(viewPoint) {
             return false
         }
@@ -4848,7 +5492,11 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegate {
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+        guard !formPlacementActive else { return false }
         guard inlineTextField == nil, let pdfView else { return false }
+        let point = gestureRecognizer.location(in: pdfView)
+        if authoredWidgetOwnsInput(at: point, in: pdfView),
+           !formResizeHandleContains(point, in: pdfView) { return false }
         return shouldBeginInteractionGesture(
             gestureRecognizer,
             at: gestureRecognizer.location(in: pdfView),
@@ -4885,7 +5533,12 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
         let pageIndex: Int
         let bounds: CGRect
         let isTextObject: Bool
-        if annotationEditingEnabled,
+        if let field = selectedFormField.wrappedValue,
+           formResizeHandleContains(viewPoint, in: pdfView) {
+            pageIndex = field.pageIndex
+            bounds = field.bounds
+            isTextObject = false
+        } else if annotationEditingEnabled,
            let annotation = annotation(at: pagePoint, pageIndex: touchedPageIndex) {
             pageIndex = annotation.reference.pageIndex
             bounds = annotation.bounds
@@ -4975,6 +5628,12 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         _ gestureRecognizer: UIGestureRecognizer,
         shouldReceive touch: UITouch
     ) -> Bool {
+        guard !formPlacementActive else { return false }
+        if let pdfView, authoredWidgetOwnsInput(at: touch.location(in: pdfView), in: pdfView) {
+            return gestureRecognizer is UITapGestureRecognizer ||
+                (gestureRecognizer is UIPanGestureRecognizer &&
+                 formResizeHandleContains(touch.location(in: pdfView), in: pdfView))
+        }
         guard let touchedView = touch.view else { return true }
         if let annotationActionContainer,
            touchedView === annotationActionContainer ||
@@ -4986,6 +5645,15 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard !formPlacementActive else { return false }
+        if let pdfView,
+           authoredWidgetOwnsInput(at: gestureRecognizer.location(in: pdfView), in: pdfView) {
+            if gestureRecognizer is UITapGestureRecognizer { return true }
+            if gestureRecognizer is UIPanGestureRecognizer {
+                return formResizeHandleContains(gestureRecognizer.location(in: pdfView), in: pdfView)
+            }
+            return false
+        }
         if gestureRecognizer === freehandGesture {
             guard freehandDrawingEnabled, let pdfView else { return false }
             return pdfView.page(
@@ -5006,7 +5674,12 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         guard let pdfView else { return false }
         let pageIndex: Int
         let bounds: CGRect
-        if annotationEditingEnabled,
+        if let field = selectedFormField.wrappedValue,
+           gestureRecognizer is UIPanGestureRecognizer,
+           formResizeHandleContains(gestureRecognizer.location(in: pdfView), in: pdfView) {
+            pageIndex = field.pageIndex
+            bounds = field.bounds
+        } else if annotationEditingEnabled,
            gestureRecognizer is UIPanGestureRecognizer,
            let page = pdfView.page(
                for: gestureRecognizer.location(in: pdfView),

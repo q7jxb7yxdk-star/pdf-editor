@@ -5,6 +5,129 @@ import UniformTypeIdentifiers
 
 #if os(macOS)
 import AppKit
+
+@MainActor
+private final class PDFFormDesignFocusRecovery: ObservableObject {
+    private weak var sourceWindow: NSWindow?
+    private var subscriptions: [AnyCancellable] = []
+    private var recoveryTask: Task<Void, Never>?
+    private var isRestoring = false
+    private var toolbarCursorMonitor: Any?
+    private var toolbarCursorUpdateQueued = false
+
+    func prepare(for window: NSWindow?) {
+        cancel()
+        sourceWindow = window
+    }
+
+    func restoreAfterDismissal() {
+        guard let window = sourceWindow else { return }
+        isRestoring = true
+        subscriptions = [
+            NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification, object: window),
+            NotificationCenter.default.publisher(for: NSWindow.didEndSheetNotification, object: window),
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification, object: NSApp),
+        ].map { publisher in
+            publisher.receive(on: RunLoop.main).sink { [weak self] _ in
+                self?.scheduleRecovery()
+            }
+        }
+        scheduleRecovery()
+    }
+
+    func cancel() {
+        finishRecovery()
+        if let toolbarCursorMonitor {
+            NSEvent.removeMonitor(toolbarCursorMonitor)
+            self.toolbarCursorMonitor = nil
+        }
+        toolbarCursorUpdateQueued = false
+        sourceWindow = nil
+    }
+
+    private func finishRecovery() {
+        isRestoring = false
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        subscriptions.removeAll()
+    }
+
+    private func scheduleRecovery() {
+        guard isRestoring else { return }
+        recoveryTask?.cancel()
+        recoveryTask = Task { @MainActor [weak self] in
+            // Dismissal and key-window notifications can precede AppKit's
+            // final responder/cursor update. Yield, then check the real state.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            self?.restoreIfReady()
+        }
+    }
+
+    private func restoreIfReady() {
+        guard isRestoring, let window = sourceWindow,
+              NSApp.isActive, window.isVisible, window.isKeyWindow,
+              window.attachedSheet == nil, NSApp.modalWindow == nil else { return }
+        // Do not reactivate the sheet's text editor or make another window key.
+        guard window.makeFirstResponder(nil) else { cancel(); return }
+        window.resetCursorRects()
+        // NSCursor is application-wide: only clear the stale I-beam when the
+        // pointer is over this document, never over another window/application.
+        if NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0) == window.windowNumber {
+            NSCursor.arrow.set()
+        }
+        finishRecovery()
+        installToolbarCursorMonitor()
+    }
+
+    private func installToolbarCursorMonitor() {
+        guard toolbarCursorMonitor == nil else { return }
+        toolbarCursorMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .mouseEntered, .cursorUpdate]
+        ) { [weak self] event in
+            guard let self, let window = self.sourceWindow,
+                  event.window === window,
+                  event.locationInWindow.y >= window.contentLayoutRect.maxY,
+                  !self.toolbarCursorUpdateQueued else { return event }
+            self.toolbarCursorUpdateQueued = true
+            // Local monitors run before normal dispatch. Correct the toolbar
+            // cursor afterward rather than before PDFKit's normal cursor
+            // handling. Always pass the original event through.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.toolbarCursorUpdateQueued = false
+                self.restoreToolbarCursorIfNeeded()
+            }
+            return event
+        }
+    }
+
+    private func restoreToolbarCursorIfNeeded() {
+        guard toolbarCursorMonitor != nil, let window = sourceWindow,
+              NSApp.isActive, window.isKeyWindow, window.isVisible,
+              window.attachedSheet == nil, NSApp.modalWindow == nil,
+              window.toolbar?.isVisible == true,
+              NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0) == window.windowNumber else { return }
+        let point = window.mouseLocationOutsideOfEventStream
+        // contentLayoutRect excludes the native titlebar/toolbar, including
+        // with fullSizeContentView. Leave PDF text and resize borders alone.
+        guard point.y >= window.contentLayoutRect.maxY,
+              point.y < window.frame.height - 5,
+              point.x > 5, point.x < window.frame.width - 5 else { return }
+        if let editor = window.firstResponder as? NSTextView,
+           editor.isEditable,
+           editor.convert(editor.bounds, to: nil).contains(point) {
+            return
+        }
+        NSCursor.arrow.set()
+    }
+
+    deinit {
+        if let toolbarCursorMonitor {
+            NSEvent.removeMonitor(toolbarCursorMonitor)
+        }
+    }
+}
 #endif
 
 private enum FileImportPurpose: Equatable {
@@ -189,6 +312,17 @@ struct ContentView: View {
     @State private var highlightSelectionSnapshot: PDFSelection?
     @State private var highlightModeEnabled = false
     @State private var password = ""
+    @State private var formDesignSession: PDFFormDesignSession?
+    @State private var isOpeningFormDesign = false
+    @State private var pendingFormDesignKindAfterTools: PDFFormDesignKind?
+    @State private var formDesignPlacementKind: PDFFormDesignKind?
+    @State private var formPlacementRequest: PDFFormPlacementRequest?
+    @State private var selectedFormField: PDFFormDesignField?
+    @State private var formPlacementPreparationID: UUID?
+    @State private var radioPlacementGroupName = ""
+#if os(macOS)
+    @StateObject private var formDesignFocusRecovery = PDFFormDesignFocusRecovery()
+#endif
     @State private var annotationText = ""
     @State private var errorMessage: String?
     @State private var pageObjects: [PDFPageObjectSnapshot] = []
@@ -328,10 +462,12 @@ struct ContentView: View {
             }
 #endif
             .onDisappear {
+                cancelFormFieldPlacement()
                 ocrBatchTask?.cancel()
                 imageExportTask?.cancel()
                 pageObjectLoadTask?.cancel()
 #if os(macOS)
+                formDesignFocusRecovery.cancel()
                 nativeDocumentReference?.document?.prepareSave = nil
                 nativeDocumentReference?.document?.saveActivityDidChange = nil
 #endif
@@ -393,7 +529,12 @@ struct ContentView: View {
                         .frame(width: 52)
                 }
                 .onAppear { usesInlinePanels = false }
-                .sheet(isPresented: $showsToolPanel) {
+                .sheet(isPresented: $showsToolPanel, onDismiss: {
+                    if let kind = pendingFormDesignKindAfterTools {
+                        pendingFormDesignKindAfterTools = nil
+                        beginFormFieldPlacement(kind)
+                    }
+                }) {
                     NavigationStack {
                         toolSidebar
                             .navigationTitle("Tools")
@@ -412,6 +553,12 @@ struct ContentView: View {
             }
         }
         .toolbar { adaptiveToolbar }
+        .onChange(of: isSaving) { _, saving in
+            if saving { cancelFormFieldPlacement() }
+        }
+        .onChange(of: isRunningOCR) { _, running in
+            if running { cancelFormFieldPlacement() }
+        }
         .onChange(of: document.pageCount, initial: true) { _, pageCount in
             guard pageCount > 0 else {
                 selectedPageIndex = nil
@@ -430,6 +577,7 @@ struct ContentView: View {
             highlightModeEnabled = false
             selectedObject = nil
             selectedAnnotation = nil
+            if selectedFormField?.pageIndex != pageIndex { selectedFormField = nil }
             loadCanvasObjects()
             loadCanvasAnnotations()
             if let pageIndex, let pendingFreehandReference,
@@ -538,6 +686,14 @@ struct ContentView: View {
                 onApply: updateAnnotation,
                 onDelete: deleteAnnotation
             )
+        }
+        .sheet(item: $formDesignSession, onDismiss: formDesignDidDismiss) { session in
+            PDFFormDesignerView(session: session, initialPlacementKind: formDesignPlacementKind) { fields in
+                try document.applyFormDesign(fields, session: session, undoManager: undoManager)
+                formDesignSession = nil
+            } onCancel: {
+                formDesignSession = nil
+            }
         }
 #if os(iOS)
         .sheet(item: $commentEditorAnnotation) { annotation in
@@ -705,13 +861,17 @@ struct ContentView: View {
                     objects: pageObjects,
                     stagedTextByObjectID: pendingTextEditStore.stagedTextByObjectID,
                     selectedObject: $selectedObject,
-                    objectEditingEnabled: objectEditingEnabled,
+                    objectEditingEnabled: objectEditingEnabled && formPlacementRequest == nil,
                     onTranslateObject: moveObject,
                     onSetObjectTransform: setObjectTransform,
                     annotations: pageAnnotations,
                     selectedAnnotation: $selectedAnnotation,
-                    annotationEditingEnabled: annotationEditingEnabled,
+                    annotationEditingEnabled: annotationEditingEnabled && formPlacementRequest == nil,
                     onSetAnnotationBounds: setAnnotationBounds,
+                    selectedFormField: $selectedFormField,
+                    onSetFormFieldBounds: setFormFieldBounds,
+                    onSetFormFieldFontSize: setFormFieldFontSize,
+                    onDeleteFormField: deleteFormField,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
                     freeTextPlacementEnabled: freeTextPlacementEnabled,
@@ -733,9 +893,16 @@ struct ContentView: View {
                     onOpenAnnotation: openAnnotation,
                     onAcroFormChange: synchronizeAcroFormChanges,
                     viewerMode: viewerMode,
-                    viewerCommand: viewerCommand
+                    viewerCommand: viewerCommand,
+                    formPlacement: formPlacementConfiguration
                 )
                 .ignoresSafeArea(.container, edges: .bottom)
+
+                if let request = formPlacementRequest {
+                    formPlacementPrompt(for: request)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 12)
+                }
 
                 if commentPlacementEnabled {
                     HStack(spacing: 12) {
@@ -852,6 +1019,7 @@ struct ContentView: View {
             isLocked: document.isLocked,
             removesPasswordProtectionOnSave:
                 document.removesPasswordProtectionOnSave,
+            canDesignForm: !isSaving && !isRunningOCR && !isOpeningFormDesign && formPlacementPreparationID == nil,
             recentDocumentURLs: Array(recentDocuments.urls.prefix(5)),
             onOpenRecentDocument: recentDocuments.open,
             onClearRecentDocuments: recentDocuments.clear,
@@ -868,6 +1036,7 @@ struct ContentView: View {
             isLocked: document.isLocked,
             removesPasswordProtectionOnSave:
                 document.removesPasswordProtectionOnSave,
+            canDesignForm: !isSaving && !isRunningOCR && !isOpeningFormDesign && formPlacementPreparationID == nil,
             onAction: handleToolAction
         )
     }
@@ -979,6 +1148,177 @@ struct ContentView: View {
             .accessibilityLabel("OCR")
         }
         .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .navigation) {
+            Button {
+                beginFormDesign()
+            } label: {
+                Image(systemName: "rectangle.and.pencil.and.ellipsis")
+            }
+            .buttonStyle(.plain)
+            .disabled(document.isLocked || document.pageCount == 0 || isSaving || isRunningOCR || isOpeningFormDesign)
+            .help("Acroform")
+            .accessibilityLabel("Acroform")
+        }
+        .sharedBackgroundVisibility(.hidden)
+    }
+
+    private func beginFormDesign(placing kind: PDFFormDesignKind? = nil) {
+        cancelFormFieldPlacement()
+        guard !isOpeningFormDesign, formDesignSession == nil,
+              !isSaving, !isRunningOCR, !document.isLocked, document.pageCount > 0 else { return }
+        // End native field editing before taking the isolated design snapshot.
+#if os(macOS)
+        let formDesignHostWindow = nativeDocumentReference?.document?.windowControllers.first?.window
+            ?? NSApp.keyWindow
+        guard formDesignHostWindow?.makeFirstResponder(nil) != false else { return }
+#else
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+#endif
+        cancelCommentPlacement()
+        cancelESignPlacement()
+        cancelFreeTextPlacement()
+        freehandDrawingEnabled = false
+        highlightModeEnabled = false
+        selectedAnnotation = nil
+        selectedObject = nil
+        isOpeningFormDesign = true
+        Task { @MainActor in
+            defer { isOpeningFormDesign = false }
+            // Let native edit-completion callbacks settle before cloning bytes.
+            await Task.yield()
+            guard pendingTextEditStore.edits.isEmpty else {
+                errorMessage = "Save or undo pending PDF text edits before opening the form designer."
+                return
+            }
+            do {
+                let session = try document.makeFormDesignSession(
+                    initialPageIndex: selectedPageIndex ?? 0, undoManager: undoManager
+                )
+#if os(macOS)
+                formDesignFocusRecovery.prepare(for: formDesignHostWindow)
+#endif
+                formDesignPlacementKind = kind
+                formDesignSession = session
+            } catch { present(error) }
+        }
+    }
+
+    private var formPlacementConfiguration: PDFFormPlacementConfiguration? {
+        guard let request = formPlacementRequest else { return nil }
+        return PDFFormPlacementConfiguration(
+            request: request,
+            onPlace: { source, pageIndex, bounds in
+                placeFormField(request, source: source, pageIndex: pageIndex, bounds: bounds)
+            },
+            onCancel: cancelFormFieldPlacement
+        )
+    }
+
+    private func formPlacementPrompt(for request: PDFFormPlacementRequest) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Label("Click or drag to add \(request.kind.title)", systemImage: request.kind.symbol)
+                    .font(.callout)
+                Spacer(minLength: 0)
+                Button("Cancel", action: cancelFormFieldPlacement)
+                    .buttonStyle(.bordered)
+                    .keyboardShortcut(.cancelAction)
+            }
+            if request.kind == .radioButton {
+                HStack {
+                    Text("Group Name")
+                    TextField("Radio group", text: $radioPlacementGroupName)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Text("Use the same group for related options, or enter a new group name.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 560)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(radius: 4, y: 2)
+    }
+
+    private func beginFormFieldPlacement(_ kind: PDFFormDesignKind) {
+        cancelFormFieldPlacement()
+        guard formDesignSession == nil, !isOpeningFormDesign,
+              !isSaving, !isRunningOCR, !document.isLocked, document.pageCount > 0 else { return }
+#if os(macOS)
+        let window = nativeDocumentReference?.document?.windowControllers.first?.window ?? NSApp.keyWindow
+        guard window?.makeFirstResponder(nil) != false else { return }
+        formDesignFocusRecovery.cancel()
+#else
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+#endif
+        cancelCommentPlacement()
+        cancelESignPlacement()
+        cancelFreeTextPlacement()
+        freehandDrawingEnabled = false
+        highlightModeEnabled = false
+        selectedAnnotation = nil
+        selectedObject = nil
+        selectedFormField = nil
+        pdfSelection = nil
+        let request = PDFFormPlacementRequest(kind: kind)
+        let source = document.pdfDocument
+        formPlacementPreparationID = request.id
+        Task { @MainActor in
+            defer {
+                if formPlacementPreparationID == request.id { formPlacementPreparationID = nil }
+            }
+            // Let native edit completion publish pending text before the check.
+            await Task.yield()
+            guard formPlacementPreparationID == request.id, source === document.pdfDocument,
+                  !isSaving, !isRunningOCR else { return }
+            guard pendingTextEditStore.edits.isEmpty else {
+                errorMessage = "Save or undo pending PDF text edits before adding form fields."
+                return
+            }
+            do {
+                _ = try document.makeFormDesignSession(initialPageIndex: selectedPageIndex ?? 0, undoManager: undoManager)
+                if kind == .radioButton, radioPlacementGroupName.isEmpty {
+                    radioPlacementGroupName = PDFFormDesignService().nextPlacementName(for: kind, in: document.pdfDocument)
+                }
+                formPlacementRequest = request
+            } catch { present(error) }
+        }
+    }
+
+    private func cancelFormFieldPlacement() {
+        formPlacementPreparationID = nil
+        formPlacementRequest = nil
+        pendingFormDesignKindAfterTools = nil
+    }
+
+    private func placeFormField(
+        _ request: PDFFormPlacementRequest, source: PDFDocument,
+        pageIndex: Int, bounds: CGRect
+    ) {
+        guard formPlacementRequest?.id == request.id, source === document.pdfDocument,
+              !isSaving, !isRunningOCR else { return }
+        // A completed gesture ends placement even if verification rejects it.
+        // The live document is unchanged on failure; a new tool click can retry.
+        cancelFormFieldPlacement()
+        do {
+            let field = try document.addPlacedFormField(
+                kind: request.kind, pageIndex: pageIndex, bounds: bounds,
+                radioGroupName: request.kind == .radioButton ? radioPlacementGroupName : nil,
+                undoManager: undoManager
+            )
+            if request.kind == .radioButton { radioPlacementGroupName = field.name }
+            // Keep the viewport's current page. In continuous/two-page mode,
+            // the clicked page can differ; assigning it would navigate/scroll
+            // PDFView even though its document and pages were retained.
+        } catch { present(error) }
+    }
+
+    private func formDesignDidDismiss() {
+        formDesignPlacementKind = nil
+        pendingFormDesignKindAfterTools = nil
+#if os(macOS)
+        formDesignFocusRecovery.restoreAfterDismissal()
+#endif
     }
 
 #if os(macOS)
@@ -1490,6 +1830,7 @@ struct ContentView: View {
     }
 
     private func handleToolAction(_ action: PDFToolAction) {
+        cancelFormFieldPlacement()
         if action != .drawFreehand {
             freehandDrawingEnabled = false
         }
@@ -1537,6 +1878,13 @@ struct ContentView: View {
             beginESignPlacement(.mark(.crossmark))
         case .fillFormFields:
             beginFreeTextPlacement()
+        case let .designForm(kind):
+            if !usesInlinePanels && showsToolPanel {
+                pendingFormDesignKindAfterTools = kind
+                showsToolPanel = false
+            } else {
+                beginFormFieldPlacement(kind)
+            }
         case .drawFreehand:
             commentPlacementEnabled = false
             highlightModeEnabled = false
@@ -2196,6 +2544,7 @@ struct ContentView: View {
     }
 
     private func beginCommentPlacement() {
+        cancelFormFieldPlacement()
         guard document.pageCount > 0 else { return }
         cancelHighlightMode()
         selectedObject = nil
@@ -2265,6 +2614,7 @@ struct ContentView: View {
     }
 
     private func beginHighlight() {
+        cancelFormFieldPlacement()
         cancelCommentPlacement()
         guard activeHighlightSelection != nil else {
             highlightModeEnabled = true
@@ -2310,6 +2660,7 @@ struct ContentView: View {
     }
 
     private func beginESignPlacement(_ placement: ESignPlacement) {
+        cancelFormFieldPlacement()
         showsSignatureLibrary = false
         cancelFreeTextPlacement()
         cancelCommentPlacement()
@@ -2327,6 +2678,7 @@ struct ContentView: View {
     }
 
     private func beginFreeTextPlacement() {
+        cancelFormFieldPlacement()
         guard !document.requiresDigitalSignatureConsent else {
             showsSignatureWarning = true
             return
@@ -2531,6 +2883,34 @@ struct ContentView: View {
                 with: update,
                 undoManager: undoManager
             )
+        } catch { present(error) }
+    }
+
+    private func setFormFieldBounds(_ field: PDFFormDesignField, bounds: CGRect) {
+        do {
+            selectedFormField = try document.resizeAuthoredFormField(
+                id: field.id, bounds: bounds, undoManager: undoManager
+            )
+        } catch { present(error) }
+    }
+
+    private func setFormFieldFontSize(
+        _ field: PDFFormDesignField, fontSize: CGFloat
+    ) {
+        guard field.kind == .text, abs(field.fontSize - fontSize) > 0.01 else { return }
+        do {
+            selectedFormField = try document.setAuthoredTextFieldFontSize(
+                id: field.id, fontSize: fontSize, undoManager: undoManager
+            )
+        } catch { present(error) }
+    }
+
+    private func deleteFormField(_ field: PDFFormDesignField) {
+        do {
+            try document.deleteAuthoredFormField(
+                id: field.id, undoManager: undoManager
+            )
+            selectedFormField = nil
         } catch { present(error) }
     }
 

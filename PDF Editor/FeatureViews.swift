@@ -7,7 +7,7 @@ import Combine
 import QuickLookThumbnailing
 #endif
 
-enum PDFToolAction {
+enum PDFToolAction: Equatable {
     case addComment
     case editComments
     case highlight
@@ -23,6 +23,7 @@ enum PDFToolAction {
     case addCheckmark
     case addCrossmark
     case fillFormFields
+    case designForm(PDFFormDesignKind)
     case protectPDF
     case removePassword
 }
@@ -37,13 +38,15 @@ extension PDFToolAction {
 }
 
 struct PDFToolSidebar: View {
-    private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
+    private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v2"
+    private static let legacyExpandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
     private static var sectionTitles: Set<String> {
         var titles: Set<String> = [
             "Edit text",
             "Organize a PDF",
             "Export PDF to",
             "E-sign",
+            "Acroform",
             "Secure PDF"
         ]
 #if os(macOS)
@@ -57,6 +60,7 @@ struct PDFToolSidebar: View {
     let isEncrypted: Bool
     let isLocked: Bool
     let removesPasswordProtectionOnSave: Bool
+    let canDesignForm: Bool
     let recentDocumentURLs: [URL]
     let onOpenRecentDocument: (URL) -> Void
     let onClearRecentDocuments: () -> Void
@@ -71,6 +75,7 @@ struct PDFToolSidebar: View {
         isEncrypted: Bool,
         isLocked: Bool,
         removesPasswordProtectionOnSave: Bool,
+        canDesignForm: Bool = true,
         recentDocumentURLs: [URL] = [],
         onOpenRecentDocument: @escaping (URL) -> Void = { _ in },
         onClearRecentDocuments: @escaping () -> Void = {},
@@ -82,6 +87,7 @@ struct PDFToolSidebar: View {
         self.isEncrypted = isEncrypted
         self.isLocked = isLocked
         self.removesPasswordProtectionOnSave = removesPasswordProtectionOnSave
+        self.canDesignForm = canDesignForm
         self.recentDocumentURLs = recentDocumentURLs
         self.onOpenRecentDocument = onOpenRecentDocument
         self.onClearRecentDocuments = onClearRecentDocuments
@@ -124,6 +130,27 @@ struct PDFToolSidebar: View {
 
                     section("Export PDF to") {
                         tool("Image format", icon: "photo", action: .exportImage)
+                    }
+
+                    section("Acroform") {
+                        tool(
+                            "Textbox",
+                            icon: "character.textbox",
+                            action: .designForm(.text),
+                            enabled: canDesignForm && !isLocked && pageCount > 0
+                        )
+                        tool(
+                            "Checkbox",
+                            icon: "checkmark.square",
+                            action: .designForm(.checkBox),
+                            enabled: canDesignForm && !isLocked && pageCount > 0
+                        )
+                        tool(
+                            "Radio Button",
+                            icon: "smallcircle.filled.circle",
+                            action: .designForm(.radioButton),
+                            enabled: canDesignForm && !isLocked && pageCount > 0
+                        )
                     }
 
                     section("E-sign") {
@@ -218,10 +245,14 @@ struct PDFToolSidebar: View {
     }
 
     private static func loadExpandedSections() -> Set<String> {
-        guard let storedTitles = UserDefaults.standard.array(forKey: expandedSectionsDefaultsKey) as? [String] else {
-            return sectionTitles
+        if let storedTitles = UserDefaults.standard.array(forKey: expandedSectionsDefaultsKey) as? [String] {
+            return Set(storedTitles).intersection(sectionTitles)
         }
-        return Set(storedTitles).intersection(sectionTitles)
+        if let legacyTitles = UserDefaults.standard.array(forKey: legacyExpandedSectionsDefaultsKey) as? [String] {
+            // Expose the new category without reopening previously collapsed sections.
+            return Set(legacyTitles).intersection(sectionTitles).union(["Acroform"])
+        }
+        return sectionTitles
     }
 
     private func saveExpandedSections(_ sections: Set<String>) {

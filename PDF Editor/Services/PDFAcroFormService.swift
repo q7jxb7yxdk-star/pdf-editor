@@ -69,8 +69,15 @@ nonisolated final class PDFAcroFormService {
         let actual = Dictionary(uniqueKeysWithValues: snapshots(in: reopened).map {
             ($0.reference, $0)
         })
+        guard actual.count == expected.count else {
+            throw PDFAcroFormError.roundTripVerificationFailed(fieldName: "Field count")
+        }
         for field in expected where field.kind != .pushButton {
             guard let reopenedField = actual[field.reference],
+                  abs(reopenedField.bounds.minX - field.bounds.minX) < 0.05,
+                  abs(reopenedField.bounds.minY - field.bounds.minY) < 0.05,
+                  abs(reopenedField.bounds.width - field.bounds.width) < 0.05,
+                  abs(reopenedField.bounds.height - field.bounds.height) < 0.05,
                   persistentState(of: reopenedField) == persistentState(of: field) else {
                 throw PDFAcroFormError.roundTripVerificationFailed(
                     fieldName: field.fieldName ?? "Unnamed field"

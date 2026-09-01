@@ -79,6 +79,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private var interactionPreparationID = 0
     private var commentColorSyncGeneration = 0
     private var pendingCommentColorSyncs: [PDFAnnotationReference: Int] = [:]
+    // Only this retained presentation may have newer Widgets than its original
+    // catalog. Identify it weakly so replacing the document ends this mode.
+    private weak var formPresentationDocument: PDFDocument?
     private var sourceData: Data
     private var persistedData: Data
     private var authorizedPassword: String?
@@ -252,9 +255,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             return data
         }
 
-        guard let data = pdfDocument.dataRepresentation() else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        let data = try presentationDataForPersistence()
         if let pendingPasswordProtection {
             return try PDFPasswordProtectionService.protect(
                 data: data,
@@ -275,6 +276,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
 
         let startingRevision = editorState.revision
+        let expectedDesignedFields = PDFFormDesignService().fields(in: pdfDocument)
         let sourceSnapshot = sourceData
         let password = authorizedPassword
         let protectionPassword = pendingPasswordProtection
@@ -309,6 +311,18 @@ final class PDFEditorDocument: ReferenceFileDocument {
 
         guard editorState.revision == startingRevision else {
             throw PDFEditingError.pageMutationFailed
+        }
+        if !expectedDesignedFields.isEmpty {
+            guard let savedDocument = PDFDocument(data: preparation.data) else {
+                throw PDFFormDesignError.verificationFailed
+            }
+            if savedDocument.isLocked {
+                guard let password = preparation.openingPassword,
+                      savedDocument.unlock(withPassword: password) else {
+                    throw PDFFormDesignError.verificationFailed
+                }
+            }
+            try PDFFormDesignService().verify(expectedDesignedFields, in: savedDocument)
         }
         return preparation
     }
@@ -775,15 +789,376 @@ final class PDFEditorDocument: ReferenceFileDocument {
             refreshesPDFKitDocument: false
         ) {
             try mutation()
-            guard let presentationData = pdfDocument.dataRepresentation() else {
-                throw PDFEditingError.exportFailed
-            }
+            let presentationData = try presentationDataForPersistence()
             let data = try normalizePresentationSecurity(presentationData)
             editingSession = try makeVerifiedAnnotationSession(
                 data: data,
                 expected: allAnnotationSnapshots()
             )
         }
+    }
+
+    func makeFormDesignSession(
+        initialPageIndex: Int,
+        undoManager: UndoManager?
+    ) throws -> PDFFormDesignSession {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        guard !isLocked, pdfDocument.allowsCommenting, pdfDocument.allowsDocumentChanges else {
+            throw PDFFormDesignError.permissionDenied
+        }
+        if requiresDigitalSignatureConsent {
+            throw PDFEditingError.digitalSignatureConsentRequired
+        }
+        try synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
+        guard let source = PDFDocument(data: sourceData),
+              let preview = PDFDocument(data: sourceData) else {
+            throw PDFFormDesignError.verificationFailed
+        }
+        try unlockForBookmarkEditing(source)
+        try unlockForBookmarkEditing(preview)
+        let service = PDFFormDesignService()
+        let fields = service.fields(in: source)
+        service.removeDesignedFields(from: preview)
+        return PDFFormDesignSession(
+            sourceData: sourceData, sourceDocument: source, previewDocument: preview,
+            fields: fields, initialPageIndex: min(max(initialPageIndex, 0), max(pageCount - 1, 0))
+        )
+    }
+
+    /// Sidebar placement uses the same verified transaction as designer Apply,
+    /// but adds only one field and registers one document Undo operation.
+    @discardableResult
+    func addPlacedFormField(
+        kind: PDFFormDesignKind, pageIndex: Int, bounds: CGRect,
+        radioGroupName: String?, undoManager: UndoManager?
+    ) throws -> PDFFormDesignField {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let session = try makeFormDesignSession(initialPageIndex: pageIndex, undoManager: undoManager)
+        let field = try PDFFormDesignService().fieldForPlacement(
+            kind: kind, pageIndex: pageIndex, bounds: bounds,
+            radioGroupName: radioGroupName, in: session.sourceDocument
+        )
+        try applyFormDesign(session.fields + [field], session: session, undoManager: undoManager)
+        undoManager?.setActionName("Add \(kind.title)")
+        return field
+    }
+
+    /// Resize one app-authored Widget through the same verified byte transaction
+    /// used by placement. Foreign fields cannot enter this path.
+    @discardableResult
+    func resizeAuthoredFormField(
+        id: UUID, bounds: CGRect, undoManager: UndoManager?
+    ) throws -> PDFFormDesignField {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        guard let current = PDFFormDesignService().fields(in: pdfDocument).first(where: { $0.id == id }) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let session = try makeFormDesignSession(
+            initialPageIndex: current.pageIndex, undoManager: undoManager
+        )
+        guard let index = session.fields.firstIndex(where: { $0.id == id }),
+              let page = session.sourceDocument.page(at: session.fields[index].pageIndex) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        var fields = session.fields
+        fields[index].bounds = PDFFormPageGeometry(
+            cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+        ).clamped(bounds.standardized)
+        let presentationUpdate = try PDFFormDesignService().prepareBoundsUpdate(
+            for: fields[index], in: pdfDocument
+        )
+        try applyFormDesign(
+            fields, session: session, undoManager: undoManager,
+            preparedPresentationUpdate: presentationUpdate
+        )
+        undoManager?.setActionName("Resize \(fields[index].kind.title)")
+        return fields[index]
+    }
+
+    @discardableResult
+    func setAuthoredTextFieldFontSize(
+        id: UUID, fontSize: CGFloat, undoManager: UndoManager?
+    ) throws -> PDFFormDesignField {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let service = PDFFormDesignService()
+        guard let current = service.fields(in: pdfDocument).first(where: { $0.id == id }),
+              current.kind == .text else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let session = try makeFormDesignSession(
+            initialPageIndex: current.pageIndex, undoManager: undoManager
+        )
+        guard let index = session.fields.firstIndex(where: { $0.id == id }) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        var fields = session.fields
+        let height = max(12, current.bounds.height + fontSize - current.fontSize)
+        guard let page = session.sourceDocument.page(at: fields[index].pageIndex) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let fittedBounds = PDFFormPageGeometry(
+            cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+        ).clamped(CGRect(
+            x: current.bounds.minX,
+            y: current.bounds.midY - height / 2,
+            width: current.bounds.width,
+            height: height
+        ))
+        fields[index].fontSize = fontSize
+        fields[index].bounds = fittedBounds
+        // The verified session remains canonical for persistence, but PDFKit
+        // can normalize live Widget properties differently after interaction.
+        // Prepare the in-place presentation change from the latest live field
+        // so unrelated normalization cannot be mistaken for document drift.
+        var liveField = current
+        liveField.fontSize = fontSize
+        liveField.bounds = fittedBounds
+        let presentationUpdate = try service.prepareFontSizeUpdate(
+            for: liveField, in: pdfDocument
+        )
+        try applyFormDesign(
+            fields, session: session, undoManager: undoManager,
+            preparedPresentationUpdate: presentationUpdate
+        )
+        undoManager?.setActionName("Change Textbox Font Size")
+        return fields[index]
+    }
+
+    func deleteAuthoredFormField(
+        id: UUID, undoManager: UndoManager?
+    ) throws {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let service = PDFFormDesignService()
+        guard let current = service.fields(in: pdfDocument).first(where: { $0.id == id }) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let session = try makeFormDesignSession(
+            initialPageIndex: current.pageIndex, undoManager: undoManager
+        )
+        guard let deletedField = session.fields.first(where: { $0.id == id }) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let fields = session.fields.filter { $0.id != id }
+        let previousData = session.sourceData
+        try applyFormDesign(
+            fields, session: session, undoManager: undoManager,
+            registersUndo: false,
+            displayTransition: PDFFormDisplayTransition(
+                pageIndex: current.pageIndex,
+                beforeBounds: current.bounds,
+                afterBounds: nil,
+                replacesDocument: true
+            )
+        )
+        if let undoManager {
+            let deletedData = sourceData
+            let actionName = "Delete \(deletedField.kind.title)"
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restoreDeletedFormFieldMutation(
+                    data: previousData,
+                    alternateData: deletedData,
+                    fieldID: deletedField.id,
+                    restoresField: true,
+                    actionName: actionName,
+                    undoManager: undoManager
+                )
+            }
+            undoManager.setActionName(actionName)
+        }
+    }
+
+    /// Build and verify an isolated candidate before changing any live state.
+    /// Unlike value synchronization, this supports removing the final Widget.
+    func applyFormDesign(
+        _ fields: [PDFFormDesignField],
+        session: PDFFormDesignSession,
+        undoManager: UndoManager?,
+        preparedPresentationUpdate: PDFFormDesignService.PresentationUpdate? = nil,
+        registersUndo: Bool = true,
+        displayTransition: PDFFormDisplayTransition? = nil
+    ) throws {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        guard sourceData == session.sourceData else { throw PDFFormDesignError.documentChanged }
+        guard !isLocked, pdfDocument.allowsCommenting, pdfDocument.allowsDocumentChanges else {
+            throw PDFFormDesignError.permissionDenied
+        }
+        if requiresDigitalSignatureConsent { throw PDFEditingError.digitalSignatureConsentRequired }
+        guard fields != session.fields else { return }
+        guard let working = PDFDocument(data: session.sourceData) else {
+            throw PDFFormDesignError.verificationFailed
+        }
+        try unlockForBookmarkEditing(working)
+        let service = PDFFormDesignService()
+        try service.replaceFields(fields, in: working)
+        let formService = PDFAcroFormService()
+        let expectedFields = formService.snapshots(in: working)
+        guard let serialized = working.dataRepresentation() else {
+            throw PDFFormDesignError.verificationFailed
+        }
+        let registered = try service.registeredData(
+            serialized, fields: fields, password: presentationPassword ?? authorizedPassword
+        )
+        let candidate = try normalizePresentationSecurity(registered)
+        guard let reopened = PDFDocument(data: candidate) else {
+            throw PDFFormDesignError.verificationFailed
+        }
+        try unlockForBookmarkEditing(reopened)
+        try service.verify(fields, in: reopened)
+        if fields.isEmpty { try service.verifyFieldTree(fields, in: reopened) }
+        try formService.verify(expectedFields, in: candidate, password: authorizedPassword)
+        guard reopened.isEncrypted == session.sourceDocument.isEncrypted,
+              bookmarkService.snapshots(in: reopened) == bookmarkService.snapshots(in: working),
+              bookmarkRoundTripPreservesPages(
+                from: session.sourceData, workingDocument: working,
+                to: candidate, verifiedDocument: reopened,
+                checksPageResources: !working.isEncrypted
+              ) else { throw PDFFormDesignError.verificationFailed }
+        let annotations = PDFAnnotationService()
+        for index in 0..<working.pageCount {
+            guard let page = working.page(at: index) else { continue }
+            for annotation in annotations.snapshots(on: page, pageIndex: index) {
+                try annotations.verify(annotation, in: reopened)
+            }
+        }
+        let verifiedSession = acroFormSessionIfRoundTripSafe(
+            data: candidate, expectedFields: expectedFields, sourceDocument: reopened
+        )
+        // Ordinary edits retain live Widget identities. Deletion installs the
+        // complete verified document so PDFKit receives the matching catalog,
+        // AcroForm field tree, pages and Widget controls as one unit.
+        let replacesPresentationDocument = displayTransition?.replacesDocument == true
+        let presentationUpdate: PDFFormDesignService.PresentationUpdate?
+        if replacesPresentationDocument {
+            presentationUpdate = nil
+        } else if let preparedPresentationUpdate {
+            presentationUpdate = preparedPresentationUpdate
+        } else {
+            presentationUpdate = try service.preparePresentationUpdate(fields, in: pdfDocument)
+        }
+        let previousData = sourceData
+        invalidateInteractionPreparation()
+        editingSession = verifiedSession
+        sourceData = candidate
+        postFormDisplayTransition(
+            PDFFormDisplayTransitionEvent.willChange,
+            transition: displayTransition
+        )
+        if replacesPresentationDocument {
+            pdfDocument = reopened
+            formPresentationDocument = nil
+        } else {
+            formPresentationDocument = pdfDocument
+            presentationUpdate?.apply()
+            postFormDisplayTransition(
+                PDFFormDisplayTransitionEvent.didChange,
+                transition: displayTransition
+            )
+        }
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
+        if registersUndo, let undoManager {
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restorePDFKitCompatibleMutation(
+                    data: previousData, actionName: "Acroform", undoManager: undoManager
+                )
+            }
+            undoManager.setActionName("Acroform")
+        }
+    }
+
+    /// Field deletion has a narrower Undo/Redo path than other byte snapshots:
+    /// install the already verified canonical document without rebuilding it.
+    /// PDFView shields this identity change until its replacement view is ready.
+    private func restoreDeletedFormFieldMutation(
+        data: Data,
+        alternateData: Data,
+        fieldID: UUID,
+        restoresField: Bool,
+        actionName: String,
+        undoManager: UndoManager
+    ) {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        guard sourceData == alternateData,
+              let restoredDocument = PDFDocument(data: data),
+              (try? unlockForBookmarkEditing(restoredDocument)) != nil else {
+            return
+        }
+        let service = PDFFormDesignService()
+        let restoredFields = service.fields(in: restoredDocument)
+        guard (try? service.verify(restoredFields, in: restoredDocument)) != nil,
+              (try? service.verifyFieldTree(restoredFields, in: restoredDocument)) != nil else {
+            return
+        }
+        let displayTransition: PDFFormDisplayTransition
+        if restoresField {
+            guard let field = restoredFields.first(where: { $0.id == fieldID }),
+                  !service.fields(in: pdfDocument).contains(where: { $0.id == fieldID }) else {
+                return
+            }
+            displayTransition = PDFFormDisplayTransition(
+                pageIndex: field.pageIndex,
+                beforeBounds: nil,
+                afterBounds: field.bounds,
+                replacesDocument: true
+            )
+        } else {
+            guard let field = service.fields(in: pdfDocument).first(where: { $0.id == fieldID }),
+                  !restoredFields.contains(where: { $0.id == fieldID }) else {
+                return
+            }
+            displayTransition = PDFFormDisplayTransition(
+                pageIndex: field.pageIndex,
+                beforeBounds: field.bounds,
+                afterBounds: nil,
+                replacesDocument: true
+            )
+        }
+        let restoredSession = acroFormSessionIfRoundTripSafe(
+            data: data,
+            expectedFields: PDFAcroFormService().snapshots(in: restoredDocument),
+            sourceDocument: restoredDocument
+        )
+        invalidateInteractionPreparation()
+        editingSession = restoredSession
+        sourceData = data
+        postFormDisplayTransition(
+            PDFFormDisplayTransitionEvent.willChange,
+            transition: displayTransition
+        )
+        pdfDocument = restoredDocument
+        formPresentationDocument = nil
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
+        undoManager.registerUndo(withTarget: self) { document in
+            document.restoreDeletedFormFieldMutation(
+                data: alternateData,
+                alternateData: data,
+                fieldID: fieldID,
+                restoresField: !restoresField,
+                actionName: actionName,
+                undoManager: undoManager
+            )
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    private func postFormDisplayTransition(
+        _ name: Notification.Name,
+        transition: PDFFormDisplayTransition?
+    ) {
+        guard let transition else { return }
+        NotificationCenter.default.post(
+            name: name,
+            object: pdfDocument,
+            userInfo: [
+                PDFFormDisplayTransitionEvent.transitionUserInfoKey: transition
+            ]
+        )
     }
 
     func synchronizeAcroFormChangesIfNeeded(undoManager: UndoManager?) throws {
@@ -821,10 +1196,18 @@ final class PDFEditorDocument: ReferenceFileDocument {
         if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
             throw PDFEditingError.digitalSignatureConsentRequired
         }
-        guard let presentationData = pdfDocument.dataRepresentation() else {
-            throw PDFAcroFormError.serializationFailed
+        let presentationData = try presentationDataForPersistence()
+        let designService = PDFFormDesignService()
+        let designedFields = designService.fields(in: pdfDocument)
+        let registeredData: Data
+        if designedFields.isEmpty {
+            registeredData = presentationData
+        } else {
+            registeredData = try designService.registeredData(
+                presentationData, fields: designedFields, password: presentationPassword ?? authorizedPassword
+            )
         }
-        let normalizedData = try normalizePresentationSecurity(presentationData)
+        let normalizedData = try normalizePresentationSecurity(registeredData)
         try service.verify(
             currentFields,
             in: normalizedData,
@@ -839,6 +1222,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 throw PDFEditingError.invalidPassword
             }
         }
+        try designService.verify(designedFields, in: verifiedDocument)
         let expectedEncryption = previousDocument.isEncrypted
         guard verifiedDocument.pageCount == previousDocument.pageCount,
               verifiedDocument.isEncrypted == expectedEncryption,
@@ -903,6 +1287,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
             expectedFields,
             in: exportedData,
             password: authorizedPassword
+        )) != nil,
+        (try? PDFFormDesignService().verify(
+            PDFFormDesignService().fields(in: sourceDocument), in: exportedDocument
         )) != nil,
         bookmarkRoundTripPreservesPages(
             from: data,
@@ -987,10 +1374,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 with: effectiveUpdate,
                 in: pdfDocument
             )
-            guard let presentationData = pdfDocument.dataRepresentation(),
-                  PDFDocument(data: presentationData) != nil else {
-                throw PDFEditingError.exportFailed
-            }
+            let presentationData = try presentationDataForPersistence()
             let data = try normalizePresentationSecurity(presentationData)
             editingSession = try makeVerifiedAnnotationSession(
                 data: data,
@@ -1701,9 +2085,10 @@ final class PDFEditorDocument: ReferenceFileDocument {
               (try? unlockForBookmarkEditing(restoredDocument)) != nil else {
             return
         }
-        let restoredSession = try? PDFiumEditingEngine().makeSession(
+        let restoredSession = acroFormSessionIfRoundTripSafe(
             data: data,
-            password: authorizedPassword
+            expectedFields: PDFAcroFormService().snapshots(in: restoredDocument),
+            sourceDocument: restoredDocument
         )
         if bookmarksOnly {
             guard (try? bookmarkService.synchronizeOutline(
@@ -1821,10 +2206,22 @@ final class PDFEditorDocument: ReferenceFileDocument {
         if let editingSession {
             return try editingSession.dataRepresentation(options: PDFExportOptions())
         }
+        return try presentationDataForPersistence()
+    }
+
+    private func presentationDataForPersistence() throws -> Data {
         guard let data = pdfDocument.dataRepresentation() else {
             throw PDFEditingError.exportFailed
         }
-        return data
+        guard formPresentationDocument === pdfDocument else { return data }
+        // The live pages intentionally retain their identity and original
+        // catalog. Every persistence path must register their current Widgets,
+        // including deletion of the last field, before exporting these bytes.
+        let service = PDFFormDesignService()
+        return try service.registeredData(
+            data, fields: service.fields(in: pdfDocument),
+            password: presentationPassword ?? authorizedPassword
+        )
     }
 
     @discardableResult
