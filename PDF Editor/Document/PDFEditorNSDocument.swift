@@ -141,8 +141,6 @@ final class PDFEditorNSDocument: NSDocument {
 @MainActor
 final class PDFEditorDocumentController: NSDocumentController {
     private(set) var didReceiveExplicitOpenRequest = false
-    private(set) var didDiscardRestorationRequest = false
-    var restorationRequestDidDiscard: (() -> Void)?
 
     override func openDocument(
         withContentsOf url: URL,
@@ -163,41 +161,24 @@ final class PDFEditorDocumentController: NSDocumentController {
         display displayDocument: Bool,
         completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void
     ) {
-        didDiscardRestorationRequest = true
         completionHandler(nil, false, nil)
-        restorationRequestDidDiscard?()
     }
 }
 
 @MainActor
 final class PDFEditorApplicationDelegate: NSObject, NSApplicationDelegate {
     private var documentController: PDFEditorDocumentController?
-    private var hasFinishedLaunching = false
     private var didScheduleInitialOpenPanel = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        let documentController = PDFEditorDocumentController()
-        documentController.restorationRequestDidDiscard = { [weak self] in
-            self?.handleDiscardedRestorationRequest()
-        }
-        self.documentController = documentController
+        documentController = PDFEditorDocumentController()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
-        hasFinishedLaunching = true
-        let isDefaultLaunch = (
-            notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey]
-                as? NSNumber
-        )?.boolValue ?? true
-        if isDefaultLaunch ||
-            documentController?.didDiscardRestorationRequest == true {
-            scheduleInitialOpenPanelIfNeeded()
-        }
     }
 
-    private func handleDiscardedRestorationRequest() {
-        guard hasFinishedLaunching else { return }
+    func applicationDidBecomeActive(_ notification: Notification) {
         scheduleInitialOpenPanelIfNeeded()
     }
 
