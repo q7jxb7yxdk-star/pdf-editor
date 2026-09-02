@@ -1293,6 +1293,7 @@ extension PDFKitView {
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
         private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
+        private var keyDownEventMonitor: Any?
         private var scrollWheelEventMonitor: Any?
         private var modifierFlagsEventMonitor: Any?
         private var commentPopover: NSPopover?
@@ -1578,6 +1579,18 @@ extension PDFKitView {
             })
 #endif
 #if os(macOS)
+            if let keyDownEventMonitor {
+                NSEvent.removeMonitor(keyDownEventMonitor)
+            }
+            keyDownEventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .keyDown
+            ) { [weak self, weak pdfView] event in
+                guard let self, let pdfView,
+                      event.window === pdfView.window else { return event }
+                return self.handleFormFieldDeleteKey(event, in: pdfView)
+                    ? nil : event
+            }
+
             if let scrollWheelEventMonitor {
                 NSEvent.removeMonitor(scrollWheelEventMonitor)
             }
@@ -1634,6 +1647,10 @@ extension PDFKitView {
             observers.forEach(NotificationCenter.default.removeObserver)
             observers.removeAll()
 #if os(macOS)
+            if let keyDownEventMonitor {
+                NSEvent.removeMonitor(keyDownEventMonitor)
+                self.keyDownEventMonitor = nil
+            }
             if let scrollWheelEventMonitor {
                 NSEvent.removeMonitor(scrollWheelEventMonitor)
                 self.scrollWheelEventMonitor = nil
@@ -2115,18 +2132,7 @@ extension PDFKitView {
                     self.scheduleOverlayRefresh()
                 },
                 onDelete: { [weak self] in
-                    guard let self else { return }
-                    self.finishNativeFormEditingBeforeDeletion(in: pdfView)
-                    self.hideFormSelectionForMutation()
-                    self.onDeleteFormField(field)
-                    guard self.selectedFormField.wrappedValue?.id != field.id else {
-                        self.annotationActionContainer?.isHidden = false
-                        self.scheduleOverlayRefresh()
-                        return
-                    }
-                    self.setOverlayHidden(true)
-                    self.clearInteraction()
-                    self.updateGestureAvailability()
+                    self?.deleteAuthoredFormField(field, in: pdfView)
                 }
             )
             presentActionBar(
@@ -2134,6 +2140,40 @@ extension PDFKitView {
                 above: fieldBounds, in: pdfView
             )
         }
+
+        private func deleteAuthoredFormField(
+            _ field: PDFFormDesignField,
+            in pdfView: PDFView
+        ) {
+            finishNativeFormEditingBeforeDeletion(in: pdfView)
+            hideFormSelectionForMutation()
+            onDeleteFormField(field)
+            guard selectedFormField.wrappedValue?.id != field.id else {
+                annotationActionContainer?.isHidden = false
+                scheduleOverlayRefresh()
+                return
+            }
+            setOverlayHidden(true)
+            clearInteraction()
+            updateGestureAvailability()
+        }
+
+#if os(macOS)
+        private func handleFormFieldDeleteKey(
+            _ event: NSEvent,
+            in pdfView: PDFView
+        ) -> Bool {
+            let isDeleteKey = event.keyCode == 51 || event.keyCode == 117
+            let hasEditingModifier = !event.modifierFlags
+                .intersection([.command, .control, .option])
+                .isEmpty
+            guard isDeleteKey,
+                  !hasEditingModifier,
+                  let field = selectedFormField.wrappedValue else { return false }
+            deleteAuthoredFormField(field, in: pdfView)
+            return true
+        }
+#endif
 
         private func finishNativeFormEditingBeforeDeletion(in pdfView: PDFView) {
 #if os(macOS)
