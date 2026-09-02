@@ -2036,7 +2036,7 @@ struct ContentView: View {
 #if os(macOS)
         NSApp.keyWindow?.toggleFullScreen(nil)
 #else
-        showUnavailable("Full screen")
+        errorMessage = "Full screen is unavailable on this platform."
 #endif
     }
 

@@ -588,7 +588,8 @@ nonisolated final class PDFAnnotationService {
                 height: CGFloat.greatestFiniteMagnitude
             ),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes
+            attributes: attributes,
+            context: nil
         ).height
 #if os(macOS)
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
@@ -624,7 +625,8 @@ nonisolated final class PDFAnnotationService {
                 height: CGFloat.greatestFiniteMagnitude
             ),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes
+            attributes: attributes,
+            context: nil
         ).height
 #if os(macOS)
         let lineHeight = ceil(font.ascender - font.descender + font.leading)

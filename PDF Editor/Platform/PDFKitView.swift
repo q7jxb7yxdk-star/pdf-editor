@@ -1022,6 +1022,12 @@ private extension PDFKitView {
         pdfView.displayMode = displayMode
         pdfView.displayDirection = .vertical
         pdfView.displaysAsBook = false
+#if os(iOS)
+        pdfView.setNeedsLayout()
+        pdfView.layoutIfNeeded()
+        pdfView.autoScales = false
+        pdfView.autoScales = true
+#endif
     }
 
     func applyViewerCommand(to pdfView: PDFView, coordinator: Coordinator) {
@@ -4738,7 +4744,7 @@ extension PDFKitView {
                 ),
                 UIBarButtonItem(
                     title: "Done",
-                    style: .done,
+                    style: .prominent,
                     target: self,
                     action: #selector(finishInlineEditingFromToolbar)
                 ),
@@ -4790,8 +4796,8 @@ extension PDFKitView {
         }
 
         private func updateInlineStyleButtonStates() {
-            inlineBoldButton?.style = inlineEditingPDFStyle.contains(.bold) ? .done : .plain
-            inlineItalicButton?.style = inlineEditingPDFStyle.contains(.italic) ? .done : .plain
+            inlineBoldButton?.style = inlineEditingPDFStyle.contains(.bold) ? .prominent : .plain
+            inlineItalicButton?.style = inlineEditingPDFStyle.contains(.italic) ? .prominent : .plain
         }
 
         private func updateInlineTextStylePreview() {

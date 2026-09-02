@@ -838,11 +838,13 @@ struct PDFRightPanel: View {
                 iconButton("Fit to width", systemImage: "arrow.left.and.right") {
                     onViewerCommand(.fitWidth)
                 }
+#if os(macOS)
                 iconButton(
                     "Full screen",
                     systemImage: "arrow.up.left.and.arrow.down.right",
                     action: onFullScreen
                 )
+#endif
                 iconButton("Zoom in", systemImage: "plus.magnifyingglass") {
                     onViewerCommand(.zoomIn)
                 }
