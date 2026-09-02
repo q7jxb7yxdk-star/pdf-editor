@@ -356,6 +356,8 @@ struct ContentView: View {
     @State private var pendingManualSave: PendingManualSave?
     @State private var manualSaveDefaultFilename = "Untitled"
     @State private var saveURL: URL?
+    @State private var didAdoptImportedDestination = false
+    @State private var isAdoptingImportedDocument = false
     @State private var isSaving = false
     @State private var pageAnnotations: [PDFAnnotationSnapshot] = []
     @State private var selectedAnnotation: PDFAnnotationSnapshot?
@@ -430,7 +432,7 @@ struct ContentView: View {
     }
 
     private var canSave: Bool {
-        !isSaving && (
+        !isSaving && !isAdoptingImportedDocument && (
             editorState.hasUnsavedChanges || !pendingTextEditStore.edits.isEmpty || saveURL == nil
         )
     }
@@ -439,6 +441,11 @@ struct ContentView: View {
         fileTransferView
             .focusedValue(\.manualPDFSaveAction, saveDocument)
             .focusedValue(\.manualPDFSaveAsAction, saveDocumentAs)
+#if os(iOS)
+            .task(id: documentFileURL) {
+                await adoptImportedDocumentIfNeeded()
+            }
+#endif
             .task {
                 // A newly opened macOS document can be moved into a tab while
                 // this task is awaiting PDFium preparation. Load the outline
@@ -1492,7 +1499,11 @@ struct ContentView: View {
 #else
                     try ManualPDFSaveCoordinator.write(data, to: saveURL)
 #endif
-                    try await finishSuccessfulManualSave(pendingSave, at: saveURL)
+                    try await finishSuccessfulManualSave(
+                        pendingSave,
+                        at: saveURL,
+                        didAdoptDestination: didAdoptImportedDestination
+                    )
                     isSaving = false
                 } else {
                     let defaultFilename = suggestedSaveFilename
@@ -1520,6 +1531,37 @@ struct ContentView: View {
             }
         }
     }
+
+#if os(iOS)
+    private func adoptImportedDocumentIfNeeded() async {
+        guard let documentFileURL else { return }
+        isAdoptingImportedDocument = true
+        defer { isAdoptingImportedDocument = false }
+        do {
+            // A shared document's initial URL can precede DocumentGroup's
+            // completed import URL. Debounce so a URL change cancels this
+            // task before choosing a destination from transient file state.
+            try await Task.sleep(for: .milliseconds(300))
+            try Task.checkCancellation()
+            let data = try document.snapshot(contentType: .pdf)
+            let destinationURL = try await Task.detached(priority: .userInitiated) {
+                try ManualPDFSaveCoordinator.adoptImportedDocumentIfNeeded(
+                    from: documentFileURL,
+                    data: data
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            if let destinationURL {
+                saveURL = destinationURL
+                didAdoptImportedDestination = true
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            present(error)
+        }
+    }
+#endif
 
 #if os(macOS)
     private func configureNativeDocumentSaving() {

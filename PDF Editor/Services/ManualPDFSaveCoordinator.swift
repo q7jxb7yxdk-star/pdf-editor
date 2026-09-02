@@ -25,7 +25,122 @@ nonisolated enum ManualPDFSaveDestinationPolicy {
 }
 
 enum ManualPDFSaveCoordinator {
-    static func write(_ data: Data, to url: URL) throws {
+#if os(iOS)
+    nonisolated static func adoptImportedDocumentIfNeeded(
+        from sourceURL: URL,
+        data: Data
+    ) throws -> URL? {
+        let fileManager = FileManager.default
+        let documentsURL = try fileManager.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ).standardizedFileURL
+        let inboxURL = documentsURL
+            .appendingPathComponent("Inbox", isDirectory: true)
+            .standardizedFileURL
+        let standardizedSourceURL = sourceURL.standardizedFileURL
+        let sourceParentURL = standardizedSourceURL.deletingLastPathComponent()
+        let isInboxDocument = sourceParentURL == inboxURL
+        let isInsideDocuments = standardizedSourceURL.pathComponents.starts(
+            with: documentsURL.pathComponents
+        )
+
+        guard isInboxDocument || !isInsideDocuments else {
+            return nil
+        }
+
+        let inboxCandidateURL = inboxURL.appendingPathComponent(
+            standardizedSourceURL.lastPathComponent
+        )
+        let matchingInboxURL = !isInboxDocument &&
+            contents(at: inboxCandidateURL, match: data)
+            ? inboxCandidateURL
+            : nil
+        let importSourceURL = matchingInboxURL ?? standardizedSourceURL
+        let relocatesInboxDocument = isInboxDocument || matchingInboxURL != nil
+        let destinationURL = availableImportDestination(
+            for: importSourceURL,
+            in: documentsURL,
+            fileManager: fileManager
+        )
+        if relocatesInboxDocument {
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var coordinationError: NSError?
+            var relocationError: Error?
+
+            coordinator.coordinate(
+                writingItemAt: importSourceURL,
+                options: .forMoving,
+                error: &coordinationError
+            ) { coordinatedSourceURL in
+                coordinator.item(at: coordinatedSourceURL, willMoveTo: destinationURL)
+                do {
+                    try fileManager.moveItem(
+                        at: coordinatedSourceURL,
+                        to: destinationURL
+                    )
+                    coordinator.item(
+                        at: coordinatedSourceURL,
+                        didMoveTo: destinationURL
+                    )
+                } catch {
+                    relocationError = error
+                }
+            }
+
+            if let relocationError {
+                throw relocationError
+            }
+            if let coordinationError {
+                throw coordinationError
+            }
+        } else {
+            try write(data, to: destinationURL)
+        }
+
+        return destinationURL
+    }
+
+    nonisolated private static func contents(
+        at candidateURL: URL,
+        match data: Data
+    ) -> Bool {
+        guard let candidateData = try? Data(
+            contentsOf: candidateURL,
+            options: .mappedIfSafe
+        ) else {
+            return false
+        }
+        return candidateData == data
+    }
+
+    nonisolated private static func availableImportDestination(
+        for sourceURL: URL,
+        in documentsURL: URL,
+        fileManager: FileManager
+    ) -> URL {
+        let basename = sourceURL.deletingPathExtension().lastPathComponent
+        let pathExtension = sourceURL.pathExtension
+
+        func destinationURL(suffix: String) -> URL {
+            let destination = documentsURL.appendingPathComponent(basename + suffix)
+            guard !pathExtension.isEmpty else { return destination }
+            return destination.appendingPathExtension(pathExtension)
+        }
+
+        var destination = destinationURL(suffix: "")
+        var duplicateIndex = 1
+        while fileManager.fileExists(atPath: destination.path) {
+            destination = destinationURL(suffix: "-\(duplicateIndex)")
+            duplicateIndex += 1
+        }
+        return destination
+    }
+#endif
+
+    nonisolated static func write(_ data: Data, to url: URL) throws {
         let didStartSecurityScope = url.startAccessingSecurityScopedResource()
         defer {
             if didStartSecurityScope {

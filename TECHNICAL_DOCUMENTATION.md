@@ -19,7 +19,7 @@ The app has no reviewed first-party networking, account, cloud-sync, analytics, 
 | `PDF_EditorApp` → platform document host → `PDFEditorDocument` → `ContentView` | Implemented | `DocumentGroup` on iOS/iPadOS; `PDFEditorNSDocument` on macOS. |
 | `PDFEditorDocument` → `PDFiumEditingEngine` | Implemented | Primary editing path for new and unlocked documents. |
 | PDFKit display and annotation mutation | Implemented | Page/object operations refresh the visible document from serialized editing-session bytes. Successful annotation mutations preserve the current PDFKit document identity while synchronizing and verifying the PDFium session. Byte-snapshot rollback and Undo/Redo synchronize replacement pages into the existing unlocked presentation document rather than replacing it. |
-| Explicit save | Implemented | macOS and iOS expose Save and Save As toolbar actions. On macOS, `PDFEditorNSDocument` presents the native panel, prepares and verifies the candidate, then performs the AppKit save operation. Identity changes only after success. It declares `autosavesInPlace`, `autosavesDrafts`, and `preservesVersions` false: unsaved changes still receive native close protection, but Browse All Versions and volume-version-storage warnings are disabled. iOS uses the SwiftUI file exporter. |
+| Explicit save and iOS shared-document adoption | Implemented | macOS and iOS expose Save and Save As toolbar actions. On macOS, `PDFEditorNSDocument` presents the native panel, prepares and verifies the candidate, then performs the AppKit save operation. Identity changes only after success. It declares `autosavesInPlace`, `autosavesDrafts`, and `preservesVersions` false: unsaved changes still receive native close protection, but Browse All Versions and volume-version-storage warnings are disabled. iOS uses the SwiftUI file exporter. After `DocumentGroup` opens an external PDF, iOS adopts a local copy into the visible Documents root and directs later explicit Saves there. |
 | Vision OCR | Implemented, optional | Invoked only from the OCR menu. Recognition results require user review before text-layer insertion. |
 | `PDFKitEditingEngine` as a complete backend | Experimental / inactive | Not selected as the document's normal engine. It is used internally for metadata mutation. |
 | Full page-order UI | Implemented | The toggleable Pages panel exposes selection, per-thumbnail extraction, full-list drag reordering, 90-degree rotation, and deletion except for the final page. |
@@ -104,7 +104,7 @@ There is protocol-based engine separation, but no application-level dependency-i
 | `PDF Editor/Services/SignatureLibraryStore.swift` | Main-actor local signature-template loading, validation, atomic Application Support persistence, and deletion. |
 | `PDF Editor/Platform/PageThumbnailView.swift` | PDFKit thumbnail rendering for the page sidebar. |
 | `PDF Editor/Services/CoreTextShapingService.swift` | Font coverage analysis, complex-script detection, and CoreText PDF overlay creation. |
-| `PDF Editor/Services/ManualPDFSaveCoordinator.swift` | Security-scoped, `NSFileCoordinator`-protected replacement writes; focused macOS File commands; and the shared AppKit recent-document model used by File → Open Recent and the Tools sidebar. |
+| `PDF Editor/Services/ManualPDFSaveCoordinator.swift` | Security-scoped, `NSFileCoordinator`-protected replacement writes; iOS shared-document adoption into the visible Documents root, including coordinated Inbox moves and collision-safe filenames; focused macOS File commands; and the shared AppKit recent-document model used by File → Open Recent and the Tools sidebar. |
 | `PDF Editor/Services/PDFManualSavePreparationService.swift` | Builds Save candidates on an independent background session, applies pending text rewrites and requested password protection, and verifies protected output before publication. |
 | `PDF Editor/Services/PDFAnnotationService.swift` | Annotation creation, resolution, mutation, geometry transformation, snapshotting, and verification. |
 | `PDF Editor/Services/PDFAcroFormService.swift` | Existing Widget discovery, persistent-value comparison, and PDFKit reopen verification for AcroForm fields. |
@@ -133,6 +133,8 @@ There is protocol-based engine separation, but no application-level dependency-i
 ### 4.1 Open, unlock, edit, save
 
 1. SwiftUI supplies file bytes to `PDFEditorDocument.init(configuration:)`.
+   - On iOS/iPadOS, `LSSupportsOpeningDocumentsInPlace` remains enabled so `DocumentGroup` can first establish the document scene. `ContentView` then runs a 300-millisecond, `fileURL`-identified adoption task; if `DocumentGroup` publishes a newer import URL, SwiftUI cancels the stale task before it chooses a destination.
+   - An external source is copied from the document's loaded `persistedData` into the app's visible Documents root. If the system has already materialized byte-identical content under `Documents/Inbox`, the coordinator moves that file instead. Existing files anywhere else inside the app's Documents tree are left in place. Genuine destination collisions use `-1`, `-2`, and later suffixes.
 2. PDFKit first validates that the bytes form a PDF.
 3. An unlocked document initially keeps only its source bytes and PDFKit document; its mutation session is created lazily on the first operation that requires it. A locked document retains source bytes and creates the session only after a non-empty password is accepted.
 4. `ContentView` immediately displays `PDFEditorDocument.pdfDocument` in `PDFKitView` for unlocked documents or the password-required view for locked documents. Page-object inspection runs on an independent background PDFium handle only after the document is unlocked. A cache hit for the selected page is used without rescanning; a cache miss scans that page first, then the same revision-scoped task prefetches at most the next page without blocking PDFKit presentation or scrolling. The bridge loads each inspected page once, recursively walks its object tree twice for allocation sizing and collection, and returns contiguous path offsets, path indices, and display metadata to Swift.
@@ -334,6 +336,7 @@ Allocated output buffers cross the C boundary with explicit `PEPDFFree` ownershi
 ### Persistence and storage boundaries
 
 - `ReferenceFileDocument.snapshot(contentType:)` exposes only `persistedData` on iOS/iPadOS; ordinary edits do not advance it. The macOS `NSDocument` obtains the same verified data through its native write callback.
+- An iOS/iPadOS PDF opened from outside the app's Documents tree is adopted into the visible Documents root after the document scene loads. The loaded snapshot supplies copy bytes without rereading the external URL. A byte-identical Inbox materialization is moved with `NSFileCoordinator`, preventing a hidden second copy; the adopted URL becomes the explicit Save target. The app does not provide a bulk Inbox-cleanup interface.
 - Existing PDFs are written only by explicit Save. A new document's first save uses the platform-native destination panel; later Saves target the selected URL.
 - Committed document mutations use complete serialized PDF `Data` snapshots for Undo/Redo. Pending inline replacements use value-level store actions until Save applies them. Textbox deletion installs the complete verified snapshot document for Delete, Undo and Redo rather than reconstructing the AcroForm field tree through page insertion.
 - Passwords and pending protected-merge bytes are held in memory for the active view/document.
@@ -432,7 +435,7 @@ No explicit `.entitlements` file is present. Generated entitlements in a built s
 
 ### Document registration
 
-`PDF Editor/Info.plist` registers `com.adobe.pdf` as an Editor document type, uses alternate handler rank, and permits opening in place. Build settings additionally request document-browser support and opening documents in place.
+`PDF Editor/Info.plist` is the iOS/iPadOS plist. It registers `com.adobe.pdf` as an Editor document type, uses alternate handler rank, permits opening in place, and intentionally omits AppKit's `NSDocumentClass`. `PDF Editor/Info-macOS.plist` retains the same PDF registration and opening-in-place support while adding `PDFEditorNSDocument`. Conditional `INFOPLIST_FILE` build settings select the macOS plist only for `macosx`; iOS/iPadOS continue using the shared base path. Build settings additionally request document-browser support on iOS/iPadOS.
 
 ### Local package
 
@@ -745,7 +748,8 @@ The builds establish compilation and bundle construction for those destinations.
 
 ### Externally or manually unverified
 
-- Physical iPhone/iPad execution and file-provider behavior.
+- A 2026-09-03 physical-iPhone WhatsApp share confirmed that the preceding adoption implementation opened far enough to create a byte-identical PDF in the visible app Documents root, but a `DocumentGroup` import timing race selected a `-1` filename while the original remained hidden in `Documents/Inbox`. Device inspection confirmed the two files had the same size, modification time, and SHA-256. The revised `fileURL`-identified debounce and byte-identical Inbox preference passed Swift parsing, standalone iOS type checking, plist lint, and `git diff --check`; its final open, original-name adoption, Inbox removal, and subsequent Save behavior still require a fresh physical-device test. No Xcode Build/Test was run for this revision.
+- Other physical iPhone/iPad execution and file-provider behavior.
 - Signed macOS application behavior, sandbox enforcement, Hardened Runtime, entitlements, signing, notarization, and App Store behavior.
 - Broad manual UI workflows, AcroForm body-drag versus corner-resize interaction, accessibility text sizes, semantic Undo/Redo verification beyond the user-tested app-authored Textbox path, confirmation that other Undo/Redo operations have no visible blank frame or SwiftUI publish-during-update warning, save/close/reopen, real password-restricted permission combinations, and visual inspection of generated pages. A scoped macOS comment Apply workflow was manually exercised on 2026-08-25, and the Textbox Delete/Undo/Redo display path was manually exercised on 2026-09-01.
 - Image-export options/progress/file-destination interaction, multi-file behavior with third-party file providers, and visual comparison of PNG/JPEG output against representative PDFs on macOS and iOS.
