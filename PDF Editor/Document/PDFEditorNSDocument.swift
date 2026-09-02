@@ -58,6 +58,7 @@ final class PDFEditorNSDocument: NSDocument {
         window.tabbingMode = .preferred
         window.setContentSize(NSSize(width: 1100, height: 760))
         addWindowController(NSWindowController(window: window))
+        window.isRestorable = false
     }
 
     nonisolated override func read(
@@ -138,11 +139,77 @@ final class PDFEditorNSDocument: NSDocument {
 }
 
 @MainActor
+final class PDFEditorDocumentController: NSDocumentController {
+    private(set) var didReceiveExplicitOpenRequest = false
+    private(set) var didDiscardRestorationRequest = false
+    var restorationRequestDidDiscard: (() -> Void)?
+
+    override func openDocument(
+        withContentsOf url: URL,
+        display displayDocument: Bool,
+        completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void
+    ) {
+        didReceiveExplicitOpenRequest = true
+        super.openDocument(
+            withContentsOf: url,
+            display: displayDocument,
+            completionHandler: completionHandler
+        )
+    }
+
+    override func reopenDocument(
+        for urlOrNil: URL?,
+        withContentsOf contentsURL: URL,
+        display displayDocument: Bool,
+        completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void
+    ) {
+        didDiscardRestorationRequest = true
+        completionHandler(nil, false, nil)
+        restorationRequestDidDiscard?()
+    }
+}
+
+@MainActor
 final class PDFEditorApplicationDelegate: NSObject, NSApplicationDelegate {
+    private var documentController: PDFEditorDocumentController?
+    private var hasFinishedLaunching = false
+    private var didScheduleInitialOpenPanel = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let documentController = PDFEditorDocumentController()
+        documentController.restorationRequestDidDiscard = { [weak self] in
+            self?.handleDiscardedRestorationRequest()
+        }
+        self.documentController = documentController
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
-        guard NSDocumentController.shared.documents.isEmpty else { return }
-        DispatchQueue.main.async {
+        hasFinishedLaunching = true
+        let isDefaultLaunch = (
+            notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey]
+                as? NSNumber
+        )?.boolValue ?? true
+        if isDefaultLaunch ||
+            documentController?.didDiscardRestorationRequest == true {
+            scheduleInitialOpenPanelIfNeeded()
+        }
+    }
+
+    private func handleDiscardedRestorationRequest() {
+        guard hasFinishedLaunching else { return }
+        scheduleInitialOpenPanelIfNeeded()
+    }
+
+    private func scheduleInitialOpenPanelIfNeeded() {
+        guard !didScheduleInitialOpenPanel,
+              documentController?.didReceiveExplicitOpenRequest != true,
+              NSDocumentController.shared.documents.isEmpty else { return }
+        didScheduleInitialOpenPanel = true
+        DispatchQueue.main.async { [weak self] in
+            guard self?.documentController?.didReceiveExplicitOpenRequest != true else {
+                return
+            }
             guard NSDocumentController.shared.documents.isEmpty else { return }
             NSDocumentController.shared.openDocument(nil)
         }
@@ -150,6 +217,24 @@ final class PDFEditorApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows: Bool
+    ) -> Bool {
+        let hasVisibleOpenPanel = sender.windows.contains { window in
+            window is NSOpenPanel && window.isVisible
+        }
+        guard !hasVisibleOpenPanel, !hasVisibleWindows else { return false }
+
+        let documents = NSDocumentController.shared.documents
+        if documents.isEmpty {
+            NSDocumentController.shared.openDocument(nil)
+        } else {
+            documents.forEach { $0.showWindows() }
+        }
+        return false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(
