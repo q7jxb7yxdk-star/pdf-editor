@@ -1587,7 +1587,7 @@ extension PDFKitView {
             ) { [weak self, weak pdfView] event in
                 guard let self, let pdfView,
                       event.window === pdfView.window else { return event }
-                return self.handleFormFieldDeleteKey(event, in: pdfView)
+                return self.handleFormFieldKeyDown(event, in: pdfView)
                     ? nil : event
             }
 
@@ -2159,19 +2159,33 @@ extension PDFKitView {
         }
 
 #if os(macOS)
-        private func handleFormFieldDeleteKey(
+        private func handleFormFieldKeyDown(
             _ event: NSEvent,
             in pdfView: PDFView
         ) -> Bool {
+            guard let field = selectedFormField.wrappedValue else { return false }
+            let editsTextbox = field.kind == .text &&
+                isEditingNativeTextbox(in: pdfView)
+            if event.keyCode == 53, editsTextbox {
+                return pdfView.window?.makeFirstResponder(pdfView) == true
+            }
             let isDeleteKey = event.keyCode == 51 || event.keyCode == 117
             let hasEditingModifier = !event.modifierFlags
                 .intersection([.command, .control, .option])
                 .isEmpty
             guard isDeleteKey,
                   !hasEditingModifier,
-                  let field = selectedFormField.wrappedValue else { return false }
+                  !editsTextbox else { return false }
             deleteAuthoredFormField(field, in: pdfView)
             return true
+        }
+
+        private func isEditingNativeTextbox(in pdfView: PDFView) -> Bool {
+            guard let textView = pdfView.window?.firstResponder as? NSTextView,
+                  textView.isEditable,
+                  textView.window === pdfView.window else { return false }
+            return !(textView is PDFPassiveTextView) &&
+                !(textView is PDFInlineTextView)
         }
 #endif
 
