@@ -1156,18 +1156,6 @@ struct ContentView: View {
             .accessibilityLabel("OCR")
         }
         .sharedBackgroundVisibility(.hidden)
-        ToolbarItem(placement: .navigation) {
-            Button {
-                beginFormDesign()
-            } label: {
-                Image(systemName: "rectangle.and.pencil.and.ellipsis")
-            }
-            .buttonStyle(.plain)
-            .disabled(document.isLocked || document.pageCount == 0 || isSaving || isRunningOCR || isOpeningFormDesign)
-            .help("Acroform")
-            .accessibilityLabel("Acroform")
-        }
-        .sharedBackgroundVisibility(.hidden)
     }
 
     private func beginFormDesign(placing kind: PDFFormDesignKind? = nil) {

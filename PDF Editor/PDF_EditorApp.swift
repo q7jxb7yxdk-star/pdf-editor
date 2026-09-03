@@ -93,14 +93,64 @@ struct WindowConfigurationView: NSViewRepresentable {
 final class WindowAttachmentView: NSView {
     var onWindowAttached: ((NSWindow) -> Void)?
     private var windowDidBecomeKeyObserver: NSObjectProtocol?
+    private var tabBarObservers: [NSObjectProtocol] = []
+    private var isTabBarUpdateScheduled = false
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let window {
+            startHidingNewTabButton(in: window)
             onWindowAttached?(window)
         } else {
             removeWindowDidBecomeKeyObserver()
+            removeTabBarObservers()
         }
+    }
+
+    private func startHidingNewTabButton(in window: NSWindow) {
+        removeTabBarObservers()
+        hideNewTabButton(in: window)
+        scheduleTabBarUpdate(in: window)
+
+        let center = NotificationCenter.default
+        tabBarObservers = [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didUpdateNotification
+        ].map { name in
+            center.addObserver(forName: name, object: window, queue: .main) {
+                [weak self, weak window] _ in
+                Task { @MainActor [weak self, weak window] in
+                    guard let self, let window, self.window === window else { return }
+                    self.scheduleTabBarUpdate(in: window)
+                }
+            }
+        }
+    }
+
+    private func scheduleTabBarUpdate(in window: NSWindow) {
+        guard !isTabBarUpdateScheduled else { return }
+        isTabBarUpdateScheduled = true
+        Task { @MainActor [weak self, weak window] in
+            await Task.yield()
+            guard let self else { return }
+            self.isTabBarUpdateScheduled = false
+            guard let window, self.window === window else { return }
+            self.hideNewTabButton(in: window)
+        }
+    }
+
+    private func hideNewTabButton(in window: NSWindow) {
+        guard let titlebarRootView = window.contentView?.superview else { return }
+        hideNewTabButton(in: titlebarRootView)
+    }
+
+    private func hideNewTabButton(in view: NSView) {
+        if view.accessibilityRole() == .tabGroup {
+            for case let button as NSButton in view.subviews where !button.isHidden {
+                button.isHidden = true
+            }
+        }
+        view.subviews.forEach(hideNewTabButton(in:))
     }
 
     func whenWindowBecomesKey(
@@ -131,10 +181,18 @@ final class WindowAttachmentView: NSView {
         self.windowDidBecomeKeyObserver = nil
     }
 
+    private func removeTabBarObservers() {
+        let center = NotificationCenter.default
+        tabBarObservers.forEach(center.removeObserver)
+        tabBarObservers.removeAll()
+        isTabBarUpdateScheduled = false
+    }
+
     deinit {
         if let windowDidBecomeKeyObserver {
             NotificationCenter.default.removeObserver(windowDidBecomeKeyObserver)
         }
+        tabBarObservers.forEach(NotificationCenter.default.removeObserver)
     }
 }
 #endif
