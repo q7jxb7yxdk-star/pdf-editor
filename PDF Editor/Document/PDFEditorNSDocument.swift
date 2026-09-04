@@ -19,6 +19,16 @@ final class PDFEditorNativeDocumentReference {
     }
 }
 
+private final class PDFEditorDocumentWindow: NSWindow {
+    override func addTabbedWindow(
+        _ window: NSWindow,
+        ordered: NSWindow.OrderingMode
+    ) {
+        super.addTabbedWindow(window, ordered: ordered)
+        PDFEditorWindowTabBar.hideNewTabButton(in: self)
+    }
+}
+
 @objc(PDFEditorNSDocument)
 final class PDFEditorNSDocument: NSDocument {
     nonisolated override class var autosavesInPlace: Bool { false }
@@ -44,10 +54,10 @@ final class PDFEditorNSDocument: NSDocument {
             nativeDocumentReference: documentReference
         )
         .background {
-            WindowConfigurationView(fillsWindowOnAttach: fileURL != nil)
+            WindowConfigurationView(postsInitialConfigurationWhenReady: fileURL != nil)
         }
         let hostingController = NSHostingController(rootView: rootView)
-        let window = NSWindow(contentViewController: hostingController)
+        let window = PDFEditorDocumentWindow(contentViewController: hostingController)
         window.styleMask.formUnion([
             .titled,
             .closable,
@@ -56,9 +66,39 @@ final class PDFEditorNSDocument: NSDocument {
             .fullSizeContentView
         ])
         window.tabbingMode = .preferred
-        window.setContentSize(NSSize(width: 1100, height: 760))
+        if fileURL != nil, let screen = NSScreen.main {
+            window.setFrame(screen.visibleFrame, display: false, animate: false)
+        } else {
+            window.setContentSize(NSSize(width: 1100, height: 760))
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
         addWindowController(NSWindowController(window: window))
         window.isRestorable = false
+
+        if let existingWindow = existingDocumentWindow(excluding: window) {
+            existingWindow.addTabbedWindow(window, ordered: .above)
+            PDFEditorWindowTabBar.hideNewTabButton(in: existingWindow)
+        } else {
+            if window.tabGroup?.isTabBarVisible == false {
+                window.toggleTabBar(nil)
+            }
+            PDFEditorWindowTabBar.hideNewTabButton(in: window)
+        }
+    }
+
+    private func existingDocumentWindow(
+        excluding window: NSWindow
+    ) -> PDFEditorDocumentWindow? {
+        let candidates = NSDocumentController.shared.documents
+            .flatMap(\.windowControllers)
+            .compactMap(\.window)
+            .compactMap { $0 as? PDFEditorDocumentWindow }
+            .filter { $0 !== window }
+
+        return candidates.first { $0 === NSApp.mainWindow }
+            ?? candidates.first(where: \.isVisible)
+            ?? candidates.first
     }
 
     nonisolated override func read(

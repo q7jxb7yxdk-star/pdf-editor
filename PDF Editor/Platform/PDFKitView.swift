@@ -584,6 +584,9 @@ final class PDFKitHostView: NSView {
         super.layout()
         activePDFView.frame = bounds
         pendingPDFView?.frame = bounds
+        if window?.isVisible == false {
+            positionInitialPageAtTopIfNeeded()
+        }
     }
 
     override func viewDidMoveToWindow() {
