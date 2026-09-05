@@ -11,41 +11,47 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
         Controller()
     }
 
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {
-        uiViewController.disableDocumentRenaming()
-    }
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {}
 
     final class Controller: UIViewController {
+        private var hasDisabledDocumentRenaming = false
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
             disableDocumentRenaming()
         }
 
-        override func viewDidLayoutSubviews() {
-            super.viewDidLayoutSubviews()
-            disableDocumentRenaming()
-        }
-
         func disableDocumentRenaming() {
-            var viewControllers: [UIViewController] = []
-            if let topViewController = navigationController?.topViewController {
-                viewControllers.append(topViewController)
-            }
+            guard !hasDisabledDocumentRenaming,
+                  let viewController = navigationController?.topViewController else { return }
+            hasDisabledDocumentRenaming = true
+            let navigationItem = viewController.navigationItem
+            navigationItem.renameDelegate = nil
+            navigationItem.titleMenuProvider = nil
+            navigationItem.documentProperties = nil
+        }
+    }
+}
 
-            var ancestor = parent
-            while let viewController = ancestor {
-                if !viewControllers.contains(where: { $0 === viewController }) {
-                    viewControllers.append(viewController)
-                }
-                ancestor = viewController.parent
-            }
+@MainActor
+private final class PDFDocumentTransitionRetainer {
+    static let shared = PDFDocumentTransitionRetainer()
 
-            for viewController in viewControllers {
-                let navigationItem = viewController.navigationItem
-                navigationItem.renameDelegate = nil
-                navigationItem.titleMenuProvider = nil
-                navigationItem.documentProperties = nil
+    private var document: PDFEditorDocument?
+    private var releaseTask: Task<Void, Never>?
+
+    func retain(_ document: PDFEditorDocument) {
+        releaseTask?.cancel()
+        self.document = document
+        releaseTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(800))
+            } catch {
+                return
             }
+            guard !Task.isCancelled else { return }
+            self?.document = nil
+            self?.releaseTask = nil
         }
     }
 }
@@ -548,6 +554,9 @@ struct ContentView: View {
                 ocrBatchTask?.cancel()
                 imageExportTask?.cancel()
                 pageObjectLoadTask?.cancel()
+#if os(iOS)
+                PDFDocumentTransitionRetainer.shared.retain(document)
+#endif
 #if os(macOS)
                 formDesignFocusRecovery.cancel()
                 nativeDocumentReference?.document?.prepareSave = nil
