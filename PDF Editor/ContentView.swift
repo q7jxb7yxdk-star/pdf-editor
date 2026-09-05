@@ -33,28 +33,6 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
     }
 }
 
-@MainActor
-private final class PDFDocumentTransitionRetainer {
-    static let shared = PDFDocumentTransitionRetainer()
-
-    private var document: PDFEditorDocument?
-    private var releaseTask: Task<Void, Never>?
-
-    func retain(_ document: PDFEditorDocument) {
-        releaseTask?.cancel()
-        self.document = document
-        releaseTask = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .milliseconds(800))
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            self?.document = nil
-            self?.releaseTask = nil
-        }
-    }
-}
 #endif
 
 #if os(macOS)
@@ -554,9 +532,6 @@ struct ContentView: View {
                 ocrBatchTask?.cancel()
                 imageExportTask?.cancel()
                 pageObjectLoadTask?.cancel()
-#if os(iOS)
-                PDFDocumentTransitionRetainer.shared.retain(document)
-#endif
 #if os(macOS)
                 formDesignFocusRecovery.cancel()
                 nativeDocumentReference?.document?.prepareSave = nil
