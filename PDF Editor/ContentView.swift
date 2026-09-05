@@ -311,6 +311,7 @@ struct ContentView: View {
     @Environment(\.undoManager) private var environmentUndoManager
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 #endif
 
     @StateObject private var pendingTextEditStore = PendingTextEditStore()
@@ -405,6 +406,9 @@ struct ContentView: View {
     @State private var showsAddBookmarkPrompt = false
     @State private var bookmarkTitle = ""
     @State private var usesInlinePanels = false
+#if os(iOS)
+    @State private var showsDocumentFilename = true
+#endif
 
     private let annotationService = PDFAnnotationService()
     private let ocrService = VisionOCRService()
@@ -431,6 +435,9 @@ struct ContentView: View {
         documentFileURL = fileURL
         _editorState = ObservedObject(wrappedValue: document.editorState)
         _saveURL = State(initialValue: fileURL)
+        _showsToolPanel = State(
+            initialValue: UIDevice.current.userInterfaceIdiom != .phone
+        )
     }
 #endif
 
@@ -451,6 +458,17 @@ struct ContentView: View {
 #if os(iOS)
             .task(id: documentFileURL) {
                 await adoptImportedDocumentIfNeeded()
+            }
+            .task {
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                    showsDocumentFilename = false
+                }
             }
 #endif
             .task {
@@ -582,24 +600,36 @@ struct ContentView: View {
                 }
             }
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if horizontalSizeClass == .compact {
-                VStack(spacing: 0) {
-                    compactScrollableToolbar
-                    Divider()
-                }
+        .overlay(alignment: .top) {
+            if horizontalSizeClass == .compact, showsDocumentFilename {
+                Text(suggestedSaveFilename)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
             }
         }
-#endif
         .toolbar {
-#if os(iOS)
-            if horizontalSizeClass != .compact {
+            if horizontalSizeClass == .compact {
+                ToolbarItem(placement: .principal) {
+                    compactScrollableToolbar
+                }
+            } else {
                 adaptiveToolbar
             }
-#else
-            adaptiveToolbar
-#endif
         }
+#endif
+#if os(macOS)
+        .toolbar {
+            adaptiveToolbar
+        }
+#endif
         .onChange(of: isSaving) { _, saving in
             if saving { cancelFormFieldPlacement() }
         }
@@ -1194,7 +1224,6 @@ struct ContentView: View {
             .padding(.horizontal, 8)
         }
         .scrollIndicators(.hidden)
-        .background(.bar)
     }
 #endif
 
