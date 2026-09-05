@@ -305,6 +305,9 @@ struct ContentView: View {
     @ObservedObject private var editorState: PDFEditorDocument.EditorState
 
     @Environment(\.undoManager) private var environmentUndoManager
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
 
     @StateObject private var pendingTextEditStore = PendingTextEditStore()
     @State private var selectedPageIndex: Int? = 0
@@ -560,7 +563,25 @@ struct ContentView: View {
                 }
             }
         }
-        .toolbar { adaptiveToolbar }
+#if os(iOS)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if horizontalSizeClass == .compact {
+                VStack(spacing: 0) {
+                    compactScrollableToolbar
+                    Divider()
+                }
+            }
+        }
+#endif
+        .toolbar {
+#if os(iOS)
+            if horizontalSizeClass != .compact {
+                adaptiveToolbar
+            }
+#else
+            adaptiveToolbar
+#endif
+        }
         .onChange(of: isSaving) { _, saving in
             if saving { cancelFormFieldPlacement() }
         }
@@ -1074,6 +1095,73 @@ struct ContentView: View {
             onClose: { showsCommentList = false }
         )
     }
+
+#if os(iOS)
+    private var compactScrollableToolbar: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                Button(action: saveDocument) {
+                    Image(systemName: "square.and.arrow.down")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSave)
+                .accessibilityLabel("Save")
+
+                Button(action: saveDocumentAs) {
+                    Image(systemName: "square.and.arrow.down.on.square")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .disabled(isSaving)
+                .accessibilityLabel("Save As")
+
+                Button {
+                    undoManager?.undo()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .disabled(!(undoManager?.canUndo ?? false))
+                .accessibilityLabel("Undo")
+
+                Button {
+                    undoManager?.redo()
+                } label: {
+                    Image(systemName: "arrow.uturn.forward")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .disabled(!(undoManager?.canRedo ?? false))
+                .accessibilityLabel("Redo")
+
+                Button { toggleToolPanel() } label: {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Tools")
+
+                Menu {
+                    Button("Recognize current page", action: runOCR)
+                        .disabled(selectedPage == nil)
+                    Button("Recognize all scanned pages", action: runDocumentOCR)
+                        .disabled(document.pageCount == 0)
+                } label: {
+                    Image(systemName: "viewfinder")
+                        .frame(width: 44, height: 44)
+                }
+                .menuStyle(.borderlessButton)
+                .disabled(isRunningOCR)
+                .accessibilityLabel("OCR")
+            }
+            .padding(.horizontal, 8)
+        }
+        .scrollIndicators(.hidden)
+        .background(.bar)
+    }
+#endif
 
     @ToolbarContentBuilder
     private var adaptiveToolbar: some ToolbarContent {
