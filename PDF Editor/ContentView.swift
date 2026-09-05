@@ -2463,6 +2463,14 @@ struct ContentView: View {
 
     private func beginFileImport(_ purpose: FileImportPurpose) {
         fileImportPurpose = purpose
+        if !usesInlinePanels && showsToolPanel {
+            showsToolPanel = false
+            Task { @MainActor in
+                await Task.yield()
+                showsFileImporter = true
+            }
+            return
+        }
         showsFileImporter = true
     }
 
