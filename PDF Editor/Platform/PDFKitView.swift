@@ -828,6 +828,7 @@ struct PDFKitView: UIViewRepresentable {
     func updateUIView(_ pdfView: PDFView, context: Context) {
         updateCoordinator(context.coordinator)
         update(pdfView, coordinator: context.coordinator)
+        context.coordinator.updateGestureAvailability()
     }
 
     static func dismantleUIView(_ pdfView: PDFView, coordinator: Coordinator) {
@@ -1227,6 +1228,14 @@ extension PDFKitView {
         private var freehandPageIndex: Int?
         private var freehandPagePoints: [CGPoint] = []
         private var freehandViewPoints: [CGPoint] = []
+
+#if os(iOS)
+        private struct SuspendedScrollGesture {
+            weak var recognizer: UIPanGestureRecognizer?
+            let wasEnabled: Bool
+        }
+        private var suspendedScrollGestures: [SuspendedScrollGesture] = []
+#endif
 
 #if os(macOS)
         private let signaturePreviewLayer = CAShapeLayer()
@@ -1679,6 +1688,10 @@ extension PDFKitView {
             cancelFreehandStraightLine()
 #endif
             removeAnnotationActionBar()
+#if os(iOS)
+            // Finishing inline editing can refresh gesture availability during teardown.
+            restoreFreehandScrollGestures()
+#endif
             if let pdfView {
 #if os(macOS)
                 closeCommentPopover()
@@ -2582,6 +2595,7 @@ extension PDFKitView {
                 }
             }
 #else
+            updateFreehandScrollGestures()
             for gesture in gestures {
                 if gesture === freehandGesture {
                     gesture.isEnabled = freehandDrawingEnabled
@@ -2600,6 +2614,39 @@ extension PDFKitView {
 #endif
             scheduleOverlayRefresh()
         }
+
+#if os(iOS)
+        private func updateFreehandScrollGestures() {
+            guard freehandDrawingEnabled, let pdfView else {
+                restoreFreehandScrollGestures()
+                return
+            }
+
+            // PDFKit's scroll views own recognizers outside our gestures array.
+            // Suspend their pans so they cannot claim the drawing drag first.
+            func suspendScrollGestures(in view: UIView) {
+                if let scrollView = view as? UIScrollView {
+                    let recognizer = scrollView.panGestureRecognizer
+                    if !suspendedScrollGestures.contains(where: { $0.recognizer === recognizer }) {
+                        suspendedScrollGestures.append(SuspendedScrollGesture(
+                            recognizer: recognizer,
+                            wasEnabled: recognizer.isEnabled
+                        ))
+                    }
+                    recognizer.isEnabled = false
+                }
+                view.subviews.forEach { suspendScrollGestures(in: $0) }
+            }
+            suspendScrollGestures(in: pdfView)
+        }
+
+        private func restoreFreehandScrollGestures() {
+            for state in suspendedScrollGestures {
+                state.recognizer?.isEnabled = state.wasEnabled
+            }
+            suspendedScrollGestures.removeAll()
+        }
+#endif
 
         private func beginFreehandDrawing(at viewPoint: CGPoint) {
             guard freehandDrawingEnabled,

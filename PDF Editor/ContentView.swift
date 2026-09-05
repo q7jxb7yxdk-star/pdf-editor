@@ -2056,6 +2056,9 @@ struct ContentView: View {
             }
             showsCommentList = true
         case .highlight:
+            if !usesInlinePanels {
+                showsToolPanel = false
+            }
             beginHighlight()
         case .deletePage:
             guard let index = selectedPageIndex else { return }
