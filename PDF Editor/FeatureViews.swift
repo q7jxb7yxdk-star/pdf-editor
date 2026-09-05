@@ -782,6 +782,87 @@ private struct ToolRowLabel: View {
     }
 }
 
+#if os(iOS)
+/// Overlays the document so showing the controls never changes PDF layout or zoom.
+struct PDFPhoneViewerControls<Controls: View>: View {
+    @ViewBuilder let controls: (@escaping () -> Void, @escaping (Bool) -> Void) -> Controls
+
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isExpanded = true
+    @State private var isPageNumberFocused = false
+    @State private var idleRevision = 0
+    @GestureState private var isDragging = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button {
+                setExpanded(!isExpanded)
+            } label: {
+                Capsule()
+                    .fill(.secondary)
+                    .frame(width: 4, height: 36)
+                    .frame(width: 24, height: 64)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Hide view controls" : "Show view controls")
+            .disabled(isPageNumberFocused)
+
+            if isExpanded {
+                controls(recordInteraction, pageNumberFocusChanged)
+                    .frame(width: 52)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        // The gesture is confined to the controls and handle, leaving PDF gestures alone.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12)
+                .updating($isDragging) { _, active, _ in active = true }
+                .onEnded { value in
+                    let delta = value.translation
+                    guard abs(delta.width) > abs(delta.height), abs(delta.width) > 24 else {
+                        recordInteraction()
+                        return
+                    }
+                    setExpanded(delta.width < 0)
+                }
+        )
+        .onChange(of: isDragging) { _, _ in recordInteraction() }
+        .onChange(of: voiceOverEnabled) { _, _ in recordInteraction() }
+        .task(id: idleRevision) {
+            guard isExpanded, !isPageNumberFocused, !isDragging, !voiceOverEnabled else { return }
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, !isPageNumberFocused, !isDragging, !voiceOverEnabled else { return }
+            setExpanded(false)
+        }
+    }
+
+    private func recordInteraction() {
+        idleRevision += 1
+    }
+
+    private func pageNumberFocusChanged(_ focused: Bool) {
+        isPageNumberFocused = focused
+        recordInteraction()
+    }
+
+    private func setExpanded(_ expanded: Bool) {
+        guard expanded || !isPageNumberFocused else { return }
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+            isExpanded = expanded
+        }
+        recordInteraction()
+    }
+}
+#endif
+
 struct PDFRightPanel: View {
     @Binding var viewerMode: PDFViewerMode
     @Binding var selectedPageIndex: Int?
@@ -792,6 +873,8 @@ struct PDFRightPanel: View {
     let onToggleBookmarks: () -> Void
     let onViewerCommand: (PDFViewerCommand.Action) -> Void
     let onFullScreen: () -> Void
+    var onInteraction: () -> Void = {}
+    var onPageNumberFocusChange: (Bool) -> Void = { _ in }
 
     @State private var pageNumberText = ""
     @FocusState private var isPageNumberFocused: Bool
@@ -908,6 +991,7 @@ struct PDFRightPanel: View {
             pageNumberText = pageIndex.map { String($0 + 1) } ?? ""
         }
         .onChange(of: pageNumberText) { _, newValue in
+            onInteraction()
             let digits = newValue.filter(\.isNumber)
             guard digits == newValue else {
                 pageNumberText = digits
@@ -918,6 +1002,7 @@ struct PDFRightPanel: View {
             selectedPageIndex = pageNumber - 1
         }
         .onChange(of: isPageNumberFocused) { _, isFocused in
+            onPageNumberFocusChange(isFocused)
             if !isFocused {
                 commitPageNumber()
             }
@@ -945,7 +1030,10 @@ struct PDFRightPanel: View {
         isSelected: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        Button {
+            onInteraction()
+            action()
+        } label: {
             Image(systemName: systemImage)
                 .frame(width: 24, height: 28)
                 .frame(width: 44, height: 44)

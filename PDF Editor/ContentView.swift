@@ -3,6 +3,10 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(iOS)
+import UIKit
+#endif
+
 #if os(macOS)
 import AppKit
 
@@ -511,9 +515,11 @@ struct ContentView: View {
                         bookmarkSidebar
                             .frame(width: 260)
                     }
-                    Divider()
-                    rightPanel
-                        .frame(width: 52)
+                    if !usesPhoneViewerControls {
+                        Divider()
+                        rightPanel
+                            .frame(width: 52)
+                    }
                 }
                 .onAppear { usesInlinePanels = true }
                 .onDisappear { usesInlinePanels = false }
@@ -535,9 +541,11 @@ struct ContentView: View {
                                 width: min(260, max(220, proxy.size.width * 0.55))
                             )
                     }
-                    Divider()
-                    rightPanel
-                        .frame(width: 52)
+                    if !usesPhoneViewerControls {
+                        Divider()
+                        rightPanel
+                            .frame(width: 52)
+                    }
                 }
                 .onAppear { usesInlinePanels = false }
                 .sheet(isPresented: $showsToolPanel, onDismiss: {
@@ -564,6 +572,16 @@ struct ContentView: View {
             }
         }
 #if os(iOS)
+        .overlay(alignment: .trailing) {
+            if usesPhoneViewerControls {
+                PDFPhoneViewerControls { onInteraction, onPageNumberFocusChange in
+                    makeRightPanel(
+                        onInteraction: onInteraction,
+                        onPageNumberFocusChange: onPageNumberFocusChange
+                    )
+                }
+            }
+        }
         .safeAreaInset(edge: .top, spacing: 0) {
             if horizontalSizeClass == .compact {
                 VStack(spacing: 0) {
@@ -1071,7 +1089,22 @@ struct ContentView: View {
     }
 #endif
 
+    private var usesPhoneViewerControls: Bool {
+#if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .phone
+#else
+        false
+#endif
+    }
+
     private var rightPanel: some View {
+        makeRightPanel()
+    }
+
+    private func makeRightPanel(
+        onInteraction: @escaping () -> Void = {},
+        onPageNumberFocusChange: @escaping (Bool) -> Void = { _ in }
+    ) -> some View {
         PDFRightPanel(
             viewerMode: $viewerMode,
             selectedPageIndex: $selectedPageIndex,
@@ -1081,7 +1114,9 @@ struct ContentView: View {
             onTogglePages: togglePagePanel,
             onToggleBookmarks: toggleBookmarkPanel,
             onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
-            onFullScreen: toggleFullScreen
+            onFullScreen: toggleFullScreen,
+            onInteraction: onInteraction,
+            onPageNumberFocusChange: onPageNumberFocusChange
         )
     }
 
