@@ -7,16 +7,52 @@ import UniformTypeIdentifiers
 import UIKit
 
 private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
+    let isFullScreenReading: Bool
+
     func makeUIViewController(context: Context) -> Controller {
-        Controller()
+        Controller(isFullScreenReading: isFullScreenReading)
     }
 
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {}
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {
+        uiViewController.setFullScreenReading(isFullScreenReading)
+    }
 
     final class Controller: UIViewController {
+        private var isFullScreenReading: Bool
+
+        init(isFullScreenReading: Bool) {
+            self.isFullScreenReading = isFullScreenReading
+            super.init(nibName: nil, bundle: nil)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
             disableDocumentRenamingAfterDocumentGroupConfiguresTitle()
+            applyFullScreenReadingAppearance()
+        }
+
+        func setFullScreenReading(_ enabled: Bool) {
+            guard isFullScreenReading != enabled else { return }
+            isFullScreenReading = enabled
+            applyFullScreenReadingAppearance()
+        }
+
+        override var prefersStatusBarHidden: Bool {
+            isFullScreenReading
+        }
+
+        private func applyFullScreenReadingAppearance() {
+            // DocumentGroup owns the navigation controller outside this SwiftUI
+            // subtree, so a child .toolbar visibility modifier alone does not
+            // reliably change the visible document navigation bar.
+            navigationController?.setNavigationBarHidden(isFullScreenReading, animated: true)
+            navigationController?.setNeedsStatusBarAppearanceUpdate()
+            setNeedsStatusBarAppearanceUpdate()
         }
 
         private func disableDocumentRenamingAfterDocumentGroupConfiguresTitle() {
@@ -450,6 +486,7 @@ struct ContentView: View {
     @State private var usesInlinePanels = false
 #if os(iOS)
     @State private var showsDocumentFilename = true
+    @State private var isFullScreenReading = false
 #endif
 
     private let annotationService = PDFAnnotationService()
@@ -502,6 +539,8 @@ struct ContentView: View {
             .focusedValue(\.manualPDFSaveAction, saveDocument)
             .focusedValue(\.manualPDFSaveAsAction, saveDocumentAs)
 #if os(iOS)
+            .toolbar(isFullScreenReading ? .hidden : .visible, for: .navigationBar)
+            .statusBar(hidden: isFullScreenReading)
             .task(id: documentFileURL) {
                 await adoptImportedDocumentIfNeeded()
             }
@@ -663,7 +702,7 @@ struct ContentView: View {
         }
         // DocumentGroup configures the Rename action after SwiftUI toolbar
         // modifiers. Clear that document-specific menu once it has finished.
-        .background(DocumentTitleMenuDisabler())
+        .background(DocumentTitleMenuDisabler(isFullScreenReading: isFullScreenReading))
         .toolbar(removing: .title)
         .toolbar {
             if horizontalSizeClass == .compact {
@@ -1177,6 +1216,14 @@ struct ContentView: View {
 #endif
     }
 
+    private var isFullScreen: Bool {
+#if os(iOS)
+        isFullScreenReading
+#else
+        false
+#endif
+    }
+
     private var rightPanel: some View {
         makeRightPanel()
     }
@@ -1194,6 +1241,7 @@ struct ContentView: View {
             onTogglePages: togglePagePanel,
             onToggleBookmarks: toggleBookmarkPanel,
             onViewerCommand: { viewerCommand = PDFViewerCommand(action: $0) },
+            isFullScreen: isFullScreen,
             onFullScreen: toggleFullScreen,
             onInteraction: onInteraction,
             onPageNumberFocusChange: onPageNumberFocusChange
@@ -1453,6 +1501,7 @@ struct ContentView: View {
     }
 
     private func beginFormFieldPlacement(_ kind: PDFFormDesignKind) {
+        leaveFullScreenReading()
         cancelFormFieldPlacement()
         guard formDesignSession == nil, !isOpeningFormDesign,
               !isSaving, !isRunningOCR, !document.isLocked, document.pageCount > 0 else { return }
@@ -1550,6 +1599,7 @@ struct ContentView: View {
     private func toggleToolPanel() {
         let willShow = !showsToolPanel
         if willShow {
+            leaveFullScreenReading()
             highlightSelectionSnapshot = validHighlightSelection(pdfSelection)?
                 .copy() as? PDFSelection
         } else {
@@ -1566,6 +1616,7 @@ struct ContentView: View {
     }
 
     private func togglePagePanel() {
+        leaveFullScreenReading()
         showsPagePanel.toggle()
         if showsPagePanel {
             showsToolPanel = false
@@ -1575,6 +1626,7 @@ struct ContentView: View {
     }
 
     private func toggleBookmarkPanel() {
+        leaveFullScreenReading()
         showsBookmarkPanel.toggle()
         if showsBookmarkPanel {
             showsToolPanel = false
@@ -1654,6 +1706,7 @@ struct ContentView: View {
     }
 
     private func performSave(choosingNewDestination: Bool) {
+        leaveFullScreenReading()
         guard !isSaving else { return }
 #if os(macOS)
         if let nativeDocument = nativeDocumentReference?.document {
@@ -2085,6 +2138,7 @@ struct ContentView: View {
     }
 
     private func handleToolAction(_ action: PDFToolAction) {
+        leaveFullScreenReading()
         cancelFormFieldPlacement()
         if action != .drawFreehand {
             freehandDrawingEnabled = false
@@ -2271,7 +2325,21 @@ struct ContentView: View {
 #if os(macOS)
         NSApp.keyWindow?.toggleFullScreen(nil)
 #else
-        errorMessage = "Full screen is unavailable on this platform."
+        isFullScreenReading.toggle()
+        // The navigation bar changes the PDFView's height. Yield once so the
+        // resized view is laid out before PDFKit recalculates its fit scale.
+        Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            viewerCommand = PDFViewerCommand(action: .fitPage)
+        }
+#endif
+    }
+
+    private func leaveFullScreenReading() {
+#if os(iOS)
+        guard isFullScreenReading else { return }
+        isFullScreenReading = false
 #endif
     }
 
@@ -3230,6 +3298,7 @@ struct ContentView: View {
     }
 
     private func runOCR() {
+        leaveFullScreenReading()
         guard let pageIndex = selectedPageIndex,
               let page = document.pdfDocument.page(at: pageIndex) else { return }
         let context = OCRRunContext(
@@ -3252,6 +3321,7 @@ struct ContentView: View {
     }
 
     private func runDocumentOCR() {
+        leaveFullScreenReading()
         guard document.pageCount > 0 else { return }
         ocrBatchTask?.cancel()
         ocrProgressCompleted = 0

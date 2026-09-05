@@ -872,6 +872,7 @@ struct PDFRightPanel: View {
     let onTogglePages: () -> Void
     let onToggleBookmarks: () -> Void
     let onViewerCommand: (PDFViewerCommand.Action) -> Void
+    let isFullScreen: Bool
     let onFullScreen: () -> Void
     var onInteraction: () -> Void = {}
     var onPageNumberFocusChange: (Bool) -> Void = { _ in }
@@ -921,13 +922,11 @@ struct PDFRightPanel: View {
                 iconButton("Fit to width", systemImage: "arrow.left.and.right") {
                     onViewerCommand(.fitWidth)
                 }
-#if os(macOS)
                 iconButton(
-                    "Full screen",
+                    isFullScreen ? "Exit full screen" : "Full screen",
                     systemImage: "arrow.up.left.and.arrow.down.right",
                     action: onFullScreen
                 )
-#endif
                 iconButton("Zoom in", systemImage: "plus.magnifyingglass") {
                     onViewerCommand(.zoomIn)
                 }
