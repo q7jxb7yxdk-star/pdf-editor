@@ -20,6 +20,9 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private static let pdfiumAccessLock = PDFiumAccess.lock
 
     final class EditorState: ObservableObject {
+#if os(iOS)
+        let undoManager = UndoManager()
+#endif
         @Published private(set) var revision = 0
         @Published private(set) var hasUnsavedChanges = false
         @Published private(set) var annotationColorUpdate: PDFAnnotationColorUpdateEvent?

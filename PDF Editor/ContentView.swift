@@ -5,6 +5,50 @@ import UniformTypeIdentifiers
 
 #if os(iOS)
 import UIKit
+
+private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller {
+        Controller()
+    }
+
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {
+        uiViewController.disableDocumentRenaming()
+    }
+
+    final class Controller: UIViewController {
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            disableDocumentRenaming()
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            disableDocumentRenaming()
+        }
+
+        func disableDocumentRenaming() {
+            var viewControllers: [UIViewController] = []
+            if let topViewController = navigationController?.topViewController {
+                viewControllers.append(topViewController)
+            }
+
+            var ancestor = parent
+            while let viewController = ancestor {
+                if !viewControllers.contains(where: { $0 === viewController }) {
+                    viewControllers.append(viewController)
+                }
+                ancestor = viewController.parent
+            }
+
+            for viewController in viewControllers {
+                let navigationItem = viewController.navigationItem
+                navigationItem.renameDelegate = nil
+                navigationItem.titleMenuProvider = nil
+                navigationItem.documentProperties = nil
+            }
+        }
+    }
+}
 #endif
 
 #if os(macOS)
@@ -308,10 +352,11 @@ struct ContentView: View {
 
     @ObservedObject private var editorState: PDFEditorDocument.EditorState
 
-    @Environment(\.undoManager) private var environmentUndoManager
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+#else
+    @Environment(\.undoManager) private var environmentUndoManager
 #endif
 
     @StateObject private var pendingTextEditStore = PendingTextEditStore()
@@ -442,7 +487,11 @@ struct ContentView: View {
 #endif
 
     private var undoManager: UndoManager? {
+#if os(iOS)
+        editorState.undoManager
+#else
         environmentUndoManager
+#endif
     }
 
     private var canSave: Bool {
@@ -615,6 +664,7 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
+        .background(DocumentTitleMenuDisabler())
         .toolbar {
             if horizontalSizeClass == .compact {
                 ToolbarItem(placement: .principal) {
