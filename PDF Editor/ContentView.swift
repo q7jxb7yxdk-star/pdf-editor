@@ -14,21 +14,34 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: Controller, context: Context) {}
 
     final class Controller: UIViewController {
-        private var hasDisabledDocumentRenaming = false
-
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            disableDocumentRenaming()
+            disableDocumentRenamingAfterDocumentGroupConfiguresTitle()
         }
 
-        func disableDocumentRenaming() {
-            guard !hasDisabledDocumentRenaming,
-                  let viewController = navigationController?.topViewController else { return }
-            hasDisabledDocumentRenaming = true
-            let navigationItem = viewController.navigationItem
-            navigationItem.renameDelegate = nil
-            navigationItem.titleMenuProvider = nil
-            navigationItem.documentProperties = nil
+        private func disableDocumentRenamingAfterDocumentGroupConfiguresTitle() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                var viewControllers: [UIViewController] = []
+                if let topViewController = self.navigationController?.topViewController {
+                    viewControllers.append(topViewController)
+                }
+
+                var ancestor = self.parent
+                while let viewController = ancestor {
+                    if !viewControllers.contains(where: { $0 === viewController }) {
+                        viewControllers.append(viewController)
+                    }
+                    ancestor = viewController.parent
+                }
+
+                for viewController in viewControllers {
+                    let navigationItem = viewController.navigationItem
+                    navigationItem.renameDelegate = nil
+                    navigationItem.titleMenuProvider = nil
+                    navigationItem.documentProperties = nil
+                }
+            }
         }
     }
 }
@@ -648,7 +661,10 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
+        // DocumentGroup configures the Rename action after SwiftUI toolbar
+        // modifiers. Clear that document-specific menu once it has finished.
         .background(DocumentTitleMenuDisabler())
+        .toolbar(removing: .title)
         .toolbar {
             if horizontalSizeClass == .compact {
                 ToolbarItem(placement: .principal) {
