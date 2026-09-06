@@ -711,6 +711,7 @@ struct PDFKitView: NSViewRepresentable {
     let onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
     let onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
     let onDeleteFormField: (PDFFormDesignField) -> Void
+    let onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
     let freeTextPlacementEnabled: Bool
@@ -795,6 +796,7 @@ struct PDFKitView: UIViewRepresentable {
     let onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
     let onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
     let onDeleteFormField: (PDFFormDesignField) -> Void
+    let onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
     let freeTextPlacementEnabled: Bool
@@ -858,6 +860,7 @@ private extension PDFKitView {
             onSetFormFieldBounds: onSetFormFieldBounds,
             onSetFormFieldFontSize: onSetFormFieldFontSize,
             onDeleteFormField: onDeleteFormField,
+            onCommitTextFormField: onCommitTextFormField,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
             freeTextPlacementEnabled: freeTextPlacementEnabled,
@@ -995,6 +998,7 @@ private extension PDFKitView {
         coordinator.onSetFormFieldBounds = onSetFormFieldBounds
         coordinator.onSetFormFieldFontSize = onSetFormFieldFontSize
         coordinator.onDeleteFormField = onDeleteFormField
+        coordinator.onCommitTextFormField = onCommitTextFormField
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
         coordinator.freeTextPlacementEnabled = freeTextPlacementEnabled
@@ -1138,6 +1142,7 @@ extension PDFKitView {
         var onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
         var onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
         var onDeleteFormField: (PDFFormDesignField) -> Void
+        var onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
         var commentPlacementEnabled: Bool {
             didSet {
                 guard oldValue != commentPlacementEnabled else { return }
@@ -1357,6 +1362,11 @@ extension PDFKitView {
         private var inlineEditingPDFStyle: PDFTextStyle = []
         private var inlineBoldButton: UIBarButtonItem?
         private var inlineItalicButton: UIBarButtonItem?
+        private var formTextTapGesture: UITapGestureRecognizer?
+        private var formTextEditor: UITextView?
+        private var formTextEditingField: PDFFormDesignField?
+        private var formTextDisplayViews: [UUID: UITextView] = [:]
+        private weak var formTextDisplayDocument: PDFDocument?
 #endif
         private enum ActionBarIdentity: Equatable {
             case annotation(PDFAnnotationSnapshot)
@@ -1410,6 +1420,7 @@ extension PDFKitView {
             onSetFormFieldBounds: @escaping (PDFFormDesignField, CGRect) -> Void,
             onSetFormFieldFontSize: @escaping (PDFFormDesignField, CGFloat) -> Void,
             onDeleteFormField: @escaping (PDFFormDesignField) -> Void,
+            onCommitTextFormField: @escaping (PDFFormDesignField, String, CGRect) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
             freeTextPlacementEnabled: Bool,
@@ -1452,6 +1463,7 @@ extension PDFKitView {
             self.onSetFormFieldBounds = onSetFormFieldBounds
             self.onSetFormFieldFontSize = onSetFormFieldFontSize
             self.onDeleteFormField = onDeleteFormField
+            self.onCommitTextFormField = onCommitTextFormField
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
             self.freeTextPlacementEnabled = freeTextPlacementEnabled
@@ -1712,6 +1724,7 @@ extension PDFKitView {
 #if os(iOS)
             // Finishing inline editing can refresh gesture availability during teardown.
             restoreFreehandScrollGestures()
+            removeAuthoredTextDisplays()
 #endif
             if let pdfView {
 #if os(macOS)
@@ -1750,6 +1763,8 @@ extension PDFKitView {
             stagedTextMaskViews.values.forEach { $0.removeFromSuperview() }
             stagedTextMaskViews.removeAll()
             pageOverlayViews.removeAll()
+#elseif os(iOS)
+            removeAuthoredTextDisplays()
 #endif
             clearInteraction()
             setOverlayHidden(true)
@@ -1875,6 +1890,116 @@ extension PDFKitView {
             }
         }
 
+        #if os(iOS)
+        private func beginAuthoredTextEditing(_ field: PDFFormDesignField) {
+            guard let pdfView,
+                  let document = pdfView.document,
+                  let page = document.page(at: field.pageIndex) else { return }
+            synchronizeAuthoredTextDisplays()
+            guard let editor = formTextDisplayViews[field.id] else { return }
+            editor.frame = pdfView.convert(field.bounds, from: page).standardized
+            editor.isUserInteractionEnabled = true
+            editor.isEditable = true
+            editor.isSelectable = true
+            editor.backgroundColor = .white
+            editor.layer.borderWidth = 1
+            editor.layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.75).cgColor
+            editor.layer.cornerRadius = 3
+            editor.delegate = self
+            formTextEditor = editor
+            formTextEditingField = field
+            pdfView.bringSubviewToFront(editor)
+            editor.becomeFirstResponder()
+        }
+
+        private func updateAuthoredTextEditorSize(_ editor: UITextView) {
+            guard let pdfView, var field = formTextEditingField,
+                  let page = pdfView.document?.page(at: field.pageIndex) else { return }
+            let size = field.kind.fittedTextSize(text: editor.text ?? "", fontSize: field.fontSize)
+            field.bounds = PDFFormPageGeometry(
+                cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+            ).clamped(CGRect(
+                x: field.bounds.minX, y: field.bounds.minY,
+                width: size.width, height: size.height
+            ), minimumDimension: field.kind.minimumDimension)
+            editor.frame = pdfView.convert(field.bounds, from: page).standardized
+            formTextEditingField = field
+            selectedFormField.wrappedValue = field
+            refreshOverlay()
+        }
+
+        private func finishAuthoredTextEditing() {
+            guard let editor = formTextEditor, let field = formTextEditingField else { return }
+            let text = editor.text ?? ""
+            editor.delegate = nil
+            editor.resignFirstResponder()
+            editor.isEditable = false
+            editor.isSelectable = false
+            editor.isUserInteractionEnabled = false
+            editor.backgroundColor = .clear
+            editor.layer.borderWidth = 0
+            formTextEditor = nil
+            formTextEditingField = nil
+            onCommitTextFormField(field, text, field.bounds)
+        }
+
+        private func synchronizeAuthoredTextDisplays() {
+            guard let pdfView, let document = pdfView.document else { return }
+            if formTextDisplayDocument !== document {
+                formTextDisplayViews.values.forEach { $0.removeFromSuperview() }
+                formTextDisplayViews.removeAll()
+                formTextDisplayDocument = document
+            }
+
+            let fields = PDFFormDesignService().fields(in: document)
+                .filter { $0.kind == .text }
+            let fieldIDs = Set(fields.map(\.id))
+            let staleIDs = formTextDisplayViews.keys.filter { !fieldIDs.contains($0) }
+            for id in staleIDs {
+                formTextDisplayViews[id]?.removeFromSuperview()
+                formTextDisplayViews.removeValue(forKey: id)
+            }
+
+            let identifierKey = PDFAnnotationKey(rawValue: "/PDFEditorFormID")
+            let displayScale = max(pdfView.scaleFactor, 0.01)
+            for field in fields {
+                guard let page = document.page(at: field.pageIndex) else { continue }
+                page.annotations.first(where: {
+                    ($0.value(forAnnotationKey: identifierKey) as? String)
+                        .flatMap(UUID.init(uuidString:)) == field.id
+                })?.shouldDisplay = false
+
+                let view = formTextDisplayViews[field.id] ?? UITextView(frame: .zero)
+                if formTextDisplayViews[field.id] == nil {
+                    view.isScrollEnabled = false
+                    view.textContainerInset = UIEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
+                    view.textContainer.lineFragmentPadding = 0
+                    view.textColor = .black
+                    view.backgroundColor = .clear
+                    view.isEditable = false
+                    view.isSelectable = false
+                    view.isUserInteractionEnabled = false
+                    pdfView.addSubview(view)
+                    formTextDisplayViews[field.id] = view
+                }
+                if formTextEditor !== view {
+                    view.frame = pdfView.convert(field.bounds, from: page).standardized
+                    view.font = UIFont.systemFont(ofSize: field.fontSize * displayScale)
+                    if view.text != field.value { view.text = field.value }
+                }
+            }
+            pdfView.setNeedsDisplay()
+        }
+
+        private func removeAuthoredTextDisplays() {
+            formTextDisplayViews.values.forEach { $0.removeFromSuperview() }
+            formTextDisplayViews.removeAll()
+            formTextEditor = nil
+            formTextEditingField = nil
+            formTextDisplayDocument = nil
+        }
+        #endif
+
         private func scheduleListBoxNativeAppearanceUpdateAfterHit() {
 #if os(macOS)
             // PDFKit creates an AppKit table for an active List Box. Style it
@@ -1906,6 +2031,9 @@ extension PDFKitView {
                 setOverlayHidden(true)
                 return
             }
+#if os(iOS)
+            synchronizeAuthoredTextDisplays()
+#endif
 #if os(macOS)
             updateStagedTextOverlays()
 #endif
@@ -2857,6 +2985,12 @@ extension PDFKitView {
 #endif
 
         private func selectTarget(at viewPoint: CGPoint) {
+#if os(iOS)
+            if formTextEditor != nil {
+                finishAuthoredTextEditing()
+                return
+            }
+#endif
             guard prepareForCanvasInteraction(at: viewPoint),
                   let pdfView,
                   let page = pdfView.page(for: viewPoint, nearest: false),
@@ -2864,7 +2998,17 @@ extension PDFKitView {
             pendingTextActivation = nil
             let pageIndex = document.index(for: page)
             let pagePoint = pdfView.convert(viewPoint, to: page)
-            if selectAuthoredFormField(at: viewPoint, in: pdfView) { return }
+            if let field = authoredFormField(at: viewPoint, in: pdfView) {
+                selectAuthoredFormField(field, in: pdfView)
+#if os(iOS)
+                if field.kind == .text {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.beginAuthoredTextEditing(field)
+                    }
+                }
+#endif
+                return
+            }
             selectedFormField.wrappedValue = nil
             if freeTextPlacementEnabled {
                 beginFreeTextPlacement(
@@ -5369,6 +5513,12 @@ extension PDFKitView {
         private func installGestures(on pdfView: PDFView) {
             let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
             tap.cancelsTouchesInView = false
+            let formTextTap = UITapGestureRecognizer(
+                target: self,
+                action: #selector(handleFormTextTap(_:))
+            )
+            formTextTap.cancelsTouchesInView = true
+            formTextTapGesture = formTextTap
             let doubleTap = UITapGestureRecognizer(
                 target: self,
                 action: #selector(handleDoubleTap(_:))
@@ -5383,7 +5533,7 @@ extension PDFKitView {
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
             let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
             freehandGesture = freehandPan
-            gestures = [tap, doubleTap, pan, pinch, rotate, freehandPan]
+            gestures = [tap, formTextTap, doubleTap, pan, pinch, rotate, freehandPan]
             gestures.forEach {
                 $0.delegate = self
                 pdfView.addGestureRecognizer($0)
@@ -5391,6 +5541,11 @@ extension PDFKitView {
         }
 
         @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard let pdfView else { return }
+            selectTarget(at: recognizer.location(in: pdfView))
+        }
+
+        @objc private func handleFormTextTap(_ recognizer: UITapGestureRecognizer) {
             guard let pdfView else { return }
             selectTarget(at: recognizer.location(in: pdfView))
         }
@@ -6010,10 +6165,24 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         shouldReceive touch: UITouch
     ) -> Bool {
         guard !formPlacementActive else { return false }
-        if let pdfView, authoredWidgetOwnsInput(at: touch.location(in: pdfView), in: pdfView) {
+        if let formTextEditor, let touchedView = touch.view,
+           touchedView === formTextEditor || touchedView.isDescendant(of: formTextEditor) {
+            return false
+        }
+        if let pdfView,
+           let field = authoredFormField(at: touch.location(in: pdfView), in: pdfView) {
+            // App-authored Textboxes use the overlay editor, so their dedicated
+            // tap blocks PDFKit's native Widget while a drag remains available
+            // for moving the field.
+            if field.kind == .text {
+                return gestureRecognizer === formTextTapGesture ||
+                    gestureRecognizer is UIPanGestureRecognizer
+            }
+            if gestureRecognizer === formTextTapGesture { return false }
             return gestureRecognizer is UITapGestureRecognizer ||
                 gestureRecognizer is UIPanGestureRecognizer
         }
+        if gestureRecognizer === formTextTapGesture { return false }
         guard let touchedView = touch.view else { return true }
         if let annotationActionContainer,
            touchedView === annotationActionContainer ||
@@ -6026,9 +6195,19 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard !formPlacementActive else { return false }
+        if formTextEditor != nil {
+            return gestureRecognizer is UITapGestureRecognizer &&
+                gestureRecognizer !== formTextTapGesture
+        }
         if let pdfView {
             let point = interactionStartPoint(for: gestureRecognizer, in: pdfView)
-            if authoredWidgetOwnsInput(at: point, in: pdfView) {
+            if let field = authoredFormField(at: point, in: pdfView) {
+                if field.kind == .text {
+                    if gestureRecognizer === formTextTapGesture { return true }
+                    guard gestureRecognizer is UIPanGestureRecognizer else { return false }
+                    selectAuthoredFormField(field, in: pdfView)
+                    return prepareFormFieldPan(at: point, in: pdfView)
+                }
                 if gestureRecognizer is UITapGestureRecognizer { return true }
                 if gestureRecognizer is UIPanGestureRecognizer {
                     return prepareFormFieldPan(at: point, in: pdfView)
@@ -6097,16 +6276,34 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        gestureRecognizer is UITapGestureRecognizer ||
-            otherGestureRecognizer is UITapGestureRecognizer
+        if gestureRecognizer is UITapGestureRecognizer ||
+            otherGestureRecognizer is UITapGestureRecognizer {
+            return true
+        }
+        guard selectedFormField.wrappedValue?.kind == .text else { return false }
+        let canvasPanParticipates = gestures.contains {
+            ($0 === gestureRecognizer || $0 === otherGestureRecognizer) &&
+                $0 is UIPanGestureRecognizer
+        }
+        return canvasPanParticipates &&
+            (gestureRecognizer is UIPanGestureRecognizer ||
+             otherGestureRecognizer is UIPanGestureRecognizer)
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {
+        if formTextEditor === textView {
+            finishAuthoredTextEditing()
+            return
+        }
         if pendingFreeTextPlacement != nil { return }
         finishInlineTextEditing(commit: true)
     }
 
     func textViewDidChange(_ textView: UITextView) {
+        if formTextEditor === textView {
+            updateAuthoredTextEditorSize(textView)
+            return
+        }
         guard inlineTextField === textView else { return }
         resizeFreeTextEditorToFit()
     }

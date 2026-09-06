@@ -102,7 +102,11 @@ nonisolated struct PDFFormDesignService {
             ? radioGroupName ?? nextPlacementName(for: kind, in: document)
             : nextPlacementName(for: kind, in: document)
         var field = PDFFormDesignField(pageIndex: pageIndex, kind: kind, name: name, bounds: bounds)
-        if kind == .radioButton {
+        if kind == .text {
+            // New Textboxes are multiline; pre-existing fields retain the flag
+            // that was read from their original Widget.
+            field.isMultiline = true
+        } else if kind == .radioButton {
             let used = Set(existing.filter { $0.name == name }.map(\.exportValue))
             var number = 1
             while used.contains("Option\(number)") { number += 1 }

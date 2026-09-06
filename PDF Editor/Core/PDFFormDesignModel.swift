@@ -73,6 +73,28 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         return CGSize(width: width, height: height)
     }
 
+    func fittedTextSize(text: String, fontSize: CGFloat) -> CGSize {
+        guard self == .text else { return defaultSize }
+#if os(macOS)
+        let font = NSFont.systemFont(ofSize: fontSize)
+        let lineHeight = font.ascender - font.descender + font.leading
+#else
+        let font = UIFont.systemFont(ofSize: fontSize)
+        let lineHeight = font.lineHeight
+#endif
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let lines = text.components(separatedBy: .newlines)
+        let widestLine = lines.reduce(CGFloat.zero) { width, line in
+            max(width, (line as NSString).size(withAttributes: attributes).width)
+        }
+        let horizontalPadding: CGFloat = 12
+        let verticalPadding: CGFloat = 12
+        return CGSize(
+            width: max(48, ceil(widestLine) + horizontalPadding),
+            height: max(defaultSize.height, ceil(lineHeight * CGFloat(max(lines.count, 1))) + verticalPadding)
+        )
+    }
+
     var isChoice: Bool {
         self == .dropdown || self == .listBox
     }

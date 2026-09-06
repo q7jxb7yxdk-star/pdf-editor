@@ -909,6 +909,34 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     @discardableResult
+    func updateAuthoredTextFormField(
+        id: UUID, text: String, bounds: CGRect, undoManager: UndoManager?
+    ) throws -> PDFFormDesignField {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let service = PDFFormDesignService()
+        guard let current = service.fields(in: pdfDocument).first(where: { $0.id == id }),
+              current.kind == .text else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let session = try makeFormDesignSession(
+            initialPageIndex: current.pageIndex, undoManager: undoManager
+        )
+        guard let index = session.fields.firstIndex(where: { $0.id == id }),
+              let page = session.sourceDocument.page(at: current.pageIndex) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        var fields = session.fields
+        fields[index].value = text
+        fields[index].bounds = PDFFormPageGeometry(
+            cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+        ).clamped(bounds, minimumDimension: current.kind.minimumDimension)
+        try applyFormDesign(fields, session: session, undoManager: undoManager)
+        undoManager?.setActionName("Edit Textbox")
+        return fields[index]
+    }
+
+    @discardableResult
     func setAuthoredFormFieldFontSize(
         id: UUID, fontSize: CGFloat, undoManager: UndoManager?
     ) throws -> PDFFormDesignField {

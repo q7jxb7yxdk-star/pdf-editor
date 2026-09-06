@@ -1139,6 +1139,7 @@ struct ContentView: View {
                     onSetFormFieldBounds: setFormFieldBounds,
                     onSetFormFieldFontSize: setFormFieldFontSize,
                     onDeleteFormField: deleteFormField,
+                    onCommitTextFormField: commitTextFormField,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
                     freeTextPlacementEnabled: freeTextPlacementEnabled,
@@ -3353,6 +3354,10 @@ struct ContentView: View {
 
     private func setFormFieldBounds(_ field: PDFFormDesignField, bounds: CGRect) {
         do {
+            // A native Widget can publish its text value just before this
+            // bounds update. Commit that value first so resizing cannot rebuild
+            // the field from stale form bytes.
+            try document.synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
             selectedFormField = try document.resizeAuthoredFormField(
                 id: field.id, bounds: bounds, undoManager: undoManager
             )
@@ -3367,6 +3372,16 @@ struct ContentView: View {
         do {
             selectedFormField = try document.setAuthoredFormFieldFontSize(
                 id: field.id, fontSize: fontSize, undoManager: undoManager
+            )
+        } catch { present(error) }
+    }
+
+    private func commitTextFormField(
+        _ field: PDFFormDesignField, text: String, bounds: CGRect
+    ) {
+        do {
+            selectedFormField = try document.updateAuthoredTextFormField(
+                id: field.id, text: text, bounds: bounds, undoManager: undoManager
             )
         } catch { present(error) }
     }
