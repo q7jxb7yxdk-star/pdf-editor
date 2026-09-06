@@ -937,6 +937,54 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     @discardableResult
+    func setAuthoredChoiceFormFieldOptions(
+        id: UUID, choices: [String], undoManager: UndoManager?
+    ) throws -> PDFFormDesignField {
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        let service = PDFFormDesignService()
+        guard let current = service.fields(in: pdfDocument).first(where: { $0.id == id }),
+              current.kind.isChoice else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let session = try makeFormDesignSession(
+            initialPageIndex: current.pageIndex, undoManager: undoManager
+        )
+        guard let index = session.fields.firstIndex(where: { $0.id == id }) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        var fields = session.fields
+        fields[index].choices = choices
+        guard let page = session.sourceDocument.page(at: fields[index].pageIndex) else {
+            throw PDFFormDesignError.documentChanged
+        }
+        let fittedSize = fields[index].kind.placementSize(
+            choices: choices, fontSize: fields[index].fontSize
+        )
+        fields[index].bounds = PDFFormPageGeometry(
+            cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+        ).clamped(
+            CGRect(
+                x: fields[index].bounds.minX,
+                y: fields[index].bounds.minY,
+                width: fittedSize.width,
+                height: fields[index].bounds.height
+            ),
+            minimumDimension: fields[index].kind.minimumDimension
+        )
+        if !fields[index].value.isEmpty, !choices.contains(fields[index].value) {
+            fields[index].value = ""
+        }
+        if !fields[index].defaultValue.isEmpty,
+           !choices.contains(fields[index].defaultValue) {
+            fields[index].defaultValue = ""
+        }
+        try applyFormDesign(fields, session: session, undoManager: undoManager)
+        undoManager?.setActionName("Edit \(current.kind.title) Options")
+        return fields[index]
+    }
+
+    @discardableResult
     func setAuthoredFormFieldFontSize(
         id: UUID, fontSize: CGFloat, undoManager: UndoManager?
     ) throws -> PDFFormDesignField {
@@ -1083,14 +1131,31 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let registered = try service.registeredData(
             serialized, fields: fields, password: presentationPassword ?? authorizedPassword
         )
-        let candidate = try normalizePresentationSecurity(registered)
-        guard let reopened = PDFDocument(data: candidate) else {
-            throw PDFFormDesignError.verificationFailed
+        func reopenAndVerifyDesign(_ data: Data) throws -> PDFDocument {
+            guard let reopened = PDFDocument(data: data) else {
+                throw PDFFormDesignError.verificationFailed
+            }
+            try unlockForBookmarkEditing(reopened)
+            try service.verify(fields, in: reopened)
+            if fields.isEmpty { try service.verifyFieldTree(fields, in: reopened) }
+            return reopened
         }
-        try unlockForBookmarkEditing(reopened)
-        try service.verify(fields, in: reopened)
-        if fields.isEmpty { try service.verifyFieldTree(fields, in: reopened) }
-        try formService.verify(expectedFields, in: candidate, password: authorizedPassword)
+        var candidate = try normalizePresentationSecurity(registered)
+        let reopened: PDFDocument
+        do {
+            let direct = try reopenAndVerifyDesign(candidate)
+            try formService.verify(expectedFields, in: candidate, password: authorizedPassword)
+            reopened = direct
+        } catch {
+            // PDFKit can retain the edited Widget structure while dropping a
+            // Choice field value on serialization. Rebuild the field tree
+            // canonically, then require both design and value verification.
+            let canonical = try PDFFormFieldTreeWriter().write(serialized, fields: fields)
+            candidate = try normalizePresentationSecurity(canonical)
+            let repaired = try reopenAndVerifyDesign(candidate)
+            try formService.verify(expectedFields, in: candidate, password: authorizedPassword)
+            reopened = repaired
+        }
         guard reopened.isEncrypted == session.sourceDocument.isEncrypted,
               bookmarkService.snapshots(in: reopened) == bookmarkService.snapshots(in: working),
               bookmarkRoundTripPreservesPages(

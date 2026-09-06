@@ -3,6 +3,56 @@ import CoreText
 import QuartzCore
 import SwiftUI
 
+#if os(iOS)
+private final class AuthoredDropdownOverlay: UIView {
+    let fieldID: UUID
+    private let titleLabel = UILabel()
+    private let chevronView = UIImageView(image: UIImage(systemName: "chevron.down"))
+
+    init(fieldID: UUID) {
+        self.fieldID = fieldID
+        super.init(frame: .zero)
+        backgroundColor = .white
+        layer.borderWidth = 1
+        layer.borderColor = UIColor.black.cgColor
+        layer.cornerRadius = 2
+        titleLabel.textColor = .black
+        titleLabel.numberOfLines = 1
+        titleLabel.lineBreakMode = .byTruncatingTail
+        chevronView.tintColor = .black
+        chevronView.contentMode = .scaleAspectFit
+        addSubview(titleLabel)
+        addSubview(chevronView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    func configure(title: String, font: UIFont) {
+        titleLabel.text = title
+        titleLabel.font = font
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let chevronWidth: CGFloat = 14
+        chevronView.frame = CGRect(
+            x: bounds.maxX - chevronWidth - 7,
+            y: bounds.midY - chevronWidth / 2,
+            width: chevronWidth,
+            height: chevronWidth
+        )
+        titleLabel.frame = CGRect(
+            x: 7,
+            y: 2,
+            width: max(0, chevronView.frame.minX - 11),
+            height: max(0, bounds.height - 4)
+        )
+    }
+}
+#endif
+
 private struct PDFAnnotationActionBar: View {
     let annotation: PDFAnnotationSnapshot
     let onChangeColor: (PDFAnnotationColor) -> Void
@@ -223,9 +273,12 @@ private struct PDFAnnotationActionBar: View {
 private struct PDFFormFieldActionBar: View {
     let field: PDFFormDesignField
     let onChangeFontSize: (CGFloat) -> Void
+    let onChangeChoiceOptions: ([String]) -> Void
     let onDelete: () -> Void
 
     @State private var showsFontSizePicker = false
+    @State private var showsOptionsEditor = false
+    @State private var optionsText = ""
     private let fontSizeChoices: [CGFloat] = [8, 9, 10, 11, 12, 14, 18, 24, 30, 36, 48]
     private var fieldTitle: String { field.kind == .text ? "Textbox" : field.kind.title }
 
@@ -269,6 +322,47 @@ private struct PDFFormFieldActionBar: View {
                         }
                     }
                     .padding(8)
+                    .presentationCompactAdaptation(.popover)
+                }
+
+                Divider().frame(height: 18)
+            }
+
+            if field.kind.isChoice {
+                Button {
+                    optionsText = field.choices.joined(separator: "\n")
+                    showsOptionsEditor = true
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .frame(width: 32, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Edit options")
+                .accessibilityLabel("Edit Dropdown options")
+                .popover(isPresented: $showsOptionsEditor, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Options, one per line")
+                            .font(.headline)
+                        TextEditor(text: $optionsText)
+                            .frame(width: 220, height: 150)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.35))
+                            }
+                        HStack {
+                            Button("Cancel") { showsOptionsEditor = false }
+                            Spacer()
+                            Button("Apply") {
+                                showsOptionsEditor = false
+                                let choices = optionsText.components(separatedBy: .newlines)
+                                DispatchQueue.main.async {
+                                    onChangeChoiceOptions(choices)
+                                }
+                            }
+                        }
+                    }
+                    .padding(12)
                     .presentationCompactAdaptation(.popover)
                 }
 
@@ -712,6 +806,7 @@ struct PDFKitView: NSViewRepresentable {
     @Binding var selectedFormField: PDFFormDesignField?
     let onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
     let onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
+    let onSetFormFieldChoiceOptions: (PDFFormDesignField, [String]) -> Void
     let onDeleteFormField: (PDFFormDesignField) -> Void
     let onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
     let commentPlacementEnabled: Bool
@@ -808,6 +903,7 @@ struct PDFKitView: UIViewRepresentable {
     @Binding var selectedFormField: PDFFormDesignField?
     let onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
     let onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
+    let onSetFormFieldChoiceOptions: (PDFFormDesignField, [String]) -> Void
     let onDeleteFormField: (PDFFormDesignField) -> Void
     let onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
     let commentPlacementEnabled: Bool
@@ -872,6 +968,7 @@ private extension PDFKitView {
             selectedFormField: $selectedFormField,
             onSetFormFieldBounds: onSetFormFieldBounds,
             onSetFormFieldFontSize: onSetFormFieldFontSize,
+            onSetFormFieldChoiceOptions: onSetFormFieldChoiceOptions,
             onDeleteFormField: onDeleteFormField,
             onCommitTextFormField: onCommitTextFormField,
             commentPlacementEnabled: commentPlacementEnabled,
@@ -1010,6 +1107,7 @@ private extension PDFKitView {
         coordinator.selectedFormField = $selectedFormField
         coordinator.onSetFormFieldBounds = onSetFormFieldBounds
         coordinator.onSetFormFieldFontSize = onSetFormFieldFontSize
+        coordinator.onSetFormFieldChoiceOptions = onSetFormFieldChoiceOptions
         coordinator.onDeleteFormField = onDeleteFormField
         coordinator.onCommitTextFormField = onCommitTextFormField
         coordinator.commentPlacementEnabled = commentPlacementEnabled
@@ -1154,6 +1252,7 @@ extension PDFKitView {
         var selectedFormField: Binding<PDFFormDesignField?>
         var onSetFormFieldBounds: (PDFFormDesignField, CGRect) -> Void
         var onSetFormFieldFontSize: (PDFFormDesignField, CGFloat) -> Void
+        var onSetFormFieldChoiceOptions: (PDFFormDesignField, [String]) -> Void
         var onDeleteFormField: (PDFFormDesignField) -> Void
         var onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
         var commentPlacementEnabled: Bool {
@@ -1380,6 +1479,7 @@ extension PDFKitView {
         private var formTextEditor: UITextView?
         private var formTextEditingField: PDFFormDesignField?
         private var formTextDisplayViews: [UUID: UITextView] = [:]
+        private var formDropdownDisplayViews: [UUID: AuthoredDropdownOverlay] = [:]
         private weak var formTextDisplayDocument: PDFDocument?
 #endif
         private enum ActionBarIdentity: Equatable {
@@ -1433,6 +1533,7 @@ extension PDFKitView {
             selectedFormField: Binding<PDFFormDesignField?>,
             onSetFormFieldBounds: @escaping (PDFFormDesignField, CGRect) -> Void,
             onSetFormFieldFontSize: @escaping (PDFFormDesignField, CGFloat) -> Void,
+            onSetFormFieldChoiceOptions: @escaping (PDFFormDesignField, [String]) -> Void,
             onDeleteFormField: @escaping (PDFFormDesignField) -> Void,
             onCommitTextFormField: @escaping (PDFFormDesignField, String, CGRect) -> Void,
             commentPlacementEnabled: Bool,
@@ -1476,6 +1577,7 @@ extension PDFKitView {
             self.selectedFormField = selectedFormField
             self.onSetFormFieldBounds = onSetFormFieldBounds
             self.onSetFormFieldFontSize = onSetFormFieldFontSize
+            self.onSetFormFieldChoiceOptions = onSetFormFieldChoiceOptions
             self.onDeleteFormField = onDeleteFormField
             self.onCommitTextFormField = onCommitTextFormField
             self.commentPlacementEnabled = commentPlacementEnabled
@@ -1904,7 +2006,23 @@ extension PDFKitView {
             }
         }
 
-        #if os(iOS)
+#if os(iOS)
+        private func makePDFScrollPansWaitForFormPan(
+            in view: UIView,
+            formPan: UIPanGestureRecognizer
+        ) {
+            if let scrollView = view as? UIScrollView,
+               scrollView.panGestureRecognizer !== formPan {
+                // When a drag starts inside an authored field, the canvas pan
+                // decides first. It fails immediately elsewhere, so ordinary
+                // PDF scrolling continues normally.
+                scrollView.panGestureRecognizer.require(toFail: formPan)
+            }
+            view.subviews.forEach {
+                self.makePDFScrollPansWaitForFormPan(in: $0, formPan: formPan)
+            }
+        }
+
         private func beginAuthoredTextEditing(_ field: PDFFormDesignField) {
             guard let pdfView,
                   let document = pdfView.document,
@@ -1962,21 +2080,32 @@ extension PDFKitView {
             if formTextDisplayDocument !== document {
                 formTextDisplayViews.values.forEach { $0.removeFromSuperview() }
                 formTextDisplayViews.removeAll()
+                formDropdownDisplayViews.values.forEach { $0.removeFromSuperview() }
+                formDropdownDisplayViews.removeAll()
                 formTextDisplayDocument = document
             }
 
-            let fields = PDFFormDesignService().fields(in: document)
-                .filter { $0.kind == .text }
-            let fieldIDs = Set(fields.map(\.id))
-            let staleIDs = formTextDisplayViews.keys.filter { !fieldIDs.contains($0) }
+            let authoredFields = PDFFormDesignService().fields(in: document)
+            let textFields = authoredFields.filter { $0.kind == .text }
+            let dropdownFields = authoredFields.filter { $0.kind == .dropdown }
+            let textIDs = Set(textFields.map(\.id))
+            let staleIDs = formTextDisplayViews.keys.filter { !textIDs.contains($0) }
             for id in staleIDs {
                 formTextDisplayViews[id]?.removeFromSuperview()
                 formTextDisplayViews.removeValue(forKey: id)
             }
+            let dropdownIDs = Set(dropdownFields.map(\.id))
+            let staleDropdownIDs = formDropdownDisplayViews.keys.filter {
+                !dropdownIDs.contains($0)
+            }
+            for id in staleDropdownIDs {
+                formDropdownDisplayViews[id]?.removeFromSuperview()
+                formDropdownDisplayViews.removeValue(forKey: id)
+            }
 
             let identifierKey = PDFAnnotationKey(rawValue: "/PDFEditorFormID")
             let displayScale = max(pdfView.scaleFactor, 0.01)
-            for field in fields {
+            for field in textFields {
                 guard let page = document.page(at: field.pageIndex) else { continue }
                 page.annotations.first(where: {
                     ($0.value(forAnnotationKey: identifierKey) as? String)
@@ -2002,12 +2131,84 @@ extension PDFKitView {
                     if view.text != field.value { view.text = field.value }
                 }
             }
+            for field in dropdownFields {
+                guard let page = document.page(at: field.pageIndex) else { continue }
+                page.annotations.first(where: {
+                    ($0.value(forAnnotationKey: identifierKey) as? String)
+                        .flatMap(UUID.init(uuidString:)) == field.id
+                })?.shouldDisplay = false
+
+                let dropdownView = formDropdownDisplayViews[field.id] ?? AuthoredDropdownOverlay(fieldID: field.id)
+                if formDropdownDisplayViews[field.id] == nil {
+                    let tap = UITapGestureRecognizer(
+                        target: self, action: #selector(handleAuthoredDropdownTap(_:))
+                    )
+                    let dragPan = UIPanGestureRecognizer(
+                        target: self, action: #selector(handlePan(_:))
+                    )
+                    tap.require(toFail: dragPan)
+                    tap.delegate = self
+                    dragPan.delegate = self
+                    dropdownView.addGestureRecognizer(tap)
+                    dropdownView.addGestureRecognizer(dragPan)
+                    pdfView.addSubview(dropdownView)
+                    makePDFScrollPansWaitForFormPan(in: pdfView, formPan: dragPan)
+                    formDropdownDisplayViews[field.id] = dropdownView
+                }
+                dropdownView.frame = pdfView.convert(field.bounds, from: page).standardized
+                dropdownView.configure(
+                    title: field.value,
+                    font: UIFont.systemFont(ofSize: field.fontSize * displayScale)
+                )
+            }
             pdfView.setNeedsDisplay()
+        }
+
+        private func selectAuthoredDropdownOption(_ option: String, fieldID: UUID) {
+            guard let pdfView, let document = pdfView.document,
+                  let field = PDFFormDesignService().fields(in: document).first(where: {
+                      $0.id == fieldID && $0.kind == .dropdown && $0.choices.contains(option)
+                  }),
+                  let page = document.page(at: field.pageIndex) else { return }
+            let identifierKey = PDFAnnotationKey(rawValue: "/PDFEditorFormID")
+            guard let annotation = page.annotations.first(where: {
+                ($0.value(forAnnotationKey: identifierKey) as? String)
+                    .flatMap(UUID.init(uuidString:)) == fieldID
+            }) else { return }
+            beginAcroFormInteractionIfNeeded()
+            annotation.widgetStringValue = option
+            var updatedField = field
+            updatedField.value = option
+            selectedFormField.wrappedValue = updatedField
+            scheduleAcroFormChangeCheck()
+            refreshOverlay()
+        }
+
+        @objc private func handleAuthoredDropdownTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended,
+                  let dropdownView = recognizer.view as? AuthoredDropdownOverlay,
+                  let pdfView,
+                  let document = pdfView.document,
+                  let field = PDFFormDesignService().fields(in: document)
+                    .first(where: { $0.id == dropdownView.fieldID && $0.kind == .dropdown }) else { return }
+            selectAuthoredFormField(field, in: pdfView)
+            let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+            field.choices.forEach { option in
+                alert.addAction(UIAlertAction(title: option, style: .default) { [weak self] _ in
+                    self?.selectAuthoredDropdownOption(option, fieldID: field.id)
+                })
+            }
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            alert.popoverPresentationController?.sourceView = dropdownView
+            alert.popoverPresentationController?.sourceRect = dropdownView.bounds
+            pdfView.window?.rootViewController?.present(alert, animated: true)
         }
 
         private func removeAuthoredTextDisplays() {
             formTextDisplayViews.values.forEach { $0.removeFromSuperview() }
             formTextDisplayViews.removeAll()
+            formDropdownDisplayViews.values.forEach { $0.removeFromSuperview() }
+            formDropdownDisplayViews.removeAll()
             formTextEditor = nil
             formTextEditingField = nil
             formTextDisplayDocument = nil
@@ -2319,6 +2520,11 @@ extension PDFKitView {
                 onChangeFontSize: { [weak self] fontSize in
                     guard let self else { return }
                     self.onSetFormFieldFontSize(field, fontSize)
+                    self.scheduleOverlayRefresh()
+                },
+                onChangeChoiceOptions: { [weak self] choices in
+                    guard let self else { return }
+                    self.onSetFormFieldChoiceOptions(field, choices)
                     self.scheduleOverlayRefresh()
                 },
                 onDelete: { [weak self] in
@@ -5607,6 +5813,10 @@ extension PDFKitView {
                 $0.delegate = self
                 pdfView.addGestureRecognizer($0)
             }
+            DispatchQueue.main.async { [weak self, weak pdfView, weak pan] in
+                guard let self, let pdfView, let pan else { return }
+                self.makePDFScrollPansWaitForFormPan(in: pdfView, formPan: pan)
+            }
         }
 
         @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -6354,11 +6564,22 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
             otherGestureRecognizer is UITapGestureRecognizer {
             return true
         }
-        guard selectedFormField.wrappedValue?.kind == .text else { return false }
         let canvasPanParticipates = gestures.contains {
             ($0 === gestureRecognizer || $0 === otherGestureRecognizer) &&
                 $0 is UIPanGestureRecognizer
+        } || formDropdownDisplayViews.values.contains { button in
+            button.gestureRecognizers?.contains {
+                ($0 === gestureRecognizer || $0 === otherGestureRecognizer) &&
+                    $0 is UIPanGestureRecognizer
+            } == true
         }
+        // Choice Widgets use PDFKit's native iOS controls. Their gesture can
+        // otherwise prevent the canvas pan from beginning, leaving an
+        // app-authored Dropdown selected but impossible to move or resize.
+        if canvasPanParticipates, selectedFormField.wrappedValue?.kind.isChoice == true {
+            return true
+        }
+        guard selectedFormField.wrappedValue?.kind == .text else { return false }
         return canvasPanParticipates &&
             (gestureRecognizer is UIPanGestureRecognizer ||
              otherGestureRecognizer is UIPanGestureRecognizer)

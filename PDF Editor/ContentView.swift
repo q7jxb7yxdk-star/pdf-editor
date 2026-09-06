@@ -1138,6 +1138,7 @@ struct ContentView: View {
                     selectedFormField: $selectedFormField,
                     onSetFormFieldBounds: setFormFieldBounds,
                     onSetFormFieldFontSize: setFormFieldFontSize,
+                    onSetFormFieldChoiceOptions: setFormFieldChoiceOptions,
                     onDeleteFormField: deleteFormField,
                     onCommitTextFormField: commitTextFormField,
                     commentPlacementEnabled: commentPlacementEnabled,
@@ -3372,6 +3373,17 @@ struct ContentView: View {
         do {
             selectedFormField = try document.setAuthoredFormFieldFontSize(
                 id: field.id, fontSize: fontSize, undoManager: undoManager
+            )
+        } catch { present(error) }
+    }
+
+    private func setFormFieldChoiceOptions(
+        _ field: PDFFormDesignField, choices: [String]
+    ) {
+        guard field.kind.isChoice else { return }
+        do {
+            selectedFormField = try document.setAuthoredChoiceFormFieldOptions(
+                id: field.id, choices: choices, undoManager: undoManager
             )
         } catch { present(error) }
     }
