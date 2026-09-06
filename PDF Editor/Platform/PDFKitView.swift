@@ -4,7 +4,7 @@ import QuartzCore
 import SwiftUI
 
 #if os(iOS)
-private final class AuthoredDropdownOverlay: UIView {
+private final class AuthoredChoiceOverlay: UIView {
     let fieldID: UUID
     private let titleLabel = UILabel()
     private let chevronView = UIImageView(image: UIImage(systemName: "chevron.down"))
@@ -49,6 +49,77 @@ private final class AuthoredDropdownOverlay: UIView {
             width: max(0, chevronView.frame.minX - 11),
             height: max(0, bounds.height - 4)
         )
+    }
+}
+
+private final class AuthoredListBoxOverlay: UIView {
+    let fieldID: UUID
+    private let stackView = UIStackView()
+    private var options: [String] = []
+
+    init(fieldID: UUID) {
+        self.fieldID = fieldID
+        super.init(frame: .zero)
+        backgroundColor = .white
+        layer.borderWidth = 1
+        layer.borderColor = UIColor.black.cgColor
+        layer.cornerRadius = 2
+        stackView.axis = .vertical
+        stackView.distribution = .fillEqually
+        stackView.alignment = .fill
+        stackView.spacing = 0
+        addSubview(stackView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    func configure(choices: [String], selected: String, font: UIFont) {
+        guard options != choices || stackView.arrangedSubviews.count != choices.count else {
+            updateLabels(selected: selected, font: font)
+            return
+        }
+        options = choices
+        stackView.arrangedSubviews.forEach { label in
+            stackView.removeArrangedSubview(label)
+            label.removeFromSuperview()
+        }
+        choices.forEach { option in
+            let label = UILabel()
+            label.text = option
+            label.numberOfLines = 1
+            label.lineBreakMode = .byTruncatingTail
+            label.textAlignment = .left
+            label.isUserInteractionEnabled = false
+            stackView.addArrangedSubview(label)
+        }
+        updateLabels(selected: selected, font: font)
+        setNeedsLayout()
+    }
+
+    func option(at location: CGPoint) -> String? {
+        guard !options.isEmpty, bounds.contains(location) else { return nil }
+        let index = min(
+            max(Int(location.y / max(bounds.height / CGFloat(options.count), 1)), 0),
+            options.count - 1
+        )
+        return options[index]
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        stackView.frame = bounds.insetBy(dx: 3, dy: 2)
+    }
+
+    private func updateLabels(selected: String, font: UIFont) {
+        for (index, view) in stackView.arrangedSubviews.enumerated() {
+            guard let label = view as? UILabel else { continue }
+            let isSelected = options.indices.contains(index) && options[index] == selected
+            label.font = font
+            label.textColor = isSelected ? .white : .black
+            label.backgroundColor = isSelected
+                ? UIColor.systemBlue.withAlphaComponent(0.9) : .clear
+        }
     }
 }
 #endif
@@ -1479,7 +1550,8 @@ extension PDFKitView {
         private var formTextEditor: UITextView?
         private var formTextEditingField: PDFFormDesignField?
         private var formTextDisplayViews: [UUID: UITextView] = [:]
-        private var formDropdownDisplayViews: [UUID: AuthoredDropdownOverlay] = [:]
+        private var formDropdownDisplayViews: [UUID: AuthoredChoiceOverlay] = [:]
+        private var formListBoxDisplayViews: [UUID: AuthoredListBoxOverlay] = [:]
         private weak var formTextDisplayDocument: PDFDocument?
 #endif
         private enum ActionBarIdentity: Equatable {
@@ -2082,12 +2154,15 @@ extension PDFKitView {
                 formTextDisplayViews.removeAll()
                 formDropdownDisplayViews.values.forEach { $0.removeFromSuperview() }
                 formDropdownDisplayViews.removeAll()
+                formListBoxDisplayViews.values.forEach { $0.removeFromSuperview() }
+                formListBoxDisplayViews.removeAll()
                 formTextDisplayDocument = document
             }
 
             let authoredFields = PDFFormDesignService().fields(in: document)
             let textFields = authoredFields.filter { $0.kind == .text }
             let dropdownFields = authoredFields.filter { $0.kind == .dropdown }
+            let listBoxFields = authoredFields.filter { $0.kind == .listBox }
             let textIDs = Set(textFields.map(\.id))
             let staleIDs = formTextDisplayViews.keys.filter { !textIDs.contains($0) }
             for id in staleIDs {
@@ -2101,6 +2176,14 @@ extension PDFKitView {
             for id in staleDropdownIDs {
                 formDropdownDisplayViews[id]?.removeFromSuperview()
                 formDropdownDisplayViews.removeValue(forKey: id)
+            }
+            let listBoxIDs = Set(listBoxFields.map(\.id))
+            let staleListBoxIDs = formListBoxDisplayViews.keys.filter {
+                !listBoxIDs.contains($0)
+            }
+            for id in staleListBoxIDs {
+                formListBoxDisplayViews[id]?.removeFromSuperview()
+                formListBoxDisplayViews.removeValue(forKey: id)
             }
 
             let identifierKey = PDFAnnotationKey(rawValue: "/PDFEditorFormID")
@@ -2138,10 +2221,10 @@ extension PDFKitView {
                         .flatMap(UUID.init(uuidString:)) == field.id
                 })?.shouldDisplay = false
 
-                let dropdownView = formDropdownDisplayViews[field.id] ?? AuthoredDropdownOverlay(fieldID: field.id)
+                let dropdownView = formDropdownDisplayViews[field.id] ?? AuthoredChoiceOverlay(fieldID: field.id)
                 if formDropdownDisplayViews[field.id] == nil {
                     let tap = UITapGestureRecognizer(
-                        target: self, action: #selector(handleAuthoredDropdownTap(_:))
+                        target: self, action: #selector(handleAuthoredChoiceTap(_:))
                     )
                     let dragPan = UIPanGestureRecognizer(
                         target: self, action: #selector(handlePan(_:))
@@ -2161,13 +2244,45 @@ extension PDFKitView {
                     font: UIFont.systemFont(ofSize: field.fontSize * displayScale)
                 )
             }
+            for field in listBoxFields {
+                guard let page = document.page(at: field.pageIndex) else { continue }
+                page.annotations.first(where: {
+                    ($0.value(forAnnotationKey: identifierKey) as? String)
+                        .flatMap(UUID.init(uuidString:)) == field.id
+                })?.shouldDisplay = false
+
+                let listBoxView = formListBoxDisplayViews[field.id]
+                    ?? AuthoredListBoxOverlay(fieldID: field.id)
+                if formListBoxDisplayViews[field.id] == nil {
+                    let tap = UITapGestureRecognizer(
+                        target: self, action: #selector(handleAuthoredListBoxTap(_:))
+                    )
+                    let dragPan = UIPanGestureRecognizer(
+                        target: self, action: #selector(handlePan(_:))
+                    )
+                    tap.require(toFail: dragPan)
+                    tap.delegate = self
+                    dragPan.delegate = self
+                    listBoxView.addGestureRecognizer(tap)
+                    listBoxView.addGestureRecognizer(dragPan)
+                    pdfView.addSubview(listBoxView)
+                    makePDFScrollPansWaitForFormPan(in: pdfView, formPan: dragPan)
+                    formListBoxDisplayViews[field.id] = listBoxView
+                }
+                listBoxView.frame = pdfView.convert(field.bounds, from: page).standardized
+                listBoxView.configure(
+                    choices: field.choices,
+                    selected: field.value,
+                    font: UIFont.systemFont(ofSize: field.fontSize * displayScale)
+                )
+            }
             pdfView.setNeedsDisplay()
         }
 
-        private func selectAuthoredDropdownOption(_ option: String, fieldID: UUID) {
+        private func selectAuthoredChoiceOption(_ option: String, fieldID: UUID) {
             guard let pdfView, let document = pdfView.document,
                   let field = PDFFormDesignService().fields(in: document).first(where: {
-                      $0.id == fieldID && $0.kind == .dropdown && $0.choices.contains(option)
+                      $0.id == fieldID && $0.kind.isChoice && $0.choices.contains(option)
                   }),
                   let page = document.page(at: field.pageIndex) else { return }
             let identifierKey = PDFAnnotationKey(rawValue: "/PDFEditorFormID")
@@ -2184,24 +2299,37 @@ extension PDFKitView {
             refreshOverlay()
         }
 
-        @objc private func handleAuthoredDropdownTap(_ recognizer: UITapGestureRecognizer) {
+        @objc private func handleAuthoredChoiceTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended,
-                  let dropdownView = recognizer.view as? AuthoredDropdownOverlay,
+                  let choiceView = recognizer.view as? AuthoredChoiceOverlay,
                   let pdfView,
                   let document = pdfView.document,
                   let field = PDFFormDesignService().fields(in: document)
-                    .first(where: { $0.id == dropdownView.fieldID && $0.kind == .dropdown }) else { return }
+                    .first(where: { $0.id == choiceView.fieldID && $0.kind.isChoice }) else { return }
             selectAuthoredFormField(field, in: pdfView)
             let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
             field.choices.forEach { option in
                 alert.addAction(UIAlertAction(title: option, style: .default) { [weak self] _ in
-                    self?.selectAuthoredDropdownOption(option, fieldID: field.id)
+                    self?.selectAuthoredChoiceOption(option, fieldID: field.id)
                 })
             }
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-            alert.popoverPresentationController?.sourceView = dropdownView
-            alert.popoverPresentationController?.sourceRect = dropdownView.bounds
+            alert.popoverPresentationController?.sourceView = choiceView
+            alert.popoverPresentationController?.sourceRect = choiceView.bounds
             pdfView.window?.rootViewController?.present(alert, animated: true)
+        }
+
+        @objc private func handleAuthoredListBoxTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended,
+                  let listBoxView = recognizer.view as? AuthoredListBoxOverlay,
+                  let pdfView,
+                  let document = pdfView.document,
+                  let field = PDFFormDesignService().fields(in: document).first(where: {
+                      $0.id == listBoxView.fieldID && $0.kind == .listBox
+                  }),
+                  let option = listBoxView.option(at: recognizer.location(in: listBoxView)) else { return }
+            selectAuthoredFormField(field, in: pdfView)
+            selectAuthoredChoiceOption(option, fieldID: field.id)
         }
 
         private func removeAuthoredTextDisplays() {
@@ -2209,6 +2337,8 @@ extension PDFKitView {
             formTextDisplayViews.removeAll()
             formDropdownDisplayViews.values.forEach { $0.removeFromSuperview() }
             formDropdownDisplayViews.removeAll()
+            formListBoxDisplayViews.values.forEach { $0.removeFromSuperview() }
+            formListBoxDisplayViews.removeAll()
             formTextEditor = nil
             formTextEditingField = nil
             formTextDisplayDocument = nil
@@ -6572,10 +6702,15 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
                 ($0 === gestureRecognizer || $0 === otherGestureRecognizer) &&
                     $0 is UIPanGestureRecognizer
             } == true
+        } || formListBoxDisplayViews.values.contains { button in
+            button.gestureRecognizers?.contains {
+                ($0 === gestureRecognizer || $0 === otherGestureRecognizer) &&
+                    $0 is UIPanGestureRecognizer
+            } == true
         }
-        // Choice Widgets use PDFKit's native iOS controls. Their gesture can
-        // otherwise prevent the canvas pan from beginning, leaving an
-        // app-authored Dropdown selected but impossible to move or resize.
+        // App-owned iOS choice overlays use a dedicated pan recognizer. Permit
+        // it to begin with the canvas pan so a selected Dropdown or List Box
+        // remains movable and the page scroll recognizer can wait for it.
         if canvasPanParticipates, selectedFormField.wrappedValue?.kind.isChoice == true {
             return true
         }
