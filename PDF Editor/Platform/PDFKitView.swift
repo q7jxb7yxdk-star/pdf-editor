@@ -761,7 +761,7 @@ struct PDFKitView: NSViewRepresentable {
 #elseif os(iOS)
 import UIKit
 
-private final class CheckboxDragPanGestureRecognizer: UIPanGestureRecognizer {
+private final class ButtonDragPanGestureRecognizer: UIPanGestureRecognizer {
     private(set) var initialTouchLocation = CGPoint.zero
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -1274,7 +1274,7 @@ extension PDFKitView {
             let wasEnabled: Bool
         }
         private var suspendedScrollGestures: [SuspendedScrollGesture] = []
-        private var checkboxDragCaptureView: UIView?
+        private var buttonDragCaptureView: UIView?
 #endif
 
 #if os(macOS)
@@ -1736,8 +1736,8 @@ extension PDFKitView {
 #endif
             removeAnnotationActionBar()
 #if os(iOS)
-            checkboxDragCaptureView?.removeFromSuperview()
-            checkboxDragCaptureView = nil
+            buttonDragCaptureView?.removeFromSuperview()
+            buttonDragCaptureView = nil
             removeAuthoredTextDisplays()
 #endif
             if let pdfView {
@@ -2140,7 +2140,7 @@ extension PDFKitView {
             }
             CATransaction.commit()
 #if os(iOS)
-            updateCheckboxDragCapture(for: selectedFormField.wrappedValue, bounds: displayBounds, in: pdfView)
+            updateButtonDragCapture(for: selectedFormField.wrappedValue, bounds: displayBounds, in: pdfView)
 #endif
             if let field = selectedFormField.wrappedValue {
                 updateFormFieldActionBar(
@@ -2236,8 +2236,8 @@ extension PDFKitView {
             handleLayers.forEach { $0.isHidden = hidden }
 #if os(iOS)
             if hidden {
-                checkboxDragCaptureView?.removeFromSuperview()
-                checkboxDragCaptureView = nil
+                buttonDragCaptureView?.removeFromSuperview()
+                buttonDragCaptureView = nil
             }
 #endif
             if hidden { removeAnnotationActionBar() }
@@ -2815,33 +2815,33 @@ extension PDFKitView {
             suspendedScrollGestures.removeAll()
         }
 
-        private func updateCheckboxDragCapture(
+        private func updateButtonDragCapture(
             for field: PDFFormDesignField?, bounds: CGRect, in pdfView: PDFView
         ) {
-            guard field?.kind == .checkBox else {
-                checkboxDragCaptureView?.removeFromSuperview()
-                checkboxDragCaptureView = nil
+            guard field?.kind.isButton == true else {
+                buttonDragCaptureView?.removeFromSuperview()
+                buttonDragCaptureView = nil
                 return
             }
             let captureView: UIView
-            if let checkboxDragCaptureView {
-                captureView = checkboxDragCaptureView
+            if let buttonDragCaptureView {
+                captureView = buttonDragCaptureView
             } else {
                 let view = UIView(frame: .zero)
                 view.backgroundColor = .clear
-                let pan = CheckboxDragPanGestureRecognizer(
-                    target: self, action: #selector(handleCheckboxDragCapturePan(_:))
+                let pan = ButtonDragPanGestureRecognizer(
+                    target: self, action: #selector(handleButtonDragCapturePan(_:))
                 )
                 view.addGestureRecognizer(pan)
                 pdfView.addSubview(view)
-                checkboxDragCaptureView = view
+                buttonDragCaptureView = view
                 captureView = view
             }
             captureView.frame = bounds
         }
 
-        @objc private func handleCheckboxDragCapturePan(
-            _ recognizer: CheckboxDragPanGestureRecognizer
+        @objc private func handleButtonDragCapturePan(
+            _ recognizer: ButtonDragPanGestureRecognizer
         ) {
             guard let pdfView, let captureView = recognizer.view else { return }
             let point = recognizer.location(in: pdfView)
@@ -6234,9 +6234,9 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         shouldReceive touch: UITouch
     ) -> Bool {
         guard !formPlacementActive else { return false }
-        if let checkboxDragCaptureView, let touchedView = touch.view,
-           touchedView === checkboxDragCaptureView ||
-            touchedView.isDescendant(of: checkboxDragCaptureView) {
+        if let buttonDragCaptureView, let touchedView = touch.view,
+           touchedView === buttonDragCaptureView ||
+            touchedView.isDescendant(of: buttonDragCaptureView) {
             return false
         }
         if let formTextEditor, let touchedView = touch.view,
