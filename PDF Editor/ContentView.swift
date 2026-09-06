@@ -533,10 +533,9 @@ struct ContentView: View {
     @State private var imageExportProgressCompleted = 0
     @State private var imageExportProgressTotal = 0
     @State private var isExportingImages = false
-    @State private var manualSaveExportDocument: PDFExportDocument?
     @State private var showsManualSaveExporter = false
+    @State private var manualSaveExportSourceURL: URL?
     @State private var pendingManualSave: PendingManualSave?
-    @State private var manualSaveDefaultFilename = "Untitled"
     @State private var saveURL: URL?
     @State private var didAdoptImportedDestination = false
     @State private var isAdoptingImportedDocument = false
@@ -1041,14 +1040,15 @@ struct ContentView: View {
         ) {
             handleFileImport($0)
         }
-        .fileExporter(
-            isPresented: $showsManualSaveExporter,
-            document: manualSaveExportDocument,
-            contentType: .pdf,
-            defaultFilename: manualSaveDefaultFilename
-        ) { result in
-            finishManualSaveExport(result)
-        }
+#if os(iOS)
+        .background(
+            NativePDFExportPresenter(
+                isPresented: $showsManualSaveExporter,
+                sourceURL: manualSaveExportSourceURL,
+                onCompletion: finishManualSaveExport
+            )
+        )
+#endif
         .fileExporter(
             isPresented: $showsSinglePageExporter,
             document: splitExportDocument,
@@ -1373,12 +1373,17 @@ struct ContentView: View {
                 .accessibilityLabel("Save")
 
                 Button(action: saveDocumentAs) {
-                    Image(systemName: "square.and.arrow.down.on.square")
-                        .frame(width: 44, height: 44)
+                    if isSaving {
+                        ProgressView()
+                            .frame(width: 44, height: 44)
+                    } else {
+                        Image(systemName: "square.and.arrow.down.on.square")
+                            .frame(width: 44, height: 44)
+                    }
                 }
                 .buttonStyle(.plain)
                 .disabled(isSaving)
-                .accessibilityLabel("Save As")
+                .accessibilityLabel(isSaving ? "Preparing Save As" : "Save As")
 
                 Button {
                     undoManager?.undo()
@@ -1451,12 +1456,16 @@ struct ContentView: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
             Button(action: saveDocumentAs) {
-                Image(systemName: "square.and.arrow.down.on.square")
+                if isSaving {
+                    ProgressView()
+                } else {
+                    Image(systemName: "square.and.arrow.down.on.square")
+                }
             }
             .buttonStyle(.plain)
             .disabled(isSaving)
             .help("Save As")
-            .accessibilityLabel("Save As")
+            .accessibilityLabel(isSaving ? "Preparing Save As" : "Save As")
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
@@ -1851,22 +1860,19 @@ struct ContentView: View {
                     isSaving = false
                 } else {
                     let defaultFilename = suggestedSaveFilename
-                    manualSaveDefaultFilename = defaultFilename
 #if os(macOS)
                     // The macOS new-destination path returns before starting
                     // this task, after presenting NSSavePanel immediately.
                     isSaving = false
 #else
                     pendingManualSave = pendingSave
-                    manualSaveExportDocument = PDFExportDocument(
+                    manualSaveExportSourceURL = try makeManualSaveExportFile(
                         data: data,
                         filename: "\(defaultFilename).pdf"
                     )
-                    Task { @MainActor in
-                        await Task.yield()
-                        guard manualSaveExportDocument != nil else { return }
-                        showsManualSaveExporter = true
-                    }
+                    await Task.yield()
+                    guard manualSaveExportSourceURL != nil else { return }
+                    showsManualSaveExporter = true
 #endif
                 }
             } catch {
@@ -2208,7 +2214,12 @@ struct ContentView: View {
     private func finishManualSaveExport(_ result: Result<URL, Error>) {
         func clearExportState() {
             showsManualSaveExporter = false
-            manualSaveExportDocument = nil
+            if let manualSaveExportSourceURL {
+                try? FileManager.default.removeItem(
+                    at: manualSaveExportSourceURL.deletingLastPathComponent()
+                )
+            }
+            manualSaveExportSourceURL = nil
             pendingManualSave = nil
             isSaving = false
         }
@@ -2237,6 +2248,25 @@ struct ContentView: View {
             present(error)
         }
     }
+
+#if os(iOS)
+    private func makeManualSaveExportFile(data: Data, filename: String) throws -> URL {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+            let fileURL = directoryURL.appendingPathComponent(filename)
+            try data.write(to: fileURL, options: .atomic)
+            return fileURL
+        } catch {
+            try? FileManager.default.removeItem(at: directoryURL)
+            throw error
+        }
+    }
+#endif
 
     private func handleToolAction(_ action: PDFToolAction) {
         leaveFullScreenReading()
