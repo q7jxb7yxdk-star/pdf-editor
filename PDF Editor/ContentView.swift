@@ -87,6 +87,102 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
 #if os(macOS)
 import AppKit
 
+private struct MacFullScreenPresentationView: NSViewRepresentable {
+    @Binding var isFullScreen: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isFullScreen: $isFullScreen)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = AttachmentView()
+        view.onWindowAttached = { [weak coordinator = context.coordinator] view in
+            coordinator?.attach(to: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isFullScreen = $isFullScreen
+        context.coordinator.attach(to: nsView)
+    }
+
+    final class Coordinator {
+        var isFullScreen: Binding<Bool>
+        private weak var window: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+        private var toolbarWasVisibleBeforeFullScreen: Bool?
+
+        init(isFullScreen: Binding<Bool>) {
+            self.isFullScreen = isFullScreen
+        }
+
+        func attach(to view: NSView) {
+            guard let newWindow = view.window, newWindow !== window else { return }
+            removeObservers()
+            window = newWindow
+            let center = NotificationCenter.default
+            observers = [
+                NSWindow.willEnterFullScreenNotification,
+                NSWindow.didExitFullScreenNotification
+            ].map { name in
+                center.addObserver(forName: name, object: newWindow, queue: .main) {
+                    [weak self, weak newWindow] _ in
+                    guard let self, let newWindow else { return }
+                    if name == NSWindow.willEnterFullScreenNotification {
+                        self.enterFullScreen(in: newWindow)
+                    } else {
+                        self.exitFullScreen(in: newWindow)
+                    }
+                }
+            }
+
+            if newWindow.styleMask.contains(.fullScreen) {
+                enterFullScreen(in: newWindow)
+            } else {
+                isFullScreen.wrappedValue = false
+            }
+        }
+
+        private func enterFullScreen(in window: NSWindow) {
+            if toolbarWasVisibleBeforeFullScreen == nil {
+                toolbarWasVisibleBeforeFullScreen = window.toolbar?.isVisible
+            }
+            window.toolbar?.isVisible = false
+            isFullScreen.wrappedValue = true
+        }
+
+        private func exitFullScreen(in window: NSWindow) {
+            isFullScreen.wrappedValue = false
+            if let toolbarWasVisibleBeforeFullScreen {
+                window.toolbar?.isVisible = toolbarWasVisibleBeforeFullScreen
+            }
+            toolbarWasVisibleBeforeFullScreen = nil
+        }
+
+        private func removeObservers() {
+            let center = NotificationCenter.default
+            observers.forEach(center.removeObserver)
+            observers.removeAll()
+        }
+
+        deinit {
+            removeObservers()
+        }
+    }
+
+    final class AttachmentView: NSView {
+        var onWindowAttached: ((NSView) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                onWindowAttached?(self)
+            }
+        }
+    }
+}
+
 @MainActor
 private final class PDFFormDesignFocusRecovery: ObservableObject {
     private weak var sourceWindow: NSWindow?
@@ -487,6 +583,8 @@ struct ContentView: View {
 #if os(iOS)
     @State private var showsDocumentFilename = true
     @State private var isFullScreenReading = false
+#else
+    @State private var isMacFullScreen = false
 #endif
 
     private let annotationService = PDFAnnotationService()
@@ -538,6 +636,9 @@ struct ContentView: View {
         fileTransferView
             .focusedValue(\.manualPDFSaveAction, saveDocument)
             .focusedValue(\.manualPDFSaveAsAction, saveDocumentAs)
+#if os(macOS)
+            .background(MacFullScreenPresentationView(isFullScreen: $isMacFullScreen))
+#endif
 #if os(iOS)
             .toolbar(isFullScreenReading ? .hidden : .visible, for: .navigationBar)
             .statusBar(hidden: isFullScreenReading)
@@ -596,7 +697,7 @@ struct ContentView: View {
         GeometryReader { proxy in
             if proxy.size.width >= (showsCommentList ? 1180 : 900) {
                 HStack(spacing: 0) {
-                    if showsToolPanel {
+                    if showsToolPanel && !isFullScreen {
                         toolSidebar
                             .frame(width: 200)
                         Divider()
@@ -618,7 +719,7 @@ struct ContentView: View {
                         bookmarkSidebar
                             .frame(width: 260)
                     }
-                    if !usesPhoneViewerControls {
+                    if !usesPhoneViewerControls && !isFullScreen {
                         Divider()
                         rightPanel
                             .frame(width: 52)
@@ -644,7 +745,7 @@ struct ContentView: View {
                                 width: min(260, max(220, proxy.size.width * 0.55))
                             )
                     }
-                    if !usesPhoneViewerControls {
+                    if !usesPhoneViewerControls && !isFullScreen {
                         Divider()
                         rightPanel
                             .frame(width: 52)
@@ -1220,7 +1321,7 @@ struct ContentView: View {
 #if os(iOS)
         isFullScreenReading
 #else
-        false
+        isMacFullScreen
 #endif
     }
 

@@ -560,6 +560,7 @@ private final class PDFTextMaskView: NSView {
 enum PDFViewerMode: Equatable {
     case singlePage
     case twoPage
+    case twoPageScrolling
     case scrolling
 }
 
@@ -760,6 +761,7 @@ import UIKit
 enum PDFViewerMode: Equatable {
     case singlePage
     case twoPage
+    case twoPageScrolling
     case scrolling
 }
 
@@ -1020,18 +1022,22 @@ private extension PDFKitView {
         switch viewerMode {
         case .singlePage: displayMode = .singlePage
         case .twoPage: displayMode = .twoUp
+        case .twoPageScrolling: displayMode = .twoUpContinuous
         case .scrolling: displayMode = .singlePageContinuous
         }
         guard pdfView.displayMode != displayMode else { return }
         pdfView.displayMode = displayMode
         pdfView.displayDirection = .vertical
         pdfView.displaysAsBook = false
-#if os(iOS)
+#if os(macOS)
+        pdfView.layoutSubtreeIfNeeded()
+        pdfView.documentView?.layoutSubtreeIfNeeded()
+#else
         pdfView.setNeedsLayout()
         pdfView.layoutIfNeeded()
+#endif
         pdfView.autoScales = false
         pdfView.autoScales = true
-#endif
     }
 
     func applyViewerCommand(to pdfView: PDFView, coordinator: Coordinator) {
@@ -1040,14 +1046,29 @@ private extension PDFKitView {
         coordinator.lastViewerCommandID = viewerCommand.id
         switch viewerCommand.action {
         case .fitPage:
+#if os(macOS)
+            pdfView.layoutSubtreeIfNeeded()
+            pdfView.documentView?.layoutSubtreeIfNeeded()
+#else
+            pdfView.setNeedsLayout()
+            pdfView.layoutIfNeeded()
+#endif
+            pdfView.autoScales = false
             pdfView.autoScales = true
         case .fitWidth:
             guard let page = pdfView.currentPage else { return }
-            pdfView.autoScales = false
+#if os(macOS)
+            pdfView.layoutSubtreeIfNeeded()
+#else
+            pdfView.layoutIfNeeded()
+#endif
+            guard pdfView.bounds.width > 28 else { return }
             let pageWidth = max(page.bounds(for: pdfView.displayBox).width, 1)
-            let availableWidth = max(pdfView.bounds.width - 28, 1)
+            let availableWidth = pdfView.bounds.width - 28
             let scale = availableWidth / pageWidth
-            pdfView.scaleFactor = min(max(scale, pdfView.minScaleFactor), pdfView.maxScaleFactor)
+            guard scale.isFinite, scale > 0 else { return }
+            pdfView.autoScales = false
+            pdfView.scaleFactor = scale
         case .zoomIn:
             pdfView.autoScales = false
             pdfView.zoomIn(nil)

@@ -896,31 +896,24 @@ struct PDFRightPanel: View {
                     action: onToggleBookmarks
                 )
                 iconButton(
-                    "Single-page view",
-                    systemImage: "doc",
-                    isSelected: viewerMode == .singlePage
-                ) {
-                    viewerMode = .singlePage
-                }
-                iconButton(
-                    "Two-page view",
+                    "Two Page",
                     systemImage: "book.pages",
                     isSelected: viewerMode == .twoPage
                 ) {
-                    viewerMode = .twoPage
+                    selectViewerMode(.twoPage)
                 }
                 iconButton(
-                    "View with scrolling",
-                    systemImage: "scroll",
-                    isSelected: viewerMode == .scrolling
+                    "Two Page Scrolling",
+                    systemImage: "rectangle.split.2x1",
+                    isSelected: viewerMode == .twoPageScrolling
                 ) {
-                    viewerMode = .scrolling
+                    selectViewerMode(.twoPageScrolling)
                 }
-                iconButton("Fit one page", systemImage: "rectangle.inset.filled") {
-                    onViewerCommand(.fitPage)
+                iconButton("Fit Width", systemImage: "arrow.left.and.right") {
+                    fitWidth()
                 }
-                iconButton("Fit to width", systemImage: "arrow.left.and.right") {
-                    onViewerCommand(.fitWidth)
+                iconButton("Fit Page", systemImage: "rectangle.inset.filled") {
+                    fitPage()
                 }
                 iconButton(
                     isFullScreen ? "Exit full screen" : "Full screen",
@@ -1021,6 +1014,21 @@ struct PDFRightPanel: View {
         guard (0..<pageCount).contains(pageIndex) else { return }
         pageNumberText = String(pageIndex + 1)
         selectedPageIndex = pageIndex
+    }
+
+    private func selectViewerMode(_ mode: PDFViewerMode) {
+        viewerMode = mode
+        onViewerCommand(.fitPage)
+    }
+
+    private func fitWidth() {
+        viewerMode = .scrolling
+        onViewerCommand(.fitWidth)
+    }
+
+    private func fitPage() {
+        viewerMode = .singlePage
+        onViewerCommand(.fitPage)
     }
 
     private func iconButton(
