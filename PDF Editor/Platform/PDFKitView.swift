@@ -231,47 +231,49 @@ private struct PDFFormFieldActionBar: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Button {
-                showsFontSizePicker.toggle()
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "textformat.size")
-                    Text("\(Int(field.fontSize))")
-                        .monospacedDigit()
-                }
-                .frame(minWidth: 48, minHeight: 28)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Change font size")
-            .accessibilityLabel("Change font size")
-            .accessibilityValue("\(Int(field.fontSize)) points")
-            .popover(isPresented: $showsFontSizePicker, arrowEdge: .bottom) {
-                VStack(spacing: 2) {
-                    ForEach(fontSizeChoices, id: \.self) { fontSize in
-                        Button {
-                            showsFontSizePicker = false
-                            DispatchQueue.main.async { onChangeFontSize(fontSize) }
-                        } label: {
-                            HStack {
-                                Text("\(Int(fontSize)) pt")
-                                Spacer()
-                                if abs(fontSize - field.fontSize) < 0.01 {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                            .padding(.horizontal, 10)
-                            .frame(minWidth: 110, minHeight: 32)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+            if field.kind == .text || field.kind.isChoice {
+                Button {
+                    showsFontSizePicker.toggle()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "textformat.size")
+                        Text("\(Int(field.fontSize))")
+                            .monospacedDigit()
                     }
+                    .frame(minWidth: 48, minHeight: 28)
+                    .contentShape(Rectangle())
                 }
-                .padding(8)
-                .presentationCompactAdaptation(.popover)
-            }
+                .buttonStyle(.plain)
+                .help("Change font size")
+                .accessibilityLabel("Change font size")
+                .accessibilityValue("\(Int(field.fontSize)) points")
+                .popover(isPresented: $showsFontSizePicker, arrowEdge: .bottom) {
+                    VStack(spacing: 2) {
+                        ForEach(fontSizeChoices, id: \.self) { fontSize in
+                            Button {
+                                showsFontSizePicker = false
+                                DispatchQueue.main.async { onChangeFontSize(fontSize) }
+                            } label: {
+                                HStack {
+                                    Text("\(Int(fontSize)) pt")
+                                    Spacer()
+                                    if abs(fontSize - field.fontSize) < 0.01 {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .frame(minWidth: 110, minHeight: 32)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(8)
+                    .presentationCompactAdaptation(.popover)
+                }
 
-            Divider().frame(height: 18)
+                Divider().frame(height: 18)
+            }
 
             Button(role: .destructive) {
                 onDelete()
@@ -758,6 +760,17 @@ struct PDFKitView: NSViewRepresentable {
 }
 #elseif os(iOS)
 import UIKit
+
+private final class CheckboxDragPanGestureRecognizer: UIPanGestureRecognizer {
+    private(set) var initialTouchLocation = CGPoint.zero
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if let touch = touches.first {
+            initialTouchLocation = touch.location(in: view)
+        }
+        super.touchesBegan(touches, with: event)
+    }
+}
 
 enum PDFViewerMode: Equatable {
     case singlePage
@@ -1261,6 +1274,7 @@ extension PDFKitView {
             let wasEnabled: Bool
         }
         private var suspendedScrollGestures: [SuspendedScrollGesture] = []
+        private var checkboxDragCaptureView: UIView?
 #endif
 
 #if os(macOS)
@@ -1722,8 +1736,8 @@ extension PDFKitView {
 #endif
             removeAnnotationActionBar()
 #if os(iOS)
-            // Finishing inline editing can refresh gesture availability during teardown.
-            restoreFreehandScrollGestures()
+            checkboxDragCaptureView?.removeFromSuperview()
+            checkboxDragCaptureView = nil
             removeAuthoredTextDisplays()
 #endif
             if let pdfView {
@@ -2125,6 +2139,9 @@ extension PDFKitView {
                 outlineLayer.isHidden = true
             }
             CATransaction.commit()
+#if os(iOS)
+            updateCheckboxDragCapture(for: selectedFormField.wrappedValue, bounds: displayBounds, in: pdfView)
+#endif
             if let field = selectedFormField.wrappedValue {
                 updateFormFieldActionBar(
                     for: field, above: displayBounds, in: pdfView
@@ -2217,6 +2234,12 @@ extension PDFKitView {
         private func setOverlayHidden(_ hidden: Bool) {
             outlineLayer.isHidden = hidden
             handleLayers.forEach { $0.isHidden = hidden }
+#if os(iOS)
+            if hidden {
+                checkboxDragCaptureView?.removeFromSuperview()
+                checkboxDragCaptureView = nil
+            }
+#endif
             if hidden { removeAnnotationActionBar() }
         }
 
@@ -2291,10 +2314,6 @@ extension PDFKitView {
             above fieldBounds: CGRect,
             in pdfView: PDFView
         ) {
-            guard field.kind == .text || field.kind.isChoice else {
-                removeAnnotationActionBar()
-                return
-            }
             let actionBar = PDFFormFieldActionBar(
                 field: field,
                 onChangeFontSize: { [weak self] fontSize in
@@ -2794,6 +2813,54 @@ extension PDFKitView {
                 state.recognizer?.isEnabled = state.wasEnabled
             }
             suspendedScrollGestures.removeAll()
+        }
+
+        private func updateCheckboxDragCapture(
+            for field: PDFFormDesignField?, bounds: CGRect, in pdfView: PDFView
+        ) {
+            guard field?.kind == .checkBox else {
+                checkboxDragCaptureView?.removeFromSuperview()
+                checkboxDragCaptureView = nil
+                return
+            }
+            let captureView: UIView
+            if let checkboxDragCaptureView {
+                captureView = checkboxDragCaptureView
+            } else {
+                let view = UIView(frame: .zero)
+                view.backgroundColor = .clear
+                let pan = CheckboxDragPanGestureRecognizer(
+                    target: self, action: #selector(handleCheckboxDragCapturePan(_:))
+                )
+                view.addGestureRecognizer(pan)
+                pdfView.addSubview(view)
+                checkboxDragCaptureView = view
+                captureView = view
+            }
+            captureView.frame = bounds
+        }
+
+        @objc private func handleCheckboxDragCapturePan(
+            _ recognizer: CheckboxDragPanGestureRecognizer
+        ) {
+            guard let pdfView, let captureView = recognizer.view else { return }
+            let point = recognizer.location(in: pdfView)
+            switch recognizer.state {
+            case .began:
+                let startPoint = captureView.convert(
+                    recognizer.initialTouchLocation, to: pdfView
+                )
+                beginPan(at: startPoint)
+            case .changed:
+                updatePan(at: point, finished: false)
+            case .ended:
+                updatePan(at: point, finished: true)
+            case .cancelled, .failed:
+                clearInteraction()
+                refreshOverlay()
+            default:
+                break
+            }
         }
 #endif
 
@@ -5232,7 +5299,9 @@ extension PDFKitView {
                     refreshOverlay(previewBounds: bounds)
                     let changed = abs(bounds.minX - interactionStartBounds.minX) +
                         abs(bounds.minY - interactionStartBounds.minY) > 0.01
-                    if finished, changed { onSetFormFieldBounds(field, bounds) }
+                    if finished, changed {
+                        onSetFormFieldBounds(field, bounds)
+                    }
                 } else {
                     refreshOverlay(previewBounds: translatedBounds)
                     if finished, abs(offset.width) + abs(offset.height) > 0.01,
@@ -6165,6 +6234,11 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         shouldReceive touch: UITouch
     ) -> Bool {
         guard !formPlacementActive else { return false }
+        if let checkboxDragCaptureView, let touchedView = touch.view,
+           touchedView === checkboxDragCaptureView ||
+            touchedView.isDescendant(of: checkboxDragCaptureView) {
+            return false
+        }
         if let formTextEditor, let touchedView = touch.view,
            touchedView === formTextEditor || touchedView.isDescendant(of: formTextEditor) {
             return false
