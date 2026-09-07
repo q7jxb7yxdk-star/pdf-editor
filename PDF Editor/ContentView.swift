@@ -553,6 +553,7 @@ struct ContentView: View {
     @StateObject private var recentDocuments = RecentPDFDocuments()
 #endif
     @State private var showsSignatureLibrary = false
+    @State private var showsSignatureLibraryAfterToolsDismissal = false
     @State private var selectedESignPlacement: ESignPlacement?
     @State private var freeTextPlacementEnabled = false
     @State private var showsOCRResult = false
@@ -755,6 +756,10 @@ struct ContentView: View {
                     if let kind = pendingFormDesignKindAfterTools {
                         pendingFormDesignKindAfterTools = nil
                         beginFormFieldPlacement(kind)
+                    }
+                    if showsSignatureLibraryAfterToolsDismissal {
+                        showsSignatureLibraryAfterToolsDismissal = false
+                        showsSignatureLibrary = true
                     }
                 }) {
                     NavigationStack {
@@ -2316,7 +2321,12 @@ struct ContentView: View {
             cancelHighlightMode()
             selectedObject = nil
             selectedAnnotation = nil
-            showsSignatureLibrary = true
+            if !usesInlinePanels && showsToolPanel {
+                showsSignatureLibraryAfterToolsDismissal = true
+                showsToolPanel = false
+            } else {
+                showsSignatureLibrary = true
+            }
         case .addCheckmark:
             beginESignPlacement(.mark(.checkmark))
         case .addCrossmark:

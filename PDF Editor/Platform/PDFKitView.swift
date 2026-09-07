@@ -5695,7 +5695,8 @@ extension PDFKitView {
             ]
 #if os(iOS)
             let annotationMovesWithoutScaling = interactionAnnotation?.kind == .note ||
-                interactionAnnotation?.kind == .freeText
+                interactionAnnotation?.kind == .freeText ||
+                interactionAnnotation?.kind == .ink
 #else
             let annotationMovesWithoutScaling = interactionAnnotation?.kind == .note
 #endif
@@ -5703,8 +5704,8 @@ extension PDFKitView {
                 // The field branch selected move or scale from its body/handle hit.
             } else if annotationMovesWithoutScaling {
 #if os(iOS)
-                // The Fill in form fields action creates content-sized FreeText.
-                // Its blue frame is movable only; text and font changes size it.
+                // FreeText and Ink remain movable with one finger. Their size
+                // changes through text editing or the separate scale gesture.
 #endif
                 dragMode = .move
             } else {
