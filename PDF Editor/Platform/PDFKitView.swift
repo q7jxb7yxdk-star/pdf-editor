@@ -1538,6 +1538,7 @@ extension PDFKitView {
         private var transientStagedTextFallback: TransientStagedTextFallback?
 #elseif os(iOS)
         private var gestures: [UIGestureRecognizer] = []
+        private var keyboardFrameInScreen: CGRect?
         private var annotationActionContainer: UIView?
         private var annotationActionHostingController: UIHostingController<AnyView>?
         private var formDisplayTransitionSnapshot: UIView?
@@ -1815,6 +1816,17 @@ extension PDFKitView {
                 queue: .main
             ) { [weak self] _ in
                 self?.scheduleAcroFormChangeCheck()
+            })
+            observers.append(center.addObserver(
+                forName: UIResponder.keyboardWillChangeFrameNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard let self,
+                      let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                        as? CGRect else { return }
+                self.keyboardFrameInScreen = frame
+                self.revealInlineEditorAboveKeyboard()
             })
 #endif
 #if os(macOS)
@@ -3442,6 +3454,8 @@ extension PDFKitView {
             }
             if annotationEditingEnabled,
                let annotation = annotation(at: pagePoint, pageIndex: pageIndex) {
+                let reopensSelectedFreeText = annotation.kind == .freeText &&
+                    selectedAnnotation.wrappedValue?.reference == annotation.reference
                 pdfView.clearSelection()
                 selection.wrappedValue = nil
                 selectedObject.wrappedValue = nil
@@ -3459,6 +3473,15 @@ extension PDFKitView {
                     onOpenAnnotation(annotation)
                 }
 #else
+                if reopensSelectedFreeText {
+                    // PDFKit reserves double-tap for selecting underlying PDF
+                    // text. A second single tap on this app-owned annotation
+                    // reliably enters the FreeText editor instead.
+                    DispatchQueue.main.async { [weak self] in
+                        self?.beginInlineTextEditing(annotation)
+                    }
+                    return
+                }
                 onOpenAnnotation(annotation)
 #endif
                 updateGestureAvailability()
@@ -3654,7 +3677,9 @@ extension PDFKitView {
             selectedAnnotation.wrappedValue = nil
             pdfView?.clearSelection()
             selection.wrappedValue = nil
-            selectedPageIndex.wrappedValue = pageIndex
+            // Do not publish a page-navigation request for an in-place tap.
+            // PDFView.go(to:) would lose the exact viewport position that the
+            // new inline editor needs to remain visible.
 
             let pageBounds = page.bounds(for: .cropBox).standardized
             let size = CGSize(
@@ -4197,7 +4222,12 @@ extension PDFKitView {
             pdfView.addSubview(field)
             resizeFreeTextEditorToFit()
             field.becomeFirstResponder()
-            if let range = field.textRange(
+            if annotation != nil {
+                field.selectedRange = NSRange(
+                    location: field.text.utf16.count,
+                    length: 0
+                )
+            } else if let range = field.textRange(
                 from: field.beginningOfDocument,
                 to: field.endOfDocument
             ) {
@@ -4508,7 +4538,68 @@ extension PDFKitView {
                     in: pdfView
                 )
             }
+#if os(iOS)
+            revealInlineEditorAboveKeyboard()
+#endif
         }
+
+#if os(iOS)
+        private func revealInlineEditorAboveKeyboard() {
+            guard let pdfView,
+                  let field = inlineTextField,
+                  let keyboardFrameInScreen,
+                  let window = pdfView.window else { return }
+            let keyboardInWindow = window.convert(keyboardFrameInScreen, from: nil)
+            // SwiftUI can shrink PDFView above the keyboard, so its bounds do
+            // not necessarily intersect the keyboard frame. Only a keyboard
+            // that has left the window must preserve the current viewport.
+            guard keyboardInWindow.intersects(window.bounds),
+                  let scrollView = pdfDocumentScrollView(in: pdfView) else { return }
+            let editorRect = scrollView.convert(field.bounds, from: field)
+            let keyboardInScrollView = scrollView.convert(keyboardInWindow, from: window)
+            let visibleBottom = min(scrollView.bounds.maxY, keyboardInScrollView.minY) - 12
+            guard editorRect.maxY > visibleBottom else { return }
+
+            let inset = scrollView.adjustedContentInset
+            let minimumOffsetY = -inset.top
+            let maximumOffsetY = max(
+                minimumOffsetY,
+                scrollView.contentSize.height - scrollView.bounds.height + inset.bottom
+            )
+            let offsetY = min(
+                max(scrollView.contentOffset.y + editorRect.maxY - visibleBottom, minimumOffsetY),
+                maximumOffsetY
+            )
+            guard abs(offsetY - scrollView.contentOffset.y) > 0.5 else { return }
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: offsetY),
+                animated: false
+            )
+            // The editor is a direct PDFView child, while PDFKit scrolls its
+            // document subview. Recalculate it after PDFKit applies the offset.
+            DispatchQueue.main.async { [weak self, weak pdfView, weak field] in
+                guard let self, let pdfView, let field,
+                      self.inlineTextField === field else { return }
+                pdfView.setNeedsLayout()
+                pdfView.layoutIfNeeded()
+                self.updateInlineTextEditorFrame()
+            }
+        }
+
+        private func pdfDocumentScrollView(in view: UIView) -> UIScrollView? {
+            if let scrollView = view as? UIScrollView,
+               scrollView.isScrollEnabled,
+               scrollView.contentSize.height > scrollView.bounds.height {
+                return scrollView
+            }
+            for subview in view.subviews {
+                if let scrollView = pdfDocumentScrollView(in: subview) {
+                    return scrollView
+                }
+            }
+            return nil
+        }
+#endif
 
         private func updatePendingFreeTextColor(_ color: PDFAnnotationColor) {
             guard var pendingFreeTextPlacement,
@@ -5602,9 +5693,19 @@ extension PDFKitView {
                 CGPoint(x: selectionRect.maxX, y: selectionRect.maxY),
                 CGPoint(x: selectionRect.minX, y: selectionRect.maxY),
             ]
+#if os(iOS)
+            let annotationMovesWithoutScaling = interactionAnnotation?.kind == .note ||
+                interactionAnnotation?.kind == .freeText
+#else
+            let annotationMovesWithoutScaling = interactionAnnotation?.kind == .note
+#endif
             if interactionFormField != nil {
                 // The field branch selected move or scale from its body/handle hit.
-            } else if interactionAnnotation?.kind == .note {
+            } else if annotationMovesWithoutScaling {
+#if os(iOS)
+                // The Fill in form fields action creates content-sized FreeText.
+                // Its blue frame is movable only; text and font changes size it.
+#endif
                 dragMode = .move
             } else {
                 dragMode = corners.contains {
@@ -6644,6 +6745,10 @@ extension PDFKitView.Coordinator: UIGestureRecognizerDelegate, UITextViewDelegat
         }
         if gestureRecognizer is UIRotationGestureRecognizer,
            selectedAnnotation.wrappedValue != nil {
+            return false
+        }
+        if gestureRecognizer is UIPinchGestureRecognizer,
+           selectedAnnotation.wrappedValue?.kind == .freeText {
             return false
         }
         guard let pdfView else { return false }

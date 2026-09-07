@@ -3204,7 +3204,8 @@ struct ContentView: View {
                 )
             }
             freeTextPlacementEnabled = false
-            selectedPageIndex = pageIndex
+            // The editor remains at the insertion point; assigning this state
+            // would navigate PDFView and can hide the new text from the viewport.
             loadCanvasAnnotations()
             if let newReference {
                 selectedAnnotation = pageAnnotations.first {
