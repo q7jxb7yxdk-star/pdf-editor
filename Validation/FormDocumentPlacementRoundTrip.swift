@@ -79,6 +79,63 @@ struct FormDocumentPlacementRoundTrip {
               abs((restoredFields.first { $0.id == second.id }?.fontSize ?? 0) - 18) < 0.01 else {
             throw Failure("Dropdown deletion Undo did not restore its font and field identity")
         }
+        let textBox = try grouped {
+            try document.addPlacedFormField(
+                kind: .text,
+                pageIndex: 0,
+                bounds: CGRect(x: 40, y: 400, width: 180, height: 28),
+                radioGroupName: nil,
+                undoManager: undoManager
+            )
+        }
+        let multilineText = "First line\nSecond line"
+        guard textBox.isMultiline,
+              PDFFormDesignService().authoredAnnotation(
+                  for: textBox.id,
+                  in: document.pdfDocument
+              )?.isMultiline == true else {
+            throw Failure("New Textbox did not install as a multiline Widget")
+        }
+        let editedTextBox = try grouped {
+            try document.updateAuthoredTextFormField(
+                id: textBox.id,
+                text: multilineText,
+                bounds: textBox.bounds,
+                undoManager: undoManager
+            )
+        }
+        let resizedTextBox = try grouped {
+            try document.setAuthoredFormFieldFontSize(
+                id: textBox.id,
+                fontSize: 18,
+                undoManager: undoManager
+            )
+        }
+#if os(macOS)
+        let textFont = NSFont.systemFont(ofSize: 18)
+        let expectedTextHeight = max(
+            PDFFormDesignKind.text.minimumDimension,
+            ceil((multilineText as NSString).boundingRect(
+                with: CGSize(
+                    width: max(editedTextBox.bounds.width - 6, 1),
+                    height: CGFloat.greatestFiniteMagnitude
+                ),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: textFont]
+            ).height) + 4
+        )
+#else
+        let expectedTextHeight = max(
+            12,
+            editedTextBox.bounds.height + 18 - editedTextBox.fontSize
+        )
+#endif
+        guard abs(resizedTextBox.fontSize - 18) < 0.01,
+              abs(resizedTextBox.bounds.height - expectedTextHeight) < 0.01,
+              abs(resizedTextBox.bounds.width - editedTextBox.bounds.width) < 0.01,
+              abs(resizedTextBox.bounds.midY - editedTextBox.bounds.midY) < 0.01 else {
+            throw Failure("Textbox font-size update did not fit its text height")
+        }
         let listBoxSize = PDFFormDesignKind.listBox.placementSize(
             choices: options,
             fontSize: 11
@@ -128,7 +185,7 @@ struct FormDocumentPlacementRoundTrip {
               abs(restoredListBox.bounds.maxY - listBox.bounds.maxY) < 0.01 else {
             throw Failure("List Box deletion Undo did not restore its font, height and field identity")
         }
-        print("Dropdown and List Box font-size update, deletion and Undo passed.")
+        print("Textbox, Dropdown and List Box font-size update, deletion and Undo passed.")
     }
 
     private struct Failure: Error {

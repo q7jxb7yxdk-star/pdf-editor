@@ -845,9 +845,20 @@ final class PDFEditorDocument: ReferenceFileDocument {
             in: session.sourceDocument
         )
         let previousData = session.sourceData
+        // A newly created PDFKit text Widget can present as a single-line
+        // native control even when `isMultiline` was set in place. Install the
+        // verified canonical document for Textboxes so its /Ff Multiline bit
+        // exists before AppKit creates the editor.
+        let displayTransition = kind == .text ? PDFFormDisplayTransition(
+            pageIndex: field.pageIndex,
+            beforeBounds: nil,
+            afterBounds: field.bounds,
+            replacesDocument: true
+        ) : nil
         try applyFormDesign(
             session.fields + [field], session: session, undoManager: undoManager,
-            registersUndo: false
+            registersUndo: false,
+            displayTransition: displayTransition
         )
         if let undoManager {
             let addedData = sourceData
@@ -1027,10 +1038,23 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 minimumDimension: current.kind.minimumDimension
             )
         } else {
+#if os(macOS)
+            let font = NSFont.systemFont(ofSize: fontSize)
+            let textRect = (current.value as NSString).boundingRect(
+                with: CGSize(
+                    width: max(current.bounds.width - 6, 1),
+                    height: CGFloat.greatestFiniteMagnitude
+                ),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font]
+            )
+            let height = max(current.kind.minimumDimension, ceil(textRect.height) + 4)
+#else
             let height = max(12, current.bounds.height + fontSize - current.fontSize)
+#endif
             fittedBounds = geometry.clamped(CGRect(
                 x: current.bounds.minX,
-                y: current.bounds.midY - height / 2,
+                y: current.bounds.maxY - height,
                 width: current.bounds.width,
                 height: height
             ))

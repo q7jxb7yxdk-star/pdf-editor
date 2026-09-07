@@ -608,6 +608,8 @@ nonisolated struct PDFFormDesignService {
             let expectedType = field.kind == .text ? "Tx" : field.kind.isChoice ? "Ch" : "Btn"
             guard let record = registered[field.id], record.name == field.name,
                   record.type == expectedType,
+                  field.kind != .text ||
+                    ((record.flags & (1 << 12)) != 0) == field.isMultiline,
                   !field.kind.isButton || ((record.flags & (1 << 15)) != 0) == (field.kind == .radioButton),
                   !field.kind.isButton || record.flags & (1 << 16) == 0,
                   !field.kind.isChoice || ((record.flags & (1 << 17)) != 0) == (field.kind == .dropdown),

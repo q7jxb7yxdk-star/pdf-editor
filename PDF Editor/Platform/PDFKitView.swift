@@ -671,6 +671,39 @@ private final class PDFPassiveTextView: NSTextView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+private final class PDFFormTextBackgroundView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.cgColor
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private final class PDFFormTextView: NSTextView {
+    let fieldID: UUID
+
+    init(fieldID: UUID, frame: NSRect) {
+        self.fieldID = fieldID
+        let storage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: frame.size)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(container)
+        super.init(frame: frame, textContainer: container)
+    }
+
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        fieldID = UUID()
+        super.init(frame: frameRect, textContainer: container)
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
 private final class PDFPageOverlayContainer: NSView {
     let pageIndex: Int
 
@@ -1521,6 +1554,11 @@ extension PDFKitView {
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
         private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
+        private var formTextViews: [UUID: PDFFormTextView] = [:]
+        private var formTextBackgroundViews: [UUID: PDFFormTextBackgroundView] = [:]
+        private var formTextEditingField: PDFFormDesignField?
+        private var formTextFallbackEditor: PDFFormTextView?
+        private var formTextFallbackBackground: PDFFormTextBackgroundView?
         private var keyDownEventMonitor: Any?
         private var scrollWheelEventMonitor: Any?
         private var modifierFlagsEventMonitor: Any?
@@ -1937,6 +1975,7 @@ extension PDFKitView {
                 stagedTextViews.removeAll()
                 stagedTextMaskViews.values.forEach { $0.removeFromSuperview() }
                 stagedTextMaskViews.removeAll()
+                removeAuthoredTextboxes()
                 pageOverlayViews.removeAll()
 #endif
                 gestures.forEach(pdfView.removeGestureRecognizer)
@@ -1962,6 +2001,7 @@ extension PDFKitView {
             stagedTextViews.removeAll()
             stagedTextMaskViews.values.forEach { $0.removeFromSuperview() }
             stagedTextMaskViews.removeAll()
+            removeAuthoredTextboxes()
             pageOverlayViews.removeAll()
 #elseif os(iOS)
             removeAuthoredTextDisplays()
@@ -2372,6 +2412,254 @@ extension PDFKitView {
 #endif
         }
 
+#if os(macOS)
+        /// PDFKit's macOS Widget editor can collapse a `/Tx` field to one
+        /// line even when its AcroForm `/Ff` Multiline flag is present. Render
+        /// app-authored Textboxes in the page-overlay coordinate system so one
+        /// AppKit NSTextView owns both editing and the committed appearance.
+        private func synchronizeAuthoredTextboxes() {
+            guard let pdfView, let document = pdfView.document else { return }
+            let fields = PDFFormDesignService().fields(in: document)
+                .filter { $0.kind == .text }
+            let liveIDs = Set(fields.map(\.id))
+            for id in Set(formTextViews.keys).union(formTextBackgroundViews.keys)
+            where !liveIDs.contains(id) {
+                formTextViews.removeValue(forKey: id)?.removeFromSuperview()
+                formTextBackgroundViews.removeValue(forKey: id)?.removeFromSuperview()
+            }
+
+            for field in fields {
+                let renderedField = formTextEditingField?.id == field.id
+                    ? formTextEditingField! : field
+                // A field edited directly in PDFView must still track later
+                // move and font-size mutations; otherwise its visible text
+                // remains at the old position while the Widget moves.
+                if let fallback = formTextFallbackEditor,
+                   fallback.fieldID == field.id,
+                   let page = document.page(at: renderedField.pageIndex) {
+                    let frame = pdfView.convert(renderedField.bounds, from: page).standardized
+                    formTextFallbackBackground?.frame = frame
+                    fallback.frame = frame.insetBy(dx: 3, dy: 0)
+                    // This fallback is mounted directly in PDFView rather than
+                    // its scale-aware page overlay, so its display font must
+                    // follow the current PDF zoom.
+                    let font = NSFont.systemFont(
+                        ofSize: renderedField.fontSize * max(pdfView.scaleFactor, 0.001)
+                    )
+                    fallback.font = font
+                    fallback.textContainer?.containerSize = NSSize(
+                        width: max(fallback.bounds.width, 1),
+                        height: CGFloat.greatestFiniteMagnitude
+                    )
+                    fallback.textContainerInset = .zero
+                    if formTextEditingField?.id != field.id,
+                       fallback.string != renderedField.value {
+                        fallback.string = renderedField.value
+                    }
+                    continue
+                }
+                guard let page = document.page(at: renderedField.pageIndex),
+                      let overlay = pageOverlayViews[renderedField.pageIndex],
+                      hasMountedPageOverlay(for: renderedField.pageIndex) else { continue }
+                let viewFrame = pdfView.convert(renderedField.bounds, from: page).standardized
+                let overlayFrame = overlay.convert(viewFrame, from: pdfView).standardized
+                guard overlayFrame.width > 0, overlayFrame.height > 0 else { continue }
+
+                let background = formTextBackgroundViews[field.id] ??
+                    PDFFormTextBackgroundView(frame: overlayFrame)
+                if formTextBackgroundViews[field.id] == nil {
+                    formTextBackgroundViews[field.id] = background
+                }
+                if background.superview !== overlay {
+                    background.removeFromSuperview()
+                    overlay.addSubview(background, positioned: .above, relativeTo: nil)
+                }
+                background.frame = overlayFrame
+
+                let textView = formTextViews[field.id] ?? PDFFormTextView(
+                    fieldID: field.id,
+                    frame: overlayFrame.insetBy(dx: 3, dy: 0)
+                )
+                if formTextViews[field.id] == nil {
+                    textView.isRichText = false
+                    textView.importsGraphics = false
+                    textView.drawsBackground = false
+                    textView.backgroundColor = .clear
+                    textView.isEditable = true
+                    textView.isSelectable = true
+                    textView.isHorizontallyResizable = false
+                    textView.isVerticallyResizable = false
+                    textView.textContainer?.widthTracksTextView = true
+                    textView.textContainer?.heightTracksTextView = false
+                    textView.textContainer?.lineFragmentPadding = 0
+                    textView.delegate = self
+                    formTextViews[field.id] = textView
+                }
+                if textView.superview !== overlay {
+                    textView.removeFromSuperview()
+                    overlay.addSubview(textView, positioned: .above, relativeTo: background)
+                }
+                textView.frame = overlayFrame.insetBy(dx: 3, dy: 0)
+                let font = NSFont.systemFont(ofSize: renderedField.fontSize)
+                textView.font = font
+                textView.textColor = .black
+                textView.textContainer?.containerSize = NSSize(
+                    width: max(textView.bounds.width, 1),
+                    height: CGFloat.greatestFiniteMagnitude
+                )
+                textView.textContainerInset = .zero
+                if formTextEditingField?.id != field.id, textView.string != renderedField.value {
+                    textView.string = renderedField.value
+                }
+                background.needsDisplay = true
+                textView.needsDisplay = true
+            }
+        }
+
+        private func beginAuthoredTextboxEditing(_ textView: PDFFormTextView) {
+            guard let pdfView, let document = pdfView.document,
+                  let field = PDFFormDesignService().fields(in: document)
+                    .first(where: { $0.id == textView.fieldID }) else { return }
+            formTextEditingField = field
+            selectAuthoredFormField(field, in: pdfView)
+        }
+
+        private func activateAuthoredTextbox(
+            _ field: PDFFormDesignField,
+            in pdfView: PDFView
+        ) {
+            formTextEditingField = field
+            selectAuthoredFormField(field, in: pdfView)
+            synchronizeAuthoredTextboxes()
+            let textView: PDFFormTextView
+            if let overlayTextView = formTextViews[field.id] {
+                textView = overlayTextView
+            } else if formTextFallbackEditor?.fieldID == field.id {
+                textView = formTextFallbackEditor!
+            } else {
+                formTextFallbackEditor?.removeFromSuperview()
+                formTextFallbackBackground?.removeFromSuperview()
+                guard let page = pdfView.document?.page(at: field.pageIndex) else { return }
+                let frame = pdfView.convert(field.bounds, from: page).standardized
+                let background = PDFFormTextBackgroundView(frame: frame)
+                let fallback = PDFFormTextView(
+                    fieldID: field.id,
+                    frame: frame.insetBy(dx: 3, dy: 0)
+                )
+                fallback.isRichText = false
+                fallback.importsGraphics = false
+                fallback.drawsBackground = false
+                fallback.backgroundColor = .clear
+                fallback.isHorizontallyResizable = false
+                fallback.isVerticallyResizable = false
+                fallback.textContainer?.widthTracksTextView = true
+                fallback.textContainer?.heightTracksTextView = false
+                fallback.textContainer?.lineFragmentPadding = 0
+                fallback.font = NSFont.systemFont(
+                    ofSize: field.fontSize * max(pdfView.scaleFactor, 0.001)
+                )
+                fallback.textColor = .black
+                fallback.string = field.value
+                fallback.textContainerInset = .zero
+                fallback.delegate = self
+                pdfView.addSubview(background, positioned: .above, relativeTo: nil)
+                pdfView.addSubview(fallback, positioned: .above, relativeTo: background)
+                formTextFallbackBackground = background
+                formTextFallbackEditor = fallback
+                textView = fallback
+            }
+            textView.isEditable = true
+            textView.isSelectable = true
+            textView.selectedRange = NSRange(
+                location: textView.string.utf16.count,
+                length: 0
+            )
+            pdfView.window?.makeFirstResponder(textView)
+        }
+
+        private func updateAuthoredTextboxSize(_ textView: PDFFormTextView) {
+            guard let pdfView, var field = formTextEditingField,
+                  field.id == textView.fieldID,
+                  let page = pdfView.document?.page(at: field.pageIndex) else { return }
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            textContainer.containerSize = NSSize(
+                width: max(textView.bounds.width, 1),
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            layoutManager.ensureLayout(for: textContainer)
+            // Measure line fragments without adding presentation padding, so
+            // the field height remains exactly one font line per visual line.
+            let glyphRange = layoutManager.glyphRange(for: textContainer)
+            var visualLineCount = 0
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) {
+                _, _, _, _, _ in visualLineCount += 1
+            }
+            // NSLayoutManager may not materialize the final line fragment until
+            // a later layout pass. Count explicit Returns as well, so typing on
+            // the second line expands the field immediately; the layout count
+            // still covers automatic line wrapping.
+            let explicitLineCount = textView.string.split(
+                separator: "\n",
+                omittingEmptySubsequences: false
+            ).count
+            let lineCount = max(visualLineCount, explicitLineCount)
+            let font = NSFont.systemFont(ofSize: field.fontSize)
+            let lineHeight = font.ascender - font.descender + font.leading
+            let roundedLineHeight = ceil(lineHeight)
+            let height = max(
+                field.kind.minimumDimension,
+                roundedLineHeight * CGFloat(lineCount)
+            )
+            field.bounds = PDFFormPageGeometry(
+                cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+            ).clamped(CGRect(
+                x: field.bounds.minX,
+                y: field.bounds.maxY - height,
+                width: field.bounds.width,
+                height: height
+            ), minimumDimension: field.kind.minimumDimension)
+            field.value = textView.string
+            formTextEditingField = field
+            // Keep the authoring outline and action bar in the same geometry
+            // as the live multiline editor while its height grows.
+            selectedFormField.wrappedValue = field
+            refreshOverlay()
+            if formTextFallbackEditor === textView {
+                let frame = pdfView.convert(field.bounds, from: page).standardized
+                formTextFallbackBackground?.frame = frame
+                textView.frame = frame.insetBy(dx: 3, dy: 0)
+                textView.textContainerInset = .zero
+            }
+            synchronizeAuthoredTextboxes()
+        }
+
+        private func finishAuthoredTextboxEditing(_ textView: PDFFormTextView) {
+            guard let field = formTextEditingField,
+                  field.id == textView.fieldID else { return }
+            let text = textView.string
+            formTextEditingField = nil
+            if formTextFallbackEditor === textView {
+                textView.isEditable = false
+                textView.selectedRange = NSRange(location: 0, length: 0)
+            }
+            onCommitTextFormField(field, text, field.bounds)
+            scheduleOverlayRefresh()
+        }
+
+        private func removeAuthoredTextboxes() {
+            formTextViews.values.forEach { $0.removeFromSuperview() }
+            formTextViews.removeAll()
+            formTextBackgroundViews.values.forEach { $0.removeFromSuperview() }
+            formTextBackgroundViews.removeAll()
+            formTextFallbackEditor?.removeFromSuperview()
+            formTextFallbackEditor = nil
+            formTextFallbackBackground?.removeFromSuperview()
+            formTextFallbackBackground = nil
+            formTextEditingField = nil
+        }
+#endif
+
         private func commitAcroFormChangeIfNeeded(generation: Int) {
             guard generation == acroFormCheckGeneration,
                   let document = pdfView?.document else { return }
@@ -2393,6 +2681,7 @@ extension PDFKitView {
 #endif
 #if os(macOS)
             updateStagedTextOverlays()
+            synchronizeAuthoredTextboxes()
 #endif
             updateInlineTextEditorFrame()
             if pendingFreeTextPlacement != nil,
@@ -6161,6 +6450,12 @@ extension PDFKitView.Coordinator: PDFPageOverlayViewProvider {
         if inlineTextField?.superview === overlayView {
             finishInlineTextEditing(commit: true)
         }
+        formTextViews.values
+            .filter { $0.superview === overlayView }
+            .forEach { $0.removeFromSuperview() }
+        formTextBackgroundViews.values
+            .filter { $0.superview === overlayView }
+            .forEach { $0.removeFromSuperview() }
         stagedTextViews.values
             .filter { $0.superview === overlayView }
             .forEach { $0.removeFromSuperview() }
@@ -6350,9 +6645,10 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
     func shouldCaptureMouse(at viewPoint: CGPoint, in pdfView: PDFView) -> Bool {
         if formResizeHandleContains(viewPoint, in: pdfView) { return true }
         if let field = authoredFormField(at: viewPoint, in: pdfView) {
-            // PDFKit renders a List Box with an internal native selection view.
-            // Let hit testing reach it; the parent pan recognizer still handles
-            // authored-field movement and corner resizing.
+            // List Boxes retain PDFKit's native selection view. Textboxes are
+            // captured here so their app-owned NSTextView can be made first
+            // responder explicitly, before PDFKit creates a single-line Widget
+            // editor for the same click.
             return field.kind != .listBox
         }
         if freehandDrawingEnabled {
@@ -6418,7 +6714,12 @@ extension PDFKitView.Coordinator: PDFInteractionMouseHandling {
 
     func handleMouseDown(_ event: NSEvent, in pdfView: PDFView) -> Bool {
         let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
-        if selectAuthoredFormField(at: viewPoint, in: pdfView) {
+        if let field = authoredFormField(at: viewPoint, in: pdfView) {
+            if field.kind == .text {
+                activateAuthoredTextbox(field, in: pdfView)
+                return true
+            }
+            selectAuthoredFormField(field, in: pdfView)
             // PDFView still receives the event, preserving native text/button use.
             return false
         }
@@ -6619,10 +6920,18 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
     }
 
     func textDidBeginEditing(_ notification: Notification) {
+        if let textView = notification.object as? PDFFormTextView {
+            beginAuthoredTextboxEditing(textView)
+            return
+        }
         inlineEditorDidGainFocus = true
     }
 
     func textDidChange(_ notification: Notification) {
+        if let textView = notification.object as? PDFFormTextView {
+            updateAuthoredTextboxSize(textView)
+            return
+        }
         guard let textView = notification.object as? NSTextView,
               inlineTextField === textView else { return }
         adjustInlineEditorWidth(textView)
@@ -6636,6 +6945,10 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
     }
 
     func textDidEndEditing(_ notification: Notification) {
+        if let textView = notification.object as? PDFFormTextView {
+            finishAuthoredTextboxEditing(textView)
+            return
+        }
         guard inlineEditorDidGainFocus else { return }
         if pendingFreeTextPlacement != nil { return }
         finishInlineTextEditing(commit: true)
@@ -6645,6 +6958,9 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
         _ textView: NSTextView,
         doCommandBy commandSelector: Selector
     ) -> Bool {
+        // Textbox Return belongs to its persistent multiline NSTextView.
+        // The inline-editor shortcuts below must not consume it.
+        if textView is PDFFormTextView { return false }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
             finishInlineTextEditing(commit: false)
             return true

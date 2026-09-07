@@ -39,7 +39,7 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
 
     var defaultSize: CGSize {
         switch self {
-        case .text: CGSize(width: 180, height: 28)
+        case .text: CGSize(width: 100, height: 28)
         case .checkBox, .radioButton: CGSize(width: 11, height: 11)
         case .dropdown: CGSize(width: 180, height: 28)
         case .listBox: CGSize(width: 180, height: 72)
@@ -88,7 +88,9 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
             max(width, (line as NSString).size(withAttributes: attributes).width)
         }
         let horizontalPadding: CGFloat = 12
-        let verticalPadding: CGFloat = 12
+        // Textboxes already reserve a small editor inset. Keep the fitted
+        // height tight so multiline fields do not accumulate a blank row.
+        let verticalPadding: CGFloat = 4
         return CGSize(
             width: max(48, ceil(widestLine) + horizontalPadding),
             height: max(defaultSize.height, ceil(lineHeight * CGFloat(max(lines.count, 1))) + verticalPadding)

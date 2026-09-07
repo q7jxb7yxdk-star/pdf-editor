@@ -131,6 +131,13 @@ nonisolated struct PDFFormFieldTreeWriter {
             if field.kind == .checkBox {
                 widget = try Self.set("DV", "/" + (field.isDefaultSelected ? field.exportValue : "Off"), in: widget)
                 widget = try Self.set("PDFEditorDefaultChoice", nil, in: widget)
+            } else if field.kind == .text {
+                widget = try Self.set("FT", "/Tx", in: widget)
+                widget = try Self.set("Ff", field.isMultiline ? "4096" : "0", in: widget)
+                widget = try Self.set("V", field.value.isEmpty ? nil : Self.pdfString(field.value), in: widget)
+                // PDFKit treats an absent /DV as the current /V after reopen.
+                // Preserve an intentionally empty default with an empty string.
+                widget = try Self.set("DV", Self.pdfString(field.defaultValue), in: widget)
             } else if field.kind.isChoice {
                 let options = "[" + field.choices.map {
                     "[\(Self.pdfString($0)) \(Self.pdfString($0))]"
