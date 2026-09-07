@@ -2581,42 +2581,54 @@ extension PDFKitView {
             guard let pdfView, var field = formTextEditingField,
                   field.id == textView.fieldID,
                   let page = pdfView.document?.page(at: field.pageIndex) else { return }
-            guard let layoutManager = textView.layoutManager,
-                  let textContainer = textView.textContainer else { return }
-            textContainer.containerSize = NSSize(
-                width: max(textView.bounds.width, 1),
-                height: CGFloat.greatestFiniteMagnitude
-            )
-            layoutManager.ensureLayout(for: textContainer)
-            // Measure line fragments without adding presentation padding, so
-            // the field height remains exactly one font line per visual line.
-            let glyphRange = layoutManager.glyphRange(for: textContainer)
-            var visualLineCount = 0
-            layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) {
-                _, _, _, _, _ in visualLineCount += 1
-            }
-            // NSLayoutManager may not materialize the final line fragment until
-            // a later layout pass. Count explicit Returns as well, so typing on
-            // the second line expands the field immediately; the layout count
-            // still covers automatic line wrapping.
-            let explicitLineCount = textView.string.split(
+            let lines = textView.string.split(
                 separator: "\n",
                 omittingEmptySubsequences: false
-            ).count
-            let lineCount = max(visualLineCount, explicitLineCount)
+            ).map(String.init)
             let font = NSFont.systemFont(ofSize: field.fontSize)
             let lineHeight = font.ascender - font.descender + font.leading
             let roundedLineHeight = ceil(lineHeight)
+            let attributes: [NSAttributedString.Key: Any] = [.font: font]
+            let widestLine = lines.reduce(CGFloat.zero) { width, line in
+                max(width, (line as NSString).size(withAttributes: attributes).width)
+            }
+            let desiredWidth = max(
+                field.kind.defaultSize.width,
+                ceil(widestLine) + 6
+            )
+            let cropBox = page.bounds(for: .cropBox)
+            let availableWidth = max(
+                field.kind.minimumDimension,
+                cropBox.maxX - field.bounds.minX
+            )
+            let width = min(desiredWidth, availableWidth)
+            let textWidth = max(width - 6, 1)
+            let lineCount = lines.reduce(0) { count, line in
+                guard !line.isEmpty else { return count + 1 }
+                let textBounds = (line as NSString).boundingRect(
+                    with: CGSize(
+                        width: textWidth,
+                        height: CGFloat.greatestFiniteMagnitude
+                    ),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: attributes
+                )
+                let wrappedLines = max(
+                    1,
+                    Int(ceil(textBounds.height / max(roundedLineHeight, 1)))
+                )
+                return count + wrappedLines
+            }
             let height = max(
                 field.kind.minimumDimension,
                 roundedLineHeight * CGFloat(lineCount)
             )
             field.bounds = PDFFormPageGeometry(
-                cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+                cropBox: cropBox, rotation: page.rotation
             ).clamped(CGRect(
                 x: field.bounds.minX,
                 y: field.bounds.maxY - height,
-                width: field.bounds.width,
+                width: width,
                 height: height
             ), minimumDimension: field.kind.minimumDimension)
             field.value = textView.string
