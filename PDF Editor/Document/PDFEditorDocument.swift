@@ -445,6 +445,23 @@ final class PDFEditorDocument: ReferenceFileDocument {
         return try objectSession.objects(onPage: pageIndex)
     }
 
+    func textObjectWithFontData(
+        _ object: PDFPageObjectSnapshot
+    ) throws -> PDFPageObjectSnapshot {
+        guard object.kind == .text else { return object }
+        Self.pdfiumAccessLock.lock()
+        defer { Self.pdfiumAccessLock.unlock() }
+        guard let objectSession = try prepareEditingSessionIfNeeded()
+            as? any PDFObjectEditingSession else {
+            throw PDFObjectEditingError.objectInspectionFailed
+        }
+        let fontData = try objectSession.fontData(
+            pageIndex: object.pageIndex,
+            path: object.path
+        )
+        return object.withFontData(fontData)
+    }
+
     /// Inspects an immutable document snapshot on a private PDFium handle so page
     /// rendering and scrolling never wait for object enumeration on the main thread.
     func pageObjectsForDisplay(at pageIndex: Int) async throws -> [PDFPageObjectSnapshot] {

@@ -1174,6 +1174,7 @@ struct ContentView: View {
                     onPlaceSignature: placeSelectedESign,
                     freehandDrawingEnabled: freehandDrawingEnabled,
                     onAddFreehand: addFreehandStroke,
+                    onHydrateTextObject: hydrateTextObject,
                     onReplaceTextObject: replaceText,
                     onReplaceAnnotationText: replaceAnnotationText,
                     onUpdateAnnotation: updateAnnotation,
@@ -2892,6 +2893,17 @@ struct ContentView: View {
             style: style,
             undoManager: undoManager
         )
+    }
+
+    private func hydrateTextObject(
+        _ object: PDFPageObjectSnapshot
+    ) -> PDFPageObjectSnapshot {
+        do {
+            return try document.textObjectWithFontData(object)
+        } catch {
+            present(error)
+            return object
+        }
     }
 
     private func replaceAnnotationText(

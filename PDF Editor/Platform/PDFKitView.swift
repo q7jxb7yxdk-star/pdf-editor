@@ -925,6 +925,7 @@ struct PDFKitView: NSViewRepresentable {
     let onPlaceSignature: (Int, CGPoint) -> Void
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
+    let onHydrateTextObject: (PDFPageObjectSnapshot) -> PDFPageObjectSnapshot
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String, CGRect) -> Void
     let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
@@ -1022,6 +1023,7 @@ struct PDFKitView: UIViewRepresentable {
     let onPlaceSignature: (Int, CGPoint) -> Void
     let freehandDrawingEnabled: Bool
     let onAddFreehand: (Int, [CGPoint]) -> Void
+    let onHydrateTextObject: (PDFPageObjectSnapshot) -> PDFPageObjectSnapshot
     let onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
     let onReplaceAnnotationText: (PDFAnnotationSnapshot, String, CGRect) -> Void
     let onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
@@ -1087,6 +1089,7 @@ private extension PDFKitView {
             onPlaceSignature: onPlaceSignature,
             freehandDrawingEnabled: freehandDrawingEnabled,
             onAddFreehand: onAddFreehand,
+            onHydrateTextObject: onHydrateTextObject,
             onReplaceTextObject: onReplaceTextObject,
             onReplaceAnnotationText: onReplaceAnnotationText,
             onUpdateAnnotation: onUpdateAnnotation,
@@ -1226,6 +1229,7 @@ private extension PDFKitView {
         coordinator.onPlaceSignature = onPlaceSignature
         coordinator.freehandDrawingEnabled = freehandDrawingEnabled
         coordinator.onAddFreehand = onAddFreehand
+        coordinator.onHydrateTextObject = onHydrateTextObject
         coordinator.onReplaceTextObject = onReplaceTextObject
         coordinator.onReplaceAnnotationText = onReplaceAnnotationText
         coordinator.onUpdateAnnotation = onUpdateAnnotation
@@ -1431,6 +1435,7 @@ extension PDFKitView {
             }
         }
         var onAddFreehand: (Int, [CGPoint]) -> Void
+        var onHydrateTextObject: (PDFPageObjectSnapshot) -> PDFPageObjectSnapshot
         var onReplaceTextObject: (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void
         var onReplaceAnnotationText: (PDFAnnotationSnapshot, String, CGRect) -> Void
         var onUpdateAnnotation: (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void
@@ -1492,12 +1497,14 @@ extension PDFKitView {
         private var freehandStraightLineViewPoint: CGPoint?
 
         private struct InlineTextStyle {
+            let baseFont: NSFont
             let fontDescriptor: NSFontDescriptor
             let pointSize: CGFloat
             let scaleFactor: CGFloat
             let color: NSColor
 
             init(font: NSFont, scaleFactor: CGFloat, color: NSColor) {
+                baseFont = font
                 fontDescriptor = font.fontDescriptor
                 pointSize = font.pointSize
                 self.scaleFactor = max(scaleFactor, 0.001)
@@ -1516,6 +1523,15 @@ extension PDFKitView {
                     traits.insert(.italic)
                 } else {
                     traits.remove(.italic)
+                }
+                let scaledBaseFont = CTFontCreateCopyWithAttributes(
+                    baseFont as CTFont,
+                    scaledSize,
+                    nil,
+                    nil
+                ) as NSFont
+                if traits == fontDescriptor.symbolicTraits {
+                    return scaledBaseFont
                 }
                 let styledDescriptor = fontDescriptor.withSymbolicTraits(traits)
                 if let styledFont = NSFont(descriptor: styledDescriptor, size: scaledSize) {
@@ -1676,6 +1692,9 @@ extension PDFKitView {
             onPlaceSignature: @escaping (Int, CGPoint) -> Void,
             freehandDrawingEnabled: Bool,
             onAddFreehand: @escaping (Int, [CGPoint]) -> Void,
+            onHydrateTextObject: @escaping (
+                PDFPageObjectSnapshot
+            ) -> PDFPageObjectSnapshot,
             onReplaceTextObject: @escaping (PDFPageObjectSnapshot, String, PDFTextStyle) -> Void,
             onReplaceAnnotationText: @escaping (PDFAnnotationSnapshot, String, CGRect) -> Void,
             onUpdateAnnotation: @escaping (PDFAnnotationSnapshot, PDFAnnotationUpdate) -> Void,
@@ -1714,6 +1733,7 @@ extension PDFKitView {
             self.onPlaceSignature = onPlaceSignature
             self.freehandDrawingEnabled = freehandDrawingEnabled
             self.onAddFreehand = onAddFreehand
+            self.onHydrateTextObject = onHydrateTextObject
             self.onReplaceTextObject = onReplaceTextObject
             self.onReplaceAnnotationText = onReplaceAnnotationText
             self.onUpdateAnnotation = onUpdateAnnotation
@@ -2823,7 +2843,8 @@ extension PDFKitView {
                           at: pendingTextActivation.pageIndex
                       ) {
                 pageIndex = pendingTextActivation.pageIndex
-                pageBounds = pendingTextActivation.selection.bounds(for: page)
+                pageBounds = previewBounds ??
+                    pendingTextActivation.selection.bounds(for: page)
             } else {
                 setOverlayHidden(true)
                 return
@@ -4262,7 +4283,7 @@ extension PDFKitView {
             let objectSelection = page?.selection(for: object.bounds)
             let text = objectSelection?.string ?? selection?.string ?? object.text
             let resolvedFontName = fontName(from: objectSelection ?? selection)
-            return PDFPageObjectSnapshot(
+            let hydratedObject = PDFPageObjectSnapshot(
                 pageIndex: object.pageIndex,
                 path: object.path,
                 kind: object.kind,
@@ -4275,6 +4296,11 @@ extension PDFKitView {
                 fontData: object.fontData,
                 imagePixelSize: object.imagePixelSize
             )
+#if os(macOS)
+            return onHydrateTextObject(hydratedObject)
+#else
+            return hydratedObject
+#endif
         }
 
         private func selectCopyableText(
@@ -4630,7 +4656,9 @@ extension PDFKitView {
             field.isRichText = false
             field.importsGraphics = false
             field.allowsUndo = true
-            field.textContainerInset = NSSize(width: 6, height: 4)
+            field.textContainerInset = isFreeTextEditor
+                ? NSSize(width: 6, height: 4)
+                : .zero
             field.textContainer?.lineFragmentPadding = 0
             field.isHorizontallyResizable = true
             field.isVerticallyResizable = true
@@ -5188,10 +5216,10 @@ extension PDFKitView {
             in pdfView: PDFView
         ) -> CGRect {
             let backingFrame = pdfView.convertToBacking(frame)
-            let minX = floor(backingFrame.minX)
-            let minY = floor(backingFrame.minY)
-            let maxX = ceil(backingFrame.maxX)
-            let maxY = ceil(backingFrame.maxY)
+            let minX = floor(backingFrame.minX) - 1
+            let minY = floor(backingFrame.minY) - 1
+            let maxX = ceil(backingFrame.maxX) + 1
+            let maxY = ceil(backingFrame.maxY) + 1
             guard maxX > minX, maxY > minY else { return frame }
             return pdfView.convertFromBacking(CGRect(
                 x: minX,
@@ -5559,23 +5587,28 @@ extension PDFKitView {
             guard annotation == nil else { return }
             guard let pdfView, let superview = textView.superview else { return }
             let baselineY: CGFloat
+            let leadingEdgeX: CGFloat?
             if let object,
                let objectBaselineY = inlineTextBaselineY(for: object),
                let objectFrame = inlineTextEditorFrame(for: object) {
-                baselineY = superview.convert(
+                let localOrigin = superview.convert(
                     CGPoint(x: objectFrame.minX, y: objectBaselineY),
                     from: pdfView
-                ).y
+                )
+                baselineY = localOrigin.y
+                leadingEdgeX = superview.convert(objectFrame, from: pdfView).minX
             } else {
                 guard let font = textView.font else { return }
                 baselineY = superview.isFlipped
                     ? textView.frame.maxY + font.descender
                     : textView.frame.minY - font.descender
+                leadingEdgeX = nil
             }
             textView.frame = baselineAlignedFrame(
                 for: textView,
                 baseFrame: textView.frame,
                 baselineY: baselineY,
+                leadingEdgeX: leadingEdgeX,
                 usesFlippedCoordinates: superview.isFlipped
             )
         }
@@ -5596,10 +5629,12 @@ extension PDFKitView {
             for textView: NSTextView,
             baseFrame: CGRect,
             baselineY: CGFloat,
+            leadingEdgeX: CGFloat? = nil,
             usesFlippedCoordinates: Bool? = nil
         ) -> CGRect {
             guard let pdfView,
                   !textView.string.isEmpty,
+                  let font = textView.font,
                   let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return baseFrame }
             layoutManager.ensureLayout(for: textContainer)
@@ -5617,6 +5652,22 @@ extension PDFKitView {
             alignedFrame.origin.y = (usesFlippedCoordinates ?? pdfView.isFlipped)
                 ? baselineY - baselineOffsetFromTop
                 : baselineY + baselineOffsetFromTop - baseFrame.height
+            if let leadingEdgeX {
+                var glyph = layoutManager.cgGlyph(at: glyphIndex)
+                var glyphBounds = CGRect.zero
+                CTFontGetBoundingRectsForGlyphs(
+                    font as CTFont,
+                    .default,
+                    &glyph,
+                    &glyphBounds,
+                    1
+                )
+                let inkOffsetFromLeadingEdge = textView.textContainerOrigin.x +
+                    lineRect.minX + glyphLocation.x + glyphBounds.minX
+                if inkOffsetFromLeadingEdge.isFinite {
+                    alignedFrame.origin.x = leadingEdgeX - inkOffsetFromLeadingEdge
+                }
+            }
             return alignedFrame
         }
 
@@ -5715,14 +5766,15 @@ extension PDFKitView {
                     }
                 }
                 if let baselineY = inlineTextBaselineY(for: object) {
-                    let pageBaselineY = pageOverlay.convert(
+                    let pageOrigin = pageOverlay.convert(
                         CGPoint(x: frame.minX, y: baselineY),
                         from: pdfView
-                    ).y
+                    )
                     stagedFrame = baselineAlignedFrame(
                         for: view,
                         baseFrame: stagedFrame,
-                        baselineY: pageBaselineY,
+                        baselineY: pageOrigin.y,
+                        leadingEdgeX: pageFrame.minX,
                         usesFlippedCoordinates: pageOverlay.isFlipped
                     )
                 }
@@ -7118,6 +7170,16 @@ extension PDFKitView.Coordinator: NSGestureRecognizerDelegate, NSTextViewDelegat
             annotation: inlineEditingAnnotation
         )
         resizeFreeTextEditorToFit()
+        let pageIndex = inlineEditingObject?.pageIndex ??
+            pendingTextActivation?.pageIndex
+        if let pdfView,
+           let superview = textView.superview,
+           let pageIndex,
+           let page = pdfView.document?.page(at: pageIndex) {
+            let editorFrame = pdfView.convert(textView.frame, from: superview)
+            let pageBounds = pdfView.convert(editorFrame, to: page).standardized
+            refreshOverlay(previewBounds: pageBounds)
+        }
     }
 
     func textDidEndEditing(_ notification: Notification) {
