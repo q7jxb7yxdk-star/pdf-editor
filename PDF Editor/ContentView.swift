@@ -1421,17 +1421,12 @@ struct ContentView: View {
                 .accessibilityLabel("Save")
 
                 Button(action: saveDocumentAs) {
-                    if showsSaveAsProgress {
-                        ProgressView()
-                            .frame(width: 44, height: 44)
-                    } else {
-                        Image(systemName: "square.and.arrow.down.on.square")
-                            .frame(width: 44, height: 44)
-                    }
+                    Image(systemName: "square.and.arrow.down.on.square")
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
                 .disabled(disablesSaveAsToolbarButton)
-                .accessibilityLabel(showsSaveAsProgress ? "Preparing Save As" : "Save As")
+                .accessibilityLabel("Save As")
 
                 Button {
                     undoManager?.undo()
@@ -1517,16 +1512,12 @@ struct ContentView: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
             Button(action: saveDocumentAs) {
-                if showsSaveAsProgress {
-                    ProgressView()
-                } else {
-                    Image(systemName: "square.and.arrow.down.on.square")
-                }
+                Image(systemName: "square.and.arrow.down.on.square")
             }
             .buttonStyle(.plain)
             .disabled(disablesSaveAsToolbarButton)
             .help("Save As")
-            .accessibilityLabel(showsSaveAsProgress ? "Preparing Save As" : "Save As")
+            .accessibilityLabel("Save As")
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
@@ -1875,14 +1866,6 @@ struct ContentView: View {
 
     private func saveDocumentAs() {
         performSave(choosingNewDestination: true)
-    }
-
-    private var showsSaveAsProgress: Bool {
-#if os(iOS)
-        activeManualSaveOperation == .saveAs
-#else
-        isSaving
-#endif
     }
 
     private func finishSaving() {
