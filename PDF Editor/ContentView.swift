@@ -1091,25 +1091,13 @@ struct ContentView: View {
             handleFileImport($0)
         }
 #if os(iOS)
-        .sheet(
-            isPresented: $showsManualSaveExporter,
-            onDismiss: manualSaveExporterDidDismiss
-        ) {
-            if let sourceURL = manualSaveExportSourceURL,
-               FileManager.default.fileExists(atPath: sourceURL.path) {
-                NativePDFExportPresenter(
-                    sourceURL: sourceURL,
-                    onCompletion: finishManualSaveExport
-                )
-            } else {
-                Color.clear
-                    .task {
-                        finishManualSaveExport(
-                            .failure(CocoaError(.fileNoSuchFile))
-                        )
-                    }
-            }
-        }
+        .background(
+            NativePDFExportPresenter(
+                isPresented: $showsManualSaveExporter,
+                sourceURL: manualSaveExportSourceURL,
+                onCompletion: finishManualSaveExport
+            )
+        )
 #endif
         .fileExporter(
             isPresented: $showsSinglePageExporter,
@@ -2362,11 +2350,6 @@ struct ContentView: View {
             }
             present(error)
         }
-    }
-
-    private func manualSaveExporterDidDismiss() {
-        guard pendingManualSave != nil || manualSaveExportSourceURL != nil else { return }
-        finishManualSaveExport(.failure(CocoaError(.userCancelled)))
     }
 
     private func clearManualSaveExportState(finishingSave: Bool) {
