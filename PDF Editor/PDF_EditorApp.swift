@@ -28,11 +28,8 @@ struct PDF_EditorApp: App {
             VersionlessPDFDocumentCommands()
         }
 #else
-        DocumentGroup(newDocument: { PDFEditorDocument() }) { configuration in
-            ContentView(
-                document: configuration.document,
-                fileURL: configuration.fileURL
-            )
+        WindowGroup {
+            IOSDocumentBrowserRootView()
         }
 #endif
     }

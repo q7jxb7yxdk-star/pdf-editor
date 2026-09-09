@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 
-private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
+private struct DocumentNavigationAppearanceBridge: UIViewControllerRepresentable {
     let isFullScreenReading: Bool
 
     func makeUIViewController(context: Context) -> Controller {
@@ -17,7 +17,7 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
         uiViewController.setFullScreenReading(isFullScreenReading)
     }
 
-    final class Controller: UIViewController, UINavigationItemRenameDelegate {
+    final class Controller: UIViewController {
         private var isFullScreenReading: Bool
 
         init(isFullScreenReading: Bool) {
@@ -39,7 +39,6 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            refreshRenameGuard()
             if UIDevice.current.userInterfaceIdiom == .phone {
                 applyFullScreenReadingAppearance(animated: false)
             } else if isFullScreenReading {
@@ -54,30 +53,10 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
             }
         }
 
-        override func viewDidLayoutSubviews() {
-            super.viewDidLayoutSubviews()
-            refreshRenameGuard()
-        }
-
-        func navigationItemShouldBeginRenaming(_ navigationItem: UINavigationItem) -> Bool {
-            false
-        }
-
-        func navigationItem(
-            _ navigationItem: UINavigationItem,
-            didEndRenamingWith title: String
-        ) {}
-
         func setFullScreenReading(_ enabled: Bool) {
             guard isFullScreenReading != enabled else { return }
             isFullScreenReading = enabled
             applyFullScreenReadingAppearance()
-        }
-
-        func refreshRenameGuard() {
-            guard UIDevice.current.userInterfaceIdiom != .phone else { return }
-            guard viewIfLoaded?.window != nil else { return }
-            installRenameGuard()
         }
 
         override var prefersStatusBarHidden: Bool {
@@ -85,9 +64,8 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
         }
 
         private func applyFullScreenReadingAppearance(animated: Bool = true) {
-            // DocumentGroup owns the navigation controller outside this SwiftUI
-            // subtree, so a child .toolbar visibility modifier alone does not
-            // reliably change the visible document navigation bar.
+            // The UIKit document-browser host owns the navigation controller
+            // outside this SwiftUI subtree.
             let hidesNavigationBar = UIDevice.current.userInterfaceIdiom == .phone
                 || isFullScreenReading
             navigationController?.setNavigationBarHidden(
@@ -97,23 +75,6 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
             navigationController?.setNeedsStatusBarAppearanceUpdate()
             setNeedsStatusBarAppearanceUpdate()
         }
-
-        private func installRenameGuard() {
-            var viewController = navigationController?.topViewController ?? parent
-            while let candidate = viewController {
-                let navigationItem = candidate.navigationItem
-                if navigationItem.renameDelegate != nil
-                    || navigationItem.titleMenuProvider != nil
-                    || navigationItem.documentProperties != nil {
-                    if navigationItem.renameDelegate !== self {
-                        navigationItem.renameDelegate = self
-                    }
-                    return
-                }
-                viewController = candidate.parent
-            }
-        }
-
     }
 }
 
@@ -522,7 +483,6 @@ struct ContentView: View {
 
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @Environment(\.dismiss) private var dismiss
 #else
     @Environment(\.undoManager) private var environmentUndoManager
 #endif
@@ -629,6 +589,9 @@ struct ContentView: View {
     private let annotationService = PDFAnnotationService()
     private let ocrService = VisionOCRService()
     private let documentFileURL: URL?
+#if os(iOS)
+    private let closeDocumentAction: () -> Void
+#endif
 #if os(macOS)
     private let nativeDocumentReference: PDFEditorNativeDocumentReference?
 #endif
@@ -646,9 +609,14 @@ struct ContentView: View {
         _saveURL = State(initialValue: fileURL)
     }
 #else
-    init(document: PDFEditorDocument, fileURL: URL?) {
+    init(
+        document: PDFEditorDocument,
+        fileURL: URL?,
+        onClose: @escaping () -> Void
+    ) {
         self.document = document
         documentFileURL = fileURL
+        closeDocumentAction = onClose
         _editorState = ObservedObject(wrappedValue: document.editorState)
         _saveURL = State(initialValue: fileURL)
         _showsToolPanel = State(
@@ -850,11 +818,13 @@ struct ContentView: View {
                 phoneDocumentBar
             }
         }
-        // iPhone uses the app-owned bar above. On iPad, refuse DocumentGroup's
-        // Rename action through its supported delegate without removing title
-        // menu or document-property objects during the open transition.
-        .background(DocumentTitleMenuDisabler(isFullScreenReading: isFullScreenReading))
-        .toolbar(removing: .title)
+        // iPhone uses the app-owned bar above. The bridge controls the UIKit
+        // navigation controller that hosts this editor on both iPhone and iPad.
+        .background(
+            DocumentNavigationAppearanceBridge(
+                isFullScreenReading: isFullScreenReading
+            )
+        )
         .toolbar {
             if !usesPhoneDocumentBar {
                 if horizontalSizeClass == .compact {
@@ -1419,9 +1389,7 @@ struct ContentView: View {
 
     private var phoneDocumentBar: some View {
         HStack(spacing: 0) {
-            Button {
-                dismiss()
-            } label: {
+            Button(action: closeDocumentAction) {
                 Image(systemName: "chevron.left")
                     .font(.headline.weight(.semibold))
                     .frame(width: 44, height: 44)
@@ -1513,6 +1481,17 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var adaptiveToolbar: some ToolbarContent {
+#if os(iOS)
+        ToolbarItem(placement: .navigation) {
+            Button(action: closeDocumentAction) {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.plain)
+            .help("Back")
+            .accessibilityLabel("Back")
+        }
+        .sharedBackgroundVisibility(.hidden)
+#endif
 #if os(macOS)
         ToolbarItem(placement: .navigation) {
             Button(action: openDocument) {
@@ -1995,9 +1974,9 @@ struct ContentView: View {
         isAdoptingImportedDocument = true
         defer { isAdoptingImportedDocument = false }
         do {
-            // A shared document's initial URL can precede DocumentGroup's
-            // completed import URL. Debounce so a URL change cancels this
-            // task before choosing a destination from transient file state.
+            // Give the file provider and any system-created Inbox copy a
+            // bounded interval to finish materializing before choosing the
+            // visible local destination.
             try await Task.sleep(for: .milliseconds(300))
             try Task.checkCancellation()
             let data = try document.snapshot(contentType: .pdf)
