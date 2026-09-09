@@ -6161,8 +6161,7 @@ extension PDFKitView {
             ]
 #if os(iOS)
             let annotationMovesWithoutScaling = interactionAnnotation?.kind == .note ||
-                interactionAnnotation?.kind == .freeText ||
-                interactionAnnotation?.kind == .ink
+                interactionAnnotation?.kind == .freeText
 #else
             let annotationMovesWithoutScaling = interactionAnnotation?.kind == .note
 #endif
@@ -6170,8 +6169,8 @@ extension PDFKitView {
                 // The field branch selected move or scale from its body/handle hit.
             } else if annotationMovesWithoutScaling {
 #if os(iOS)
-                // FreeText and Ink remain movable with one finger. Their size
-                // changes through text editing or the separate scale gesture.
+                // FreeText remains movable with one finger. Its content and
+                // text settings determine its size instead of corner gestures.
 #endif
                 dragMode = .move
             } else {
