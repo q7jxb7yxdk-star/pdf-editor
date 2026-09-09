@@ -4,51 +4,35 @@ import SwiftUI
 import UIKit
 
 struct NativePDFExportPresenter: UIViewControllerRepresentable {
-    @Binding var isPresented: Bool
-    let sourceURL: URL?
+    let sourceURL: URL
     let onCompletion: (Result<URL, Error>) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(isPresented: $isPresented, onCompletion: onCompletion)
+        Coordinator(onCompletion: onCompletion)
     }
 
-    func makeUIViewController(context: Context) -> UIViewController {
-        UIViewController()
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(
+            forExporting: [sourceURL],
+            asCopy: true
+        )
+        picker.delegate = context.coordinator
+        return picker
     }
 
-    func updateUIViewController(_ viewController: UIViewController, context: Context) {
-        context.coordinator.isPresented = $isPresented
+    func updateUIViewController(
+        _ viewController: UIDocumentPickerViewController,
+        context: Context
+    ) {
         context.coordinator.onCompletion = onCompletion
-        context.coordinator.presentIfNeeded(from: viewController, sourceURL: sourceURL)
     }
 
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        var isPresented: Binding<Bool>
         var onCompletion: (Result<URL, Error>) -> Void
-        private var isPresenting = false
         private var didComplete = false
 
-        init(
-            isPresented: Binding<Bool>,
-            onCompletion: @escaping (Result<URL, Error>) -> Void
-        ) {
-            self.isPresented = isPresented
+        init(onCompletion: @escaping (Result<URL, Error>) -> Void) {
             self.onCompletion = onCompletion
-        }
-
-        func presentIfNeeded(from host: UIViewController, sourceURL: URL?) {
-            guard isPresented.wrappedValue, !isPresenting, let sourceURL else { return }
-            isPresenting = true
-            didComplete = false
-            DispatchQueue.main.async { [weak self, weak host] in
-                guard let self, let host else { return }
-                let picker = UIDocumentPickerViewController(
-                    forExporting: [sourceURL],
-                    asCopy: true
-                )
-                picker.delegate = self
-                host.present(picker, animated: true)
-            }
         }
 
         func documentPicker(
@@ -69,8 +53,6 @@ struct NativePDFExportPresenter: UIViewControllerRepresentable {
         private func finish(_ result: Result<URL, Error>) {
             guard !didComplete else { return }
             didComplete = true
-            isPresenting = false
-            isPresented.wrappedValue = false
             onCompletion(result)
         }
     }

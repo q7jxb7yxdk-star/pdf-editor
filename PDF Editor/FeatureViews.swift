@@ -1843,12 +1843,12 @@ struct PDFCommentEditor: View {
 }
 
 struct PDFAddCommentView: View {
-    @Binding var text: String
-    let onAdd: () -> Void
-    let onCancel: () -> Void
+    let onAdd: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isEditorFocused: Bool
+    @State private var text = ""
+    @State private var isCompleting = false
 
     private var canAdd: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1868,8 +1868,7 @@ struct PDFAddCommentView: View {
                         guard keyPress.modifiers.contains(.shift), canAdd else {
                             return .ignored
                         }
-                        onAdd()
-                        dismiss()
+                        addComment()
                         return .handled
                     }
                     .scrollContentBackground(.hidden)
@@ -1887,23 +1886,39 @@ struct PDFAddCommentView: View {
             .navigationTitle("Add a comment")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        onCancel()
-                        dismiss()
-                    }
-                    .keyboardShortcut(.cancelAction)
+                    Button("Cancel", action: cancel)
+                        .keyboardShortcut(.cancelAction)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        onAdd()
-                        dismiss()
-                    }
-                    .disabled(!canAdd)
+                    Button("Add", action: addComment)
+                        .disabled(!canAdd || isCompleting)
                 }
             }
             .onAppear { isEditorFocused = true }
         }
         .frame(minWidth: 320, idealWidth: 440, minHeight: 280, idealHeight: 320)
+    }
+
+    private func addComment() {
+        guard canAdd, !isCompleting else { return }
+        let submittedText = text
+        isCompleting = true
+        isEditorFocused = false
+        Task { @MainActor in
+            await Task.yield()
+            onAdd(submittedText)
+            dismiss()
+        }
+    }
+
+    private func cancel() {
+        guard !isCompleting else { return }
+        isCompleting = true
+        isEditorFocused = false
+        Task { @MainActor in
+            await Task.yield()
+            dismiss()
+        }
     }
 }
 

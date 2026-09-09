@@ -333,7 +333,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
     func installPreparedManualSave(
         _ preparation: PDFManualSavePreparation,
         markingUnsaved: Bool,
-        undoManager: UndoManager?
+        undoManager: UndoManager?,
+        presentationPageIndex: Int?
     ) throws {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
@@ -356,7 +357,28 @@ final class PDFEditorDocument: ReferenceFileDocument {
         removesPasswordProtectionOnSave = false
         sourceData = preparation.data
         if !preparation.isSecurityOnlyPresentationUpdate {
+            let displayTransition: PDFFormDisplayTransition? =
+                presentationPageIndex.flatMap { pageIndex -> PDFFormDisplayTransition? in
+                    guard let currentPage = pdfDocument.page(at: pageIndex),
+                          let preparedPage = preparedDocument.page(at: pageIndex) else {
+                        return nil
+                    }
+                    return PDFFormDisplayTransition(
+                        pageIndex: pageIndex,
+                        beforeBounds: currentPage.bounds(for: .cropBox),
+                        afterBounds: preparedPage.bounds(for: .cropBox),
+                        minimumShieldDuration: 0.20
+                    )
+                }
+            postFormDisplayTransition(
+                PDFFormDisplayTransitionEvent.willChange,
+                transition: displayTransition
+            )
             synchronizePresentationPages(with: preparedDocument)
+            postFormDisplayTransition(
+                PDFFormDisplayTransitionEvent.didChange,
+                transition: displayTransition
+            )
         }
         publishDocumentChangeAfterViewUpdate(markingUnsaved: markingUnsaved)
 

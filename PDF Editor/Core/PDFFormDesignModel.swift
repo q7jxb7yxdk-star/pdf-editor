@@ -130,17 +130,23 @@ nonisolated struct PDFFormDisplayTransition: Equatable, Sendable {
     let beforeBounds: CGRect?
     let afterBounds: CGRect?
     let replacesDocument: Bool
+    let minimumShieldDuration: TimeInterval
+    let snapshotRevealDuration: TimeInterval
 
     init(
         pageIndex: Int,
         beforeBounds: CGRect?,
         afterBounds: CGRect?,
-        replacesDocument: Bool = false
+        replacesDocument: Bool = false,
+        minimumShieldDuration: TimeInterval = 0.05,
+        snapshotRevealDuration: TimeInterval = 0
     ) {
         self.pageIndex = pageIndex
         self.beforeBounds = beforeBounds
         self.afterBounds = afterBounds
         self.replacesDocument = replacesDocument
+        self.minimumShieldDuration = minimumShieldDuration
+        self.snapshotRevealDuration = snapshotRevealDuration
     }
 }
 

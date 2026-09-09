@@ -1623,6 +1623,15 @@ extension PDFKitView {
         private var formDisplayTransitionSawVisiblePages = false
         private var formDisplayTransitionCompletionScheduled = false
         private weak var formDisplayTransitionTargetDocument: PDFDocument?
+#if os(iOS)
+        private struct FormDisplayViewport {
+            let pageIndex: Int
+            let point: CGPoint
+            let scaleFactor: CGFloat
+            let autoScales: Bool
+        }
+        private var formDisplayViewport: FormDisplayViewport?
+#endif
 
         var isReplacingDocumentForFormTransition: Bool {
             activeFormDisplayTransition?.replacesDocument == true
@@ -3052,6 +3061,19 @@ extension PDFKitView {
             cancelFormDisplayTransition()
             activeFormDisplayTransition = transition
 #if os(iOS)
+            if let destination = pdfView.currentDestination,
+               let page = destination.page,
+               let document = pdfView.document {
+                let pageIndex = document.index(for: page)
+                if pageIndex != NSNotFound {
+                    formDisplayViewport = FormDisplayViewport(
+                        pageIndex: pageIndex,
+                        point: destination.point,
+                        scaleFactor: pdfView.scaleFactor,
+                        autoScales: pdfView.autoScales
+                    )
+                }
+            }
             guard let snapshot = pdfView.snapshotView(afterScreenUpdates: false) else {
                 return
             }
@@ -3133,6 +3155,9 @@ extension PDFKitView {
             _ transition: PDFFormDisplayTransition,
             in pdfView: PDFView
         ) {
+#if os(iOS)
+            restoreFormDisplayViewport(in: pdfView)
+#endif
             layoutFormDisplayTransition(in: pdfView)
             redrawFormDisplayTransition(transition, in: pdfView)
             keepFormDisplayTransitionSnapshotOnTop(in: pdfView)
@@ -3152,7 +3177,9 @@ extension PDFKitView {
                 self.layoutFormDisplayTransition(in: pdfView)
                 self.redrawFormDisplayTransition(transition, in: pdfView)
                 self.keepFormDisplayTransitionSnapshotOnTop(in: pdfView)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak pdfView] in
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + transition.minimumShieldDuration
+                ) { [weak self, weak pdfView] in
                     guard let self, let pdfView,
                           generation == self.formDisplayTransitionGeneration else { return }
                     self.layoutFormDisplayTransition(in: pdfView)
@@ -3161,9 +3188,38 @@ extension PDFKitView {
                     if !transition.replacesDocument {
                         self.redrawFormDisplayTransition(transition, in: pdfView)
                     }
-                    self.cancelFormDisplayTransition()
+                    self.revealFormDisplayTransition(
+                        transition,
+                        generation: generation
+                    )
                 }
             }
+        }
+
+        private func revealFormDisplayTransition(
+            _ transition: PDFFormDisplayTransition,
+            generation: Int
+        ) {
+#if os(iOS)
+            guard transition.snapshotRevealDuration > 0,
+                  let snapshot = formDisplayTransitionSnapshot else {
+                cancelFormDisplayTransition()
+                return
+            }
+            UIView.animate(
+                withDuration: transition.snapshotRevealDuration,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseOut]
+            ) {
+                snapshot.alpha = 0
+            } completion: { [weak self] _ in
+                guard let self,
+                      generation == self.formDisplayTransitionGeneration else { return }
+                self.cancelFormDisplayTransition()
+            }
+#else
+            cancelFormDisplayTransition()
+#endif
         }
 
         private func redrawFormDisplayTransition(
@@ -3200,6 +3256,18 @@ extension PDFKitView {
 #endif
         }
 
+#if os(iOS)
+        private func restoreFormDisplayViewport(in pdfView: PDFView) {
+            guard let viewport = formDisplayViewport,
+                  let page = pdfView.document?.page(at: viewport.pageIndex) else {
+                return
+            }
+            pdfView.scaleFactor = viewport.scaleFactor
+            pdfView.autoScales = viewport.autoScales
+            pdfView.go(to: PDFDestination(page: page, at: viewport.point))
+        }
+#endif
+
         private func keepFormDisplayTransitionSnapshotOnTop(in pdfView: PDFView) {
             guard let snapshot = formDisplayTransitionSnapshot else { return }
             // Stay outside PDFKit's internal view hierarchy throughout its rebuild.
@@ -3223,6 +3291,9 @@ extension PDFKitView {
             formDisplayTransitionSawVisiblePages = false
             formDisplayTransitionCompletionScheduled = false
             formDisplayTransitionTargetDocument = nil
+#if os(iOS)
+            formDisplayViewport = nil
+#endif
 #if os(macOS)
             formDisplayTransitionSnapshot?.removeFromSuperviewWithoutNeedingDisplay()
 #else

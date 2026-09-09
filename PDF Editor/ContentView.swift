@@ -17,7 +17,7 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
         uiViewController.setFullScreenReading(isFullScreenReading)
     }
 
-    final class Controller: UIViewController {
+    final class Controller: UIViewController, UINavigationItemRenameDelegate {
         private var isFullScreenReading: Bool
 
         init(isFullScreenReading: Bool) {
@@ -30,11 +30,43 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
             fatalError("init(coder:) has not been implemented")
         }
 
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                applyFullScreenReadingAppearance(animated: false)
+            }
+        }
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            disableDocumentRenamingAfterDocumentGroupConfiguresTitle()
-            applyFullScreenReadingAppearance()
+            refreshRenameGuard()
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                applyFullScreenReadingAppearance(animated: false)
+            } else if isFullScreenReading {
+                applyFullScreenReadingAppearance()
+            }
         }
+
+        override func viewDidDisappear(_ animated: Bool) {
+            super.viewDidDisappear(animated)
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                navigationController?.setNavigationBarHidden(false, animated: false)
+            }
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            refreshRenameGuard()
+        }
+
+        func navigationItemShouldBeginRenaming(_ navigationItem: UINavigationItem) -> Bool {
+            false
+        }
+
+        func navigationItem(
+            _ navigationItem: UINavigationItem,
+            didEndRenamingWith title: String
+        ) {}
 
         func setFullScreenReading(_ enabled: Bool) {
             guard isFullScreenReading != enabled else { return }
@@ -42,43 +74,46 @@ private struct DocumentTitleMenuDisabler: UIViewControllerRepresentable {
             applyFullScreenReadingAppearance()
         }
 
+        func refreshRenameGuard() {
+            guard UIDevice.current.userInterfaceIdiom != .phone else { return }
+            guard viewIfLoaded?.window != nil else { return }
+            installRenameGuard()
+        }
+
         override var prefersStatusBarHidden: Bool {
             isFullScreenReading
         }
 
-        private func applyFullScreenReadingAppearance() {
+        private func applyFullScreenReadingAppearance(animated: Bool = true) {
             // DocumentGroup owns the navigation controller outside this SwiftUI
             // subtree, so a child .toolbar visibility modifier alone does not
             // reliably change the visible document navigation bar.
-            navigationController?.setNavigationBarHidden(isFullScreenReading, animated: true)
+            let hidesNavigationBar = UIDevice.current.userInterfaceIdiom == .phone
+                || isFullScreenReading
+            navigationController?.setNavigationBarHidden(
+                hidesNavigationBar,
+                animated: animated
+            )
             navigationController?.setNeedsStatusBarAppearanceUpdate()
             setNeedsStatusBarAppearanceUpdate()
         }
 
-        private func disableDocumentRenamingAfterDocumentGroupConfiguresTitle() {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                var viewControllers: [UIViewController] = []
-                if let topViewController = self.navigationController?.topViewController {
-                    viewControllers.append(topViewController)
-                }
-
-                var ancestor = self.parent
-                while let viewController = ancestor {
-                    if !viewControllers.contains(where: { $0 === viewController }) {
-                        viewControllers.append(viewController)
+        private func installRenameGuard() {
+            var viewController = navigationController?.topViewController ?? parent
+            while let candidate = viewController {
+                let navigationItem = candidate.navigationItem
+                if navigationItem.renameDelegate != nil
+                    || navigationItem.titleMenuProvider != nil
+                    || navigationItem.documentProperties != nil {
+                    if navigationItem.renameDelegate !== self {
+                        navigationItem.renameDelegate = self
                     }
-                    ancestor = viewController.parent
+                    return
                 }
-
-                for viewController in viewControllers {
-                    let navigationItem = viewController.navigationItem
-                    navigationItem.renameDelegate = nil
-                    navigationItem.titleMenuProvider = nil
-                    navigationItem.documentProperties = nil
-                }
+                viewController = candidate.parent
             }
         }
+
     }
 }
 
@@ -338,6 +373,10 @@ private struct PendingManualSave {
     let edits: [PendingTextEdit]
 }
 
+private enum ManualSaveOperation: Equatable {
+    case saveAs
+}
+
 #if os(macOS)
 private struct ManualSaveDestinationAdoption {
     let nativeDocument: NSDocument?
@@ -483,7 +522,7 @@ struct ContentView: View {
 
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dismiss) private var dismiss
 #else
     @Environment(\.undoManager) private var environmentUndoManager
 #endif
@@ -540,6 +579,7 @@ struct ContentView: View {
     @State private var didAdoptImportedDestination = false
     @State private var isAdoptingImportedDocument = false
     @State private var isSaving = false
+    @State private var activeManualSaveOperation: ManualSaveOperation?
     @State private var pageAnnotations: [PDFAnnotationSnapshot] = []
     @State private var selectedAnnotation: PDFAnnotationSnapshot?
     private let annotationEditingEnabled = true
@@ -581,7 +621,6 @@ struct ContentView: View {
     @State private var bookmarkTitle = ""
     @State private var usesInlinePanels = false
 #if os(iOS)
-    @State private var showsDocumentFilename = true
     @State private var isFullScreenReading = false
 #else
     @State private var isMacFullScreen = false
@@ -626,10 +665,38 @@ struct ContentView: View {
 #endif
     }
 
-    private var canSave: Bool {
-        !isSaving && !isAdoptingImportedDocument && (
+    private var hasSavableChanges: Bool {
+        !isAdoptingImportedDocument && (
             editorState.hasUnsavedChanges || !pendingTextEditStore.edits.isEmpty || saveURL == nil
         )
+    }
+
+    private var canSave: Bool {
+        !isSaving && hasSavableChanges
+    }
+
+    private var saveToolbarIconOpacity: Double {
+#if os(iOS)
+        hasSavableChanges ? 1 : 0.35
+#else
+        1
+#endif
+    }
+
+    private var disablesSaveToolbarButton: Bool {
+#if os(iOS)
+        false
+#else
+        !canSave
+#endif
+    }
+
+    private var disablesSaveAsToolbarButton: Bool {
+#if os(iOS)
+        false
+#else
+        isSaving
+#endif
     }
 
     var body: some View {
@@ -640,21 +707,9 @@ struct ContentView: View {
             .background(MacFullScreenPresentationView(isFullScreen: $isMacFullScreen))
 #endif
 #if os(iOS)
-            .toolbar(isFullScreenReading ? .hidden : .visible, for: .navigationBar)
             .statusBar(hidden: isFullScreenReading)
             .task(id: documentFileURL) {
                 await adoptImportedDocumentIfNeeded()
-            }
-            .task {
-                do {
-                    try await Task.sleep(for: .seconds(3))
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled else { return }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
-                    showsDocumentFilename = false
-                }
             }
 #endif
             .task {
@@ -790,32 +845,25 @@ struct ContentView: View {
                 }
             }
         }
-        .overlay(alignment: .top) {
-            if horizontalSizeClass == .compact, showsDocumentFilename {
-                Text(suggestedSaveFilename)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .transition(.opacity)
-                    .allowsHitTesting(false)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if usesPhoneDocumentBar && !isFullScreenReading {
+                phoneDocumentBar
             }
         }
-        // DocumentGroup configures the Rename action after SwiftUI toolbar
-        // modifiers. Clear that document-specific menu once it has finished.
+        // iPhone uses the app-owned bar above. On iPad, refuse DocumentGroup's
+        // Rename action through its supported delegate without removing title
+        // menu or document-property objects during the open transition.
         .background(DocumentTitleMenuDisabler(isFullScreenReading: isFullScreenReading))
         .toolbar(removing: .title)
         .toolbar {
-            if horizontalSizeClass == .compact {
-                ToolbarItem(placement: .principal) {
-                    compactScrollableToolbar
+            if !usesPhoneDocumentBar {
+                if horizontalSizeClass == .compact {
+                    ToolbarItem(placement: .principal) {
+                        compactScrollableToolbar
+                    }
+                } else {
+                    adaptiveToolbar
                 }
-            } else {
-                adaptiveToolbar
             }
         }
 #endif
@@ -824,9 +872,6 @@ struct ContentView: View {
             adaptiveToolbar
         }
 #endif
-        .onChange(of: isSaving) { _, saving in
-            if saving { cancelFormFieldPlacement() }
-        }
         .onChange(of: isRunningOCR) { _, running in
             if running { cancelFormFieldPlacement() }
         }
@@ -979,9 +1024,9 @@ struct ContentView: View {
 #endif
         .sheet(isPresented: $showsCommentPrompt, onDismiss: cancelCommentPlacement) {
             PDFAddCommentView(
-                text: $annotationText,
-                onAdd: { addNote(at: pendingCommentPlacement) },
-                onCancel: cancelCommentPlacement
+                onAdd: { text in
+                    addNote(text: text, at: pendingCommentPlacement)
+                }
             )
         }
         .sheet(isPresented: $showsOCRResult) { ocrResultView }
@@ -1046,13 +1091,25 @@ struct ContentView: View {
             handleFileImport($0)
         }
 #if os(iOS)
-        .background(
-            NativePDFExportPresenter(
-                isPresented: $showsManualSaveExporter,
-                sourceURL: manualSaveExportSourceURL,
-                onCompletion: finishManualSaveExport
-            )
-        )
+        .sheet(
+            isPresented: $showsManualSaveExporter,
+            onDismiss: manualSaveExporterDidDismiss
+        ) {
+            if let sourceURL = manualSaveExportSourceURL,
+               FileManager.default.fileExists(atPath: sourceURL.path) {
+                NativePDFExportPresenter(
+                    sourceURL: sourceURL,
+                    onCompletion: finishManualSaveExport
+                )
+            } else {
+                Color.clear
+                    .task {
+                        finishManualSaveExport(
+                            .failure(CocoaError(.fileNoSuchFile))
+                        )
+                    }
+            }
+        }
 #endif
         .fileExporter(
             isPresented: $showsSinglePageExporter,
@@ -1368,19 +1425,47 @@ struct ContentView: View {
     }
 
 #if os(iOS)
+    private var usesPhoneDocumentBar: Bool {
+        UIDevice.current.userInterfaceIdiom == .phone
+    }
+
+    private var phoneDocumentBar: some View {
+        HStack(spacing: 0) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.headline.weight(.semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+
+            compactScrollableToolbar
+                .frame(maxWidth: .infinity)
+        }
+        .frame(height: 44)
+        .background(.regularMaterial)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+
     private var compactScrollableToolbar: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 Button(action: saveDocument) {
                     Image(systemName: "square.and.arrow.down")
                         .frame(width: 44, height: 44)
+                        .opacity(saveToolbarIconOpacity)
+                        .animation(nil, value: hasSavableChanges)
                 }
                 .buttonStyle(.plain)
-                .disabled(!canSave)
+                .disabled(disablesSaveToolbarButton)
                 .accessibilityLabel("Save")
 
                 Button(action: saveDocumentAs) {
-                    if isSaving {
+                    if showsSaveAsProgress {
                         ProgressView()
                             .frame(width: 44, height: 44)
                     } else {
@@ -1389,8 +1474,8 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(isSaving)
-                .accessibilityLabel(isSaving ? "Preparing Save As" : "Save As")
+                .disabled(disablesSaveAsToolbarButton)
+                .accessibilityLabel(showsSaveAsProgress ? "Preparing Save As" : "Save As")
 
                 Button {
                     undoManager?.undo()
@@ -1454,25 +1539,27 @@ struct ContentView: View {
         ToolbarItem(placement: .navigation) {
             Button(action: saveDocument) {
                 Image(systemName: "square.and.arrow.down")
+                    .opacity(saveToolbarIconOpacity)
+                    .animation(nil, value: hasSavableChanges)
             }
             .buttonStyle(.plain)
-            .disabled(!canSave)
+            .disabled(disablesSaveToolbarButton)
             .help("Save")
             .accessibilityLabel("Save")
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
             Button(action: saveDocumentAs) {
-                if isSaving {
+                if showsSaveAsProgress {
                     ProgressView()
                 } else {
                     Image(systemName: "square.and.arrow.down.on.square")
                 }
             }
             .buttonStyle(.plain)
-            .disabled(isSaving)
+            .disabled(disablesSaveAsToolbarButton)
             .help("Save As")
-            .accessibilityLabel(isSaving ? "Preparing Save As" : "Save As")
+            .accessibilityLabel(showsSaveAsProgress ? "Preparing Save As" : "Save As")
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .navigation) {
@@ -1815,6 +1902,7 @@ struct ContentView: View {
     }
 
     private func saveDocument() {
+        guard canSave else { return }
         performSave(choosingNewDestination: false)
     }
 
@@ -1822,9 +1910,23 @@ struct ContentView: View {
         performSave(choosingNewDestination: true)
     }
 
+    private var showsSaveAsProgress: Bool {
+#if os(iOS)
+        activeManualSaveOperation == .saveAs
+#else
+        isSaving
+#endif
+    }
+
+    private func finishSaving() {
+        isSaving = false
+        activeManualSaveOperation = nil
+    }
+
     private func performSave(choosingNewDestination: Bool) {
         leaveFullScreenReading()
         guard !isSaving else { return }
+        cancelFormFieldPlacement()
 #if os(macOS)
         if let nativeDocument = nativeDocumentReference?.document {
             if choosingNewDestination || nativeDocument.fileURL == nil {
@@ -1842,6 +1944,9 @@ struct ContentView: View {
             return
         }
         isSaving = true
+#if os(iOS)
+        activeManualSaveOperation = choosingNewDestination ? .saveAs : nil
+#endif
 #if os(macOS)
         if choosingNewDestination || saveURL == nil {
             presentManualSavePanel(filename: "\(suggestedSaveFilename).pdf")
@@ -1857,20 +1962,23 @@ struct ContentView: View {
 #if os(macOS)
                     try await writeExistingDocument(data, to: saveURL)
 #else
-                    try ManualPDFSaveCoordinator.write(data, to: saveURL)
+                    try await ManualPDFSaveCoordinator.writeExistingDocumentOnIOS(
+                        data,
+                        to: saveURL
+                    )
 #endif
                     try await finishSuccessfulManualSave(
                         pendingSave,
                         at: saveURL,
                         didAdoptDestination: didAdoptImportedDestination
                     )
-                    isSaving = false
+                    finishSaving()
                 } else {
                     let defaultFilename = suggestedSaveFilename
 #if os(macOS)
                     // The macOS new-destination path returns before starting
                     // this task, after presenting NSSavePanel immediately.
-                    isSaving = false
+                    finishSaving()
 #else
                     pendingManualSave = pendingSave
                     manualSaveExportSourceURL = try makeManualSaveExportFile(
@@ -1878,12 +1986,16 @@ struct ContentView: View {
                         filename: "\(defaultFilename).pdf"
                     )
                     await Task.yield()
-                    guard manualSaveExportSourceURL != nil else { return }
+                    guard let sourceURL = manualSaveExportSourceURL,
+                          FileManager.default.fileExists(atPath: sourceURL.path) else {
+                        finishManualSaveExport(.failure(CocoaError(.fileNoSuchFile)))
+                        return
+                    }
                     showsManualSaveExporter = true
 #endif
                 }
             } catch {
-                isSaving = false
+                finishSaving()
                 present(error)
             }
         }
@@ -1928,6 +2040,7 @@ struct ContentView: View {
         }
         nativeDocument.saveActivityDidChange = { saving in
             isSaving = saving
+            if !saving { activeManualSaveOperation = nil }
         }
     }
 
@@ -2017,7 +2130,7 @@ struct ContentView: View {
         let completionHandler: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK, let url = panel.url else {
                 preparationTask.cancel()
-                isSaving = false
+                finishSaving()
                 return
             }
             let destinationAdoption = beginDocumentDestinationAdoption(
@@ -2045,7 +2158,7 @@ struct ContentView: View {
                     rollbackDocumentDestinationAdoption(destinationAdoption)
                     present(error)
                 }
-                isSaving = false
+                finishSaving()
             }
         }
 
@@ -2180,10 +2293,16 @@ struct ContentView: View {
     ) async throws {
         let edits = pendingSave.edits
         if pendingSave.preparation.requiresInstallation {
+#if os(iOS)
+            let presentationPageIndex = selectedPageIndex
+#else
+            let presentationPageIndex: Int? = nil
+#endif
             try document.installPreparedManualSave(
                 pendingSave.preparation,
                 markingUnsaved: markingUnsaved,
-                undoManager: undoManager
+                undoManager: undoManager,
+                presentationPageIndex: presentationPageIndex
             )
         }
         for edit in edits {
@@ -2219,26 +2338,15 @@ struct ContentView: View {
     }
 
     private func finishManualSaveExport(_ result: Result<URL, Error>) {
-        func clearExportState() {
-            showsManualSaveExporter = false
-            if let manualSaveExportSourceURL {
-                try? FileManager.default.removeItem(
-                    at: manualSaveExportSourceURL.deletingLastPathComponent()
-                )
-            }
-            manualSaveExportSourceURL = nil
-            pendingManualSave = nil
-            isSaving = false
-        }
-
         switch result {
         case let .success(url):
             guard let pendingManualSave else {
-                clearExportState()
+                clearManualSaveExportState(finishingSave: true)
                 return
             }
+            clearManualSaveExportState(finishingSave: false)
             Task { @MainActor in
-                defer { clearExportState() }
+                defer { finishSaving() }
                 do {
                     try await finishSuccessfulManualSave(pendingManualSave, at: url)
                 } catch {
@@ -2246,7 +2354,7 @@ struct ContentView: View {
                 }
             }
         case let .failure(error):
-            defer { clearExportState() }
+            defer { clearManualSaveExportState(finishingSave: true) }
             let cocoaError = error as NSError
             guard !(cocoaError.domain == NSCocoaErrorDomain
                     && cocoaError.code == CocoaError.userCancelled.rawValue) else {
@@ -2254,6 +2362,23 @@ struct ContentView: View {
             }
             present(error)
         }
+    }
+
+    private func manualSaveExporterDidDismiss() {
+        guard pendingManualSave != nil || manualSaveExportSourceURL != nil else { return }
+        finishManualSaveExport(.failure(CocoaError(.userCancelled)))
+    }
+
+    private func clearManualSaveExportState(finishingSave: Bool) {
+        showsManualSaveExporter = false
+        if let manualSaveExportSourceURL {
+            try? FileManager.default.removeItem(
+                at: manualSaveExportSourceURL.deletingLastPathComponent()
+            )
+        }
+        manualSaveExportSourceURL = nil
+        pendingManualSave = nil
+        if finishingSave { finishSaving() }
     }
 
 #if os(iOS)
@@ -3067,13 +3192,13 @@ struct ContentView: View {
         }
     }
 
-    private func addNote(at placement: PDFCommentPlacement?) {
+    private func addNote(text: String, at placement: PDFCommentPlacement?) {
         guard let placement,
               let page = document.pdfDocument.page(at: placement.pageIndex) else { return }
         do {
             try document.mutateAnnotations(undoManager: undoManager, actionName: "Add Comment") {
                 _ = try annotationService.addNote(
-                    text: annotationText,
+                    text: text,
                     at: placement.point,
                     to: page
                 )

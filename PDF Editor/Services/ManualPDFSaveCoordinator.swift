@@ -26,6 +26,30 @@ nonisolated enum ManualPDFSaveDestinationPolicy {
 
 enum ManualPDFSaveCoordinator {
 #if os(iOS)
+    // NSFileCoordinator may synchronously wait for a Files provider (for
+    // example, iCloud Drive). Keep that wait off Swift's cooperative executor
+    // and serialize writes so a document cannot be coordinated concurrently.
+    nonisolated private static let iOSExistingDocumentWriteQueue = DispatchQueue(
+        label: "com.sunnyyu.PDFEditor.existing-document-write"
+    )
+
+    nonisolated static func writeExistingDocumentOnIOS(
+        _ data: Data,
+        to url: URL
+    ) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            iOSExistingDocumentWriteQueue.async {
+                do {
+                    try write(data, to: url)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     nonisolated static func adoptImportedDocumentIfNeeded(
         from sourceURL: URL,
         data: Data
