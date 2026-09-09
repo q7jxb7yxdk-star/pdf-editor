@@ -1440,6 +1440,8 @@ extension PDFKitView {
         var onAcroFormChange: () -> Void
         var lastViewerCommandID: UUID?
         var pendingPageNavigationIndex: Int?
+        private var pageChangeReconciliationToken = 0
+        private var selectionReconciliationToken = 0
 
         private weak var pdfView: PDFView?
         private var observers: [NSObjectProtocol] = []
@@ -1723,7 +1725,52 @@ extension PDFKitView {
             configureOverlay()
         }
 
+        private func schedulePageChangeReconciliation(
+            for pdfView: PDFView,
+            document: PDFDocument,
+            page: PDFPage,
+            pageIndex: Int
+        ) {
+            pageChangeReconciliationToken &+= 1
+            let token = pageChangeReconciliationToken
+            DispatchQueue.main.async { [weak self, weak pdfView, weak document, weak page] in
+                guard let self, let pdfView, let document, let page,
+                      self.pageChangeReconciliationToken == token,
+                      self.pdfView === pdfView,
+                      pdfView.document === document,
+                      pdfView.currentPage === page,
+                      document.index(for: page) == pageIndex else { return }
+                if self.selectedPageIndex.wrappedValue != pageIndex {
+                    self.finishInlineTextEditing(commit: true)
+                    self.selectedPageIndex.wrappedValue = pageIndex
+                    self.selectedObject.wrappedValue = nil
+                    self.selectedAnnotation.wrappedValue = nil
+                    if self.selectedFormField.wrappedValue?.pageIndex != pageIndex {
+                        self.selectedFormField.wrappedValue = nil
+                    }
+                }
+                self.scheduleOverlayRefresh()
+            }
+        }
+
+        private func scheduleSelectionReconciliation(
+            for pdfView: PDFView,
+            document: PDFDocument
+        ) {
+            selectionReconciliationToken &+= 1
+            let token = selectionReconciliationToken
+            DispatchQueue.main.async { [weak self, weak pdfView, weak document] in
+                guard let self, let pdfView, let document,
+                      self.selectionReconciliationToken == token,
+                      self.pdfView === pdfView,
+                      pdfView.document === document else { return }
+                self.selection.wrappedValue = pdfView.currentSelection
+            }
+        }
+
         func observe(_ pdfView: PDFView) {
+            pageChangeReconciliationToken &+= 1
+            selectionReconciliationToken &+= 1
             self.pdfView = pdfView
 #if os(macOS)
             (pdfView as? PDFInteractionPDFView)?.interactionHandler = self
@@ -1753,27 +1800,28 @@ extension PDFKitView {
                           let document = pdfView.document,
                           let page = pdfView.currentPage else { return }
                     let pageIndex = document.index(for: page)
-                    if let pendingPageNavigationIndex {
+                    if let pendingPageNavigationIndex = self.pendingPageNavigationIndex {
                         guard pageIndex == pendingPageNavigationIndex else { return }
                         self.pendingPageNavigationIndex = nil
                     }
-                    if selectedPageIndex.wrappedValue != pageIndex {
-                        finishInlineTextEditing(commit: true)
-                        selectedPageIndex.wrappedValue = pageIndex
-                        selectedObject.wrappedValue = nil
-                        selectedAnnotation.wrappedValue = nil
-                        if selectedFormField.wrappedValue?.pageIndex != pageIndex {
-                            selectedFormField.wrappedValue = nil
-                        }
-                    }
-                    scheduleOverlayRefresh()
+                    self.schedulePageChangeReconciliation(
+                        for: pdfView,
+                        document: document,
+                        page: page,
+                        pageIndex: pageIndex
+                    )
                 },
                 center.addObserver(
                     forName: .PDFViewSelectionChanged,
                     object: pdfView,
                     queue: .main
                 ) { [weak self, weak pdfView] _ in
-                    self?.selection.wrappedValue = pdfView?.currentSelection
+                    guard let self, let pdfView,
+                          let document = pdfView.document else { return }
+                    self.scheduleSelectionReconciliation(
+                        for: pdfView,
+                        document: document
+                    )
                 },
                 center.addObserver(
                     forName: .PDFViewScaleChanged,
@@ -1935,6 +1983,8 @@ extension PDFKitView {
         }
 
         func stopObserving() {
+            pageChangeReconciliationToken &+= 1
+            selectionReconciliationToken &+= 1
             finishInlineTextEditing(commit: false)
             restoreHiddenFreeTextAnnotation()
             pendingTextActivation = nil
@@ -2180,17 +2230,48 @@ extension PDFKitView {
         private func updateAuthoredTextEditorSize(_ editor: UITextView) {
             guard let pdfView, var field = formTextEditingField,
                   let page = pdfView.document?.page(at: field.pageIndex) else { return }
-            let size = field.kind.fittedTextSize(text: editor.text ?? "", fontSize: field.fontSize)
+            let cropBox = page.bounds(for: .cropBox)
+            let size = field.kind.fittedTextSize(
+                text: editor.text ?? "",
+                fontSize: field.fontSize,
+                maximumWidth: max(field.kind.minimumDimension, cropBox.maxX - field.bounds.minX)
+            )
             field.bounds = PDFFormPageGeometry(
-                cropBox: page.bounds(for: .cropBox), rotation: page.rotation
+                cropBox: cropBox, rotation: page.rotation
             ).clamped(CGRect(
-                x: field.bounds.minX, y: field.bounds.minY,
+                x: field.bounds.minX, y: field.bounds.maxY - size.height,
                 width: size.width, height: size.height
             ), minimumDimension: field.kind.minimumDimension)
             editor.frame = pdfView.convert(field.bounds, from: page).standardized
             formTextEditingField = field
             selectedFormField.wrappedValue = field
             refreshOverlay()
+        }
+
+        /// Reconcile the synchronously updated selected field with the live
+        /// UIKit editor without replacing its uncommitted text.
+        private func reconcileActiveTextboxFontSizeChange(
+            fieldID: UUID,
+            requestedFontSize: CGFloat,
+            in pdfView: PDFView
+        ) {
+            guard let editor = formTextEditor,
+                  let editingField = formTextEditingField,
+                  editingField.id == fieldID,
+                  var updatedField = selectedFormField.wrappedValue,
+                  updatedField.id == fieldID,
+                  abs(updatedField.fontSize - requestedFontSize) < 0.01 else { return }
+            let selectedRange = editor.selectedRange
+            let wasFirstResponder = editor.isFirstResponder
+            updatedField.bounds = editingField.bounds
+            updatedField.value = editor.text ?? ""
+            formTextEditingField = updatedField
+            editor.font = UIFont.systemFont(
+                ofSize: updatedField.fontSize * max(pdfView.scaleFactor, 0.001)
+            )
+            updateAuthoredTextEditorSize(editor)
+            editor.selectedRange = selectedRange
+            if wasFirstResponder { editor.becomeFirstResponder() }
         }
 
         private func finishAuthoredTextEditing() {
@@ -2422,6 +2503,22 @@ extension PDFKitView {
         }
 
 #if os(macOS)
+        /// Centers the AppKit text layout within its existing overlay frame.
+        /// This is presentation-only: PDF Widget geometry stays unchanged.
+        private func centerAuthoredTextboxTextVertically(_ textView: PDFFormTextView) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            textView.textContainerInset = .zero
+            textContainer.containerSize = NSSize(
+                width: max(textView.bounds.width, 1),
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            layoutManager.ensureLayout(for: textContainer)
+            let usedHeight = ceil(layoutManager.usedRect(for: textContainer).height)
+            let verticalInset = max(0, (textView.bounds.height - usedHeight) / 2)
+            textView.textContainerInset = NSSize(width: 0, height: verticalInset)
+        }
+
         /// PDFKit's macOS Widget editor can collapse a `/Tx` field to one
         /// line even when its AcroForm `/Ff` Multiline flag is present. Render
         /// app-authored Textboxes in the page-overlay coordinate system so one
@@ -2460,11 +2557,11 @@ extension PDFKitView {
                         width: max(fallback.bounds.width, 1),
                         height: CGFloat.greatestFiniteMagnitude
                     )
-                    fallback.textContainerInset = .zero
                     if formTextEditingField?.id != field.id,
                        fallback.string != renderedField.value {
                         fallback.string = renderedField.value
                     }
+                    centerAuthoredTextboxTextVertically(fallback)
                     continue
                 }
                 guard let page = document.page(at: renderedField.pageIndex),
@@ -2516,10 +2613,10 @@ extension PDFKitView {
                     width: max(textView.bounds.width, 1),
                     height: CGFloat.greatestFiniteMagnitude
                 )
-                textView.textContainerInset = .zero
                 if formTextEditingField?.id != field.id, textView.string != renderedField.value {
                     textView.string = renderedField.value
                 }
+                centerAuthoredTextboxTextVertically(textView)
                 background.needsDisplay = true
                 textView.needsDisplay = true
             }
@@ -2569,7 +2666,7 @@ extension PDFKitView {
                 )
                 fallback.textColor = .black
                 fallback.string = field.value
-                fallback.textContainerInset = .zero
+                centerAuthoredTextboxTextVertically(fallback)
                 fallback.delegate = self
                 pdfView.addSubview(background, positioned: .above, relativeTo: nil)
                 pdfView.addSubview(fallback, positioned: .above, relativeTo: background)
@@ -2590,55 +2687,17 @@ extension PDFKitView {
             guard let pdfView, var field = formTextEditingField,
                   field.id == textView.fieldID,
                   let page = pdfView.document?.page(at: field.pageIndex) else { return }
-            let lines = textView.string.split(
-                separator: "\n",
-                omittingEmptySubsequences: false
-            ).map(String.init)
-            let font = NSFont.systemFont(ofSize: field.fontSize)
-            let lineHeight = font.ascender - font.descender + font.leading
-            let roundedLineHeight = ceil(lineHeight)
-            let attributes: [NSAttributedString.Key: Any] = [.font: font]
-            let widestLine = lines.reduce(CGFloat.zero) { width, line in
-                max(width, (line as NSString).size(withAttributes: attributes).width)
-            }
-            let desiredWidth = max(
-                field.kind.defaultSize.width,
-                ceil(widestLine) + 6
-            )
             let cropBox = page.bounds(for: .cropBox)
-            let availableWidth = max(
-                field.kind.minimumDimension,
-                cropBox.maxX - field.bounds.minX
-            )
-            let width = min(desiredWidth, availableWidth)
-            let textWidth = max(width - 6, 1)
-            let lineCount = lines.reduce(0) { count, line in
-                guard !line.isEmpty else { return count + 1 }
-                let textBounds = (line as NSString).boundingRect(
-                    with: CGSize(
-                        width: textWidth,
-                        height: CGFloat.greatestFiniteMagnitude
-                    ),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: attributes
-                )
-                let wrappedLines = max(
-                    1,
-                    Int(ceil(textBounds.height / max(roundedLineHeight, 1)))
-                )
-                return count + wrappedLines
-            }
-            let height = max(
-                field.kind.minimumDimension,
-                roundedLineHeight * CGFloat(lineCount)
+            let size = field.kind.fittedTextSize(
+                text: textView.string,
+                fontSize: field.fontSize,
+                maximumWidth: max(field.kind.minimumDimension, cropBox.maxX - field.bounds.minX)
             )
             field.bounds = PDFFormPageGeometry(
                 cropBox: cropBox, rotation: page.rotation
             ).clamped(CGRect(
-                x: field.bounds.minX,
-                y: field.bounds.maxY - height,
-                width: width,
-                height: height
+                x: field.bounds.minX, y: field.bounds.maxY - size.height,
+                width: size.width, height: size.height
             ), minimumDimension: field.kind.minimumDimension)
             field.value = textView.string
             formTextEditingField = field
@@ -2650,9 +2709,39 @@ extension PDFKitView {
                 let frame = pdfView.convert(field.bounds, from: page).standardized
                 formTextFallbackBackground?.frame = frame
                 textView.frame = frame.insetBy(dx: 3, dy: 0)
-                textView.textContainerInset = .zero
+                centerAuthoredTextboxTextVertically(textView)
             }
             synchronizeAuthoredTextboxes()
+        }
+
+        /// Reconcile the synchronously updated selected field with the live
+        /// AppKit editor without replacing its uncommitted text.
+        private func reconcileActiveTextboxFontSizeChange(
+            fieldID: UUID,
+            requestedFontSize: CGFloat,
+            in pdfView: PDFView
+        ) {
+            guard let editingField = formTextEditingField,
+                  editingField.id == fieldID,
+                  var updatedField = selectedFormField.wrappedValue,
+                  updatedField.id == fieldID,
+                  abs(updatedField.fontSize - requestedFontSize) < 0.01 else { return }
+            let textView = formTextViews[fieldID] ?? formTextFallbackEditor
+            guard let textView, textView.fieldID == fieldID else { return }
+            let selectedRange = textView.selectedRange()
+            let wasFirstResponder = textView.window?.firstResponder === textView
+            updatedField.bounds = editingField.bounds
+            updatedField.value = textView.string
+            formTextEditingField = updatedField
+            let displayFontSize = updatedField.fontSize * (
+                formTextFallbackEditor === textView
+                    ? max(pdfView.scaleFactor, 0.001) : 1
+            )
+            textView.font = NSFont.systemFont(ofSize: displayFontSize)
+            centerAuthoredTextboxTextVertically(textView)
+            updateAuthoredTextboxSize(textView)
+            textView.setSelectedRange(selectedRange)
+            if wasFirstResponder { pdfView.window?.makeFirstResponder(textView) }
         }
 
         private func finishAuthoredTextboxEditing(_ textView: PDFFormTextView) {
@@ -2972,6 +3061,11 @@ extension PDFKitView {
                 onChangeFontSize: { [weak self] fontSize in
                     guard let self else { return }
                     self.onSetFormFieldFontSize(field, fontSize)
+                    self.reconcileActiveTextboxFontSizeChange(
+                        fieldID: field.id,
+                        requestedFontSize: fontSize,
+                        in: pdfView
+                    )
                     self.scheduleOverlayRefresh()
                 },
                 onChangeChoiceOptions: { [weak self] choices in

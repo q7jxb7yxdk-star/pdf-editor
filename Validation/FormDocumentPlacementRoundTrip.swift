@@ -83,7 +83,7 @@ struct FormDocumentPlacementRoundTrip {
             try document.addPlacedFormField(
                 kind: .text,
                 pageIndex: 0,
-                bounds: CGRect(x: 40, y: 400, width: 180, height: 28),
+                bounds: CGRect(x: 40, y: 400, width: 100, height: 22),
                 radioGroupName: nil,
                 undoManager: undoManager
             )
@@ -111,30 +111,16 @@ struct FormDocumentPlacementRoundTrip {
                 undoManager: undoManager
             )
         }
-#if os(macOS)
-        let textFont = NSFont.systemFont(ofSize: 18)
-        let expectedTextHeight = max(
-            PDFFormDesignKind.text.minimumDimension,
-            ceil((multilineText as NSString).boundingRect(
-                with: CGSize(
-                    width: max(editedTextBox.bounds.width - 6, 1),
-                    height: CGFloat.greatestFiniteMagnitude
-                ),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: textFont]
-            ).height) + 4
+        let expectedTextSize = PDFFormDesignKind.text.fittedTextSize(
+            text: multilineText,
+            fontSize: 18,
+            maximumWidth: 572
         )
-#else
-        let expectedTextHeight = max(
-            12,
-            editedTextBox.bounds.height + 18 - editedTextBox.fontSize
-        )
-#endif
         guard abs(resizedTextBox.fontSize - 18) < 0.01,
-              abs(resizedTextBox.bounds.height - expectedTextHeight) < 0.01,
-              abs(resizedTextBox.bounds.width - editedTextBox.bounds.width) < 0.01,
-              abs(resizedTextBox.bounds.midY - editedTextBox.bounds.midY) < 0.01 else {
-            throw Failure("Textbox font-size update did not fit its text height")
+              abs(resizedTextBox.bounds.height - expectedTextSize.height) < 0.01,
+              abs(resizedTextBox.bounds.width - expectedTextSize.width) < 0.01,
+              abs(resizedTextBox.bounds.maxY - editedTextBox.bounds.maxY) < 0.01 else {
+            throw Failure("Textbox font-size update did not fit its text size")
         }
         let listBoxSize = PDFFormDesignKind.listBox.placementSize(
             choices: options,

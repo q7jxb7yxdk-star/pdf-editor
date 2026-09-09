@@ -39,7 +39,7 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
 
     var defaultSize: CGSize {
         switch self {
-        case .text: CGSize(width: 100, height: 28)
+        case .text: CGSize(width: 100, height: 22)
         case .checkBox, .radioButton: CGSize(width: 11, height: 11)
         case .dropdown: CGSize(width: 180, height: 28)
         case .listBox: CGSize(width: 180, height: 72)
@@ -73,27 +73,56 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         return CGSize(width: width, height: height)
     }
 
-    func fittedTextSize(text: String, fontSize: CGFloat) -> CGSize {
+    /// Measures an app-authored Textbox in PDF points. Both platform editors
+    /// call this so a text or font-size change produces the same content-fit
+    /// geometry before page crop clamping is applied.
+    func fittedTextSize(
+        text: String,
+        fontSize: CGFloat,
+        maximumWidth: CGFloat
+    ) -> CGSize {
         guard self == .text else { return defaultSize }
 #if os(macOS)
         let font = NSFont.systemFont(ofSize: fontSize)
         let lineHeight = font.ascender - font.descender + font.leading
+        // The AppKit editor frame is inset horizontally by three points per
+        // side and has a zero text-container inset.
+        let horizontalPadding: CGFloat = 6
+        let verticalPadding: CGFloat = 0
 #else
         let font = UIFont.systemFont(ofSize: fontSize)
         let lineHeight = font.lineHeight
+        // The UIKit display/editor uses textContainerInset of 4/6/4/6.
+        let horizontalPadding: CGFloat = 12
+        let verticalPadding: CGFloat = 8
 #endif
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         let lines = text.components(separatedBy: .newlines)
         let widestLine = lines.reduce(CGFloat.zero) { width, line in
             max(width, (line as NSString).size(withAttributes: attributes).width)
         }
-        let horizontalPadding: CGFloat = 12
-        // Textboxes already reserve a small editor inset. Keep the fitted
-        // height tight so multiline fields do not accumulate a blank row.
-        let verticalPadding: CGFloat = 4
+        let width = min(
+            max(defaultSize.width, ceil(widestLine) + horizontalPadding),
+            max(maximumWidth, minimumDimension)
+        )
+        let textWidth = max(width - horizontalPadding, 1)
+        let roundedLineHeight = max(ceil(lineHeight), 1)
+        let lineCount = lines.reduce(0) { count, line in
+            guard !line.isEmpty else { return count + 1 }
+            let textBounds = (line as NSString).boundingRect(
+                with: CGSize(width: textWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes,
+                context: nil
+            )
+            return count + max(1, Int(ceil(textBounds.height / roundedLineHeight)))
+        }
         return CGSize(
-            width: max(48, ceil(widestLine) + horizontalPadding),
-            height: max(defaultSize.height, ceil(lineHeight * CGFloat(max(lines.count, 1))) + verticalPadding)
+            width: width,
+            height: max(
+                defaultSize.height,
+                roundedLineHeight * CGFloat(max(lineCount, 1)) + verticalPadding
+            )
         )
     }
 

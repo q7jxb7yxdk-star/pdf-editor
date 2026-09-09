@@ -44,6 +44,10 @@ struct FormDesignRoundTrip {
             "List Box height did not follow its row count and font size"
         )
         let blank = try blankDocument()
+        try require(
+            PDFFormDesignKind.text.defaultSize == CGSize(width: 100, height: 22),
+            "Textbox default size is not 100 by 22 points"
+        )
         var placedOnBlank = try service.fieldForPlacement(
             kind: .text, pageIndex: 0, bounds: CGRect(x: 50, y: 600, width: 180, height: 28),
             radioGroupName: nil, in: blank

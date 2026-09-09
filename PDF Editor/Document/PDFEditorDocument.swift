@@ -961,9 +961,26 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
         var fields = session.fields
         fields[index].value = text
+        let availableWidth = max(
+            fields[index].kind.minimumDimension,
+            page.bounds(for: .cropBox).maxX - bounds.minX
+        )
+        let fittedSize = fields[index].kind.fittedTextSize(
+            text: text,
+            fontSize: fields[index].fontSize,
+            maximumWidth: availableWidth
+        )
         fields[index].bounds = PDFFormPageGeometry(
             cropBox: page.bounds(for: .cropBox), rotation: page.rotation
-        ).clamped(bounds, minimumDimension: current.kind.minimumDimension)
+        ).clamped(
+            CGRect(
+                x: bounds.minX,
+                y: bounds.maxY - fittedSize.height,
+                width: fittedSize.width,
+                height: fittedSize.height
+            ),
+            minimumDimension: current.kind.minimumDimension
+        )
         try applyFormDesign(fields, session: session, undoManager: undoManager)
         undoManager?.setActionName("Edit Textbox")
         return fields[index]
@@ -1060,26 +1077,21 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 minimumDimension: current.kind.minimumDimension
             )
         } else {
-#if os(macOS)
-            let font = NSFont.systemFont(ofSize: fontSize)
-            let textRect = (current.value as NSString).boundingRect(
-                with: CGSize(
-                    width: max(current.bounds.width - 6, 1),
-                    height: CGFloat.greatestFiniteMagnitude
-                ),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: font]
+            let availableWidth = max(
+                current.kind.minimumDimension,
+                page.bounds(for: .cropBox).maxX - current.bounds.minX
             )
-            let height = max(current.kind.minimumDimension, ceil(textRect.height) + 4)
-#else
-            let height = max(12, current.bounds.height + fontSize - current.fontSize)
-#endif
+            let fittedSize = current.kind.fittedTextSize(
+                text: current.value,
+                fontSize: fontSize,
+                maximumWidth: availableWidth
+            )
             fittedBounds = geometry.clamped(CGRect(
                 x: current.bounds.minX,
-                y: current.bounds.maxY - height,
-                width: current.bounds.width,
-                height: height
-            ))
+                y: current.bounds.maxY - fittedSize.height,
+                width: fittedSize.width,
+                height: fittedSize.height
+            ), minimumDimension: current.kind.minimumDimension)
         }
         fields[index].fontSize = fontSize
         fields[index].bounds = fittedBounds
