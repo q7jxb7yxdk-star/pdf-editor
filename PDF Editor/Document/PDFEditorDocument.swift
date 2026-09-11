@@ -241,12 +241,19 @@ final class PDFEditorDocument: ReferenceFileDocument {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
         if let editingSession {
-            let data = try editingSession.dataRepresentation(
+            let serialized = try editingSession.dataRepresentation(
                 options: PDFExportOptions(
                     securityPolicy: removesPasswordProtectionOnSave
                         ? .removeAfterAuthorizedUnlock
                         : .preserve
                 )
+            )
+            let designService = PDFFormDesignService()
+            let designedFields = designService.fields(in: pdfDocument)
+            let data = designedFields.isEmpty ? serialized : try designService.registeredData(
+                serialized,
+                fields: designedFields,
+                password: presentationPassword ?? authorizedPassword
             )
             if let pendingPasswordProtection {
                 return try PDFPasswordProtectionService.protect(
@@ -284,14 +291,14 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let password = authorizedPassword
         let protectionPassword = pendingPasswordProtection
         let session = editingSession.map { PreparedPDFEditingSession(session: $0) }
-        let fallbackFontData = try unicodeFontData()
+        let fallbackFontData = replacements.isEmpty ? Data() : try unicodeFontData()
         let exportOptions = PDFExportOptions(
             securityPolicy: removesPasswordProtectionOnSave
                 ? .removeAfterAuthorizedUnlock
                 : .preserve
         )
 
-        let preparation = try await Task.detached(priority: .userInitiated) {
+        var preparation = try await Task.detached(priority: .userInitiated) {
             try Self.pdfiumAccessLock.withLock {
                 let originalData: Data
                 if let session {
@@ -311,6 +318,25 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 )
             }
         }.value
+
+        if !expectedDesignedFields.isEmpty {
+            let service = PDFFormDesignService()
+            let registered = try service.registeredData(
+                preparation.data,
+                fields: expectedDesignedFields,
+                password: preparation.openingPassword
+            )
+            if registered != preparation.data {
+                preparation = PDFManualSavePreparation(
+                    originalData: preparation.originalData,
+                    data: registered,
+                    replacementResults: preparation.replacementResults,
+                    openingPassword: preparation.openingPassword,
+                    requiresInstallation: preparation.requiresInstallation,
+                    isSecurityOnlyPresentationUpdate: preparation.isSecurityOnlyPresentationUpdate
+                )
+            }
+        }
 
         guard editorState.revision == startingRevision else {
             throw PDFEditingError.pageMutationFailed

@@ -714,11 +714,35 @@ uint32_t PEPDFDocumentPermissions(PEPDFDocumentRef document) {
     return (uint32_t)FPDF_GetDocPermissions(document->handle);
 }
 
-int32_t PEPDFDocumentSignatureCount(PEPDFDocumentRef document) {
+bool PEPDFDocumentHasSignedSignature(PEPDFDocumentRef document) {
     if (document == NULL || document->handle == NULL) {
-        return 0;
+        return false;
     }
-    return FPDF_GetSignatureCount(document->handle);
+
+    const int signatureCount = FPDF_GetSignatureCount(document->handle);
+    if (signatureCount <= 0) {
+        return false;
+    }
+
+    for (int index = 0; index < signatureCount; ++index) {
+        FPDF_SIGNATURE signature = FPDF_GetSignatureObject(document->handle, index);
+        if (signature == NULL) {
+            continue;
+        }
+
+        const unsigned long contentsLength =
+            FPDFSignatureObj_GetContents(signature, NULL, 0);
+        const unsigned long byteRangeLength =
+            FPDFSignatureObj_GetByteRange(signature, NULL, 0);
+        // Do not mistake an empty /FT /Sig widget for a signed document. The
+        // checks are deliberately structural rather than cryptographic, so a
+        // completed-but-invalid signature still receives edit protection.
+        if (contentsLength > 0 && byteRangeLength >= 4 &&
+            byteRangeLength % 2 == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool PEPDFPageInfoAtIndex(

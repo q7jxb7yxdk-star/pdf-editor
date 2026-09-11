@@ -48,6 +48,32 @@ struct FormDesignRoundTrip {
             PDFFormDesignKind.text.defaultSize == CGSize(width: 100, height: 22),
             "Textbox default size is not 100 by 22 points"
         )
+        try require(
+            PDFFormDesignKind.digitalSignature.defaultSize == CGSize(width: 180, height: 50),
+            "Digital Signature Field default size is not 180 by 50 points"
+        )
+        let metadataDocument = try documentWithXMPMetadata()
+        let metadataSignature = try service.fieldForPlacement(
+            kind: .digitalSignature, pageIndex: 0,
+            bounds: CGRect(x: 50, y: 680, width: 180, height: 50),
+            radioGroupName: nil, in: metadataDocument
+        )
+        try service.replaceFields([metadataSignature], in: metadataDocument)
+        guard let metadataSerialization = metadataDocument.dataRepresentation() else {
+            throw Failure("Could not serialize the XMP metadata fixture")
+        }
+        let repairedMetadata = try service.registeredData(
+            metadataSerialization, fields: [metadataSignature]
+        )
+        try require(
+            metadataContainsReadableXML(repairedMetadata),
+            "XMP metadata was compressed without a FlateDecode filter"
+        )
+        guard let metadataReopened = PDFDocument(data: repairedMetadata) else {
+            throw Failure("Could not reopen the repaired XMP metadata fixture")
+        }
+        try service.verify([metadataSignature], in: metadataReopened)
+
         var placedOnBlank = try service.fieldForPlacement(
             kind: .text, pageIndex: 0, bounds: CGRect(x: 50, y: 600, width: 180, height: 28),
             radioGroupName: nil, in: blank
@@ -143,10 +169,45 @@ struct FormDesignRoundTrip {
             value: "Green", defaultValue: "Blue", fontSize: 11,
             choices: ["Red", "Green", "Blue"]
         )
-        var fields = [text, check, yes, no, dropdown, listBox]
+        let digitalSignature = PDFFormDesignField(
+            pageIndex: 0, kind: .digitalSignature, name: "approverSignature",
+            bounds: CGRect(x: 280, y: 250, width: 180, height: 50)
+        )
+        var fields = [text, check, yes, no, dropdown, listBox, digitalSignature]
         try service.replaceFields(fields, in: document)
+        guard let liveSignatureSnapshot = PDFAcroFormService().snapshots(in: document).first(where: {
+            $0.fieldName == digitalSignature.name
+        }) else {
+            throw Failure("Missing live Digital Signature Field snapshot")
+        }
         let reopened = try reopen(document)
         try service.verify(fields, in: reopened)
+        try require(
+            reopened.page(at: 0)?.annotations.first {
+                $0.fieldName == digitalSignature.name
+            }?.widgetFieldType == .signature,
+            "Digital Signature Field did not reopen as a Signature Widget"
+        )
+        guard let reopenedSignatureSnapshot = PDFAcroFormService().snapshots(in: reopened).first(where: {
+            $0.fieldName == digitalSignature.name
+        }) else {
+            throw Failure("Missing reopened Digital Signature Field snapshot")
+        }
+        try require(
+            !PDFAcroFormService().hasValueChanges(
+                from: [liveSignatureSnapshot], to: [reopenedSignatureSnapshot]
+            ),
+            "Unsigned Digital Signature Field reported a string-value change after reopen"
+        )
+        guard let unsignedData = reopened.dataRepresentation() else {
+            throw Failure("Could not serialize unsigned Digital Signature Field")
+        }
+        try require(
+            !PDFiumEditingSession(
+                originalData: unsignedData, password: nil
+            ).hasDigitalSignatures,
+            "Unsigned Digital Signature Field was treated as a signed document"
+        )
         try require(reopened.page(at: 0)?.annotations.first { $0.fieldName == "existing" }?.widgetStringValue == "Preserve me",
                     "Existing field value changed")
 
@@ -189,6 +250,7 @@ struct FormDesignRoundTrip {
         fields[3].bounds = CGRect(x: 95, y: 390, width: 32, height: 28)
         fields[4].bounds = CGRect(x: 60, y: 340, width: 210, height: 30)
         fields[5].bounds = CGRect(x: 60, y: 230, width: 210, height: 84)
+        fields[6].bounds = CGRect(x: 290, y: 230, width: 210, height: 60)
         fields[0].fontSize = 18
         fields[0].defaultValue = "New default"
         fields[2].isSelected = false
@@ -292,12 +354,28 @@ struct FormDesignRoundTrip {
             choiceOptions: ["Alpha", "Beta", "Gamma"],
             in: firstDropdownSaved
         )
+        let placedSignature = try service.fieldForPlacement(
+            kind: .digitalSignature, pageIndex: 0,
+            bounds: CGRect(x: 280, y: 180, width: 180, height: 50),
+            radioGroupName: nil,
+            in: firstDropdownSaved
+        )
+        try require(
+            placedSignature.name == "Signature1",
+            "Digital Signature Field did not use the Signature name prefix"
+        )
         try service.replaceFields(
-            [placedText, firstRadio, secondRadio, placedDropdown, secondDropdown, placedList],
+            [
+                placedText, firstRadio, secondRadio, placedDropdown,
+                secondDropdown, placedList, placedSignature
+            ],
             in: firstDropdownSaved
         )
         try service.verify(
-            [placedText, firstRadio, secondRadio, placedDropdown, secondDropdown, placedList],
+            [
+                placedText, firstRadio, secondRadio, placedDropdown,
+                secondDropdown, placedList, placedSignature
+            ],
             in: reopen(firstDropdownSaved)
         )
 
@@ -313,7 +391,7 @@ struct FormDesignRoundTrip {
             try require(displayed == target, "Incorrect placement on rotated/cropped page")
             try require(displayed.applying(geometry.transform.inverted()) == point, "Inverse placement failed")
         }
-        print("Form design text/button/choice creation, field tree, defaults, geometry, document-replacement deletion and rejection checks passed.")
+        print("Form design text/button/choice/digital-signature creation, unsigned detection, field tree, defaults, geometry, document-replacement deletion and rejection checks passed.")
     }
 
     private static func blankDocument() throws -> PDFDocument {
@@ -328,6 +406,59 @@ struct FormDesignRoundTrip {
         context.closePDF()
         guard let document = PDFDocument(data: data as Data) else { throw Failure("Could not open fixture") }
         return document
+    }
+
+    private static func documentWithXMPMetadata() throws -> PDFDocument {
+        let xmp = """
+        <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+            <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:format>application/pdf</dc:format>
+            </rdf:Description>
+          </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="w"?>
+        """
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R /Metadata 5 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+            "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+            "<< /Type /Metadata /Subtype /XML /Length \(xmp.utf8.count) >>\nstream\n\(xmp)\nendstream",
+        ]
+        var data = Data("%PDF-1.7\n".utf8)
+        var offsets: [Int] = [0]
+        for (index, object) in objects.enumerated() {
+            offsets.append(data.count)
+            data.append(contentsOf: "\(index + 1) 0 obj\n\(object)\nendobj\n".utf8)
+        }
+        let startXRef = data.count
+        data.append(contentsOf: "xref\n0 \(objects.count + 1)\n0000000000 65535 f \n".utf8)
+        for offset in offsets.dropFirst() {
+            data.append(contentsOf: String(format: "%010lld 00000 n \n", Int64(offset)).utf8)
+        }
+        data.append(contentsOf: (
+            "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\n" +
+            "startxref\n\(startXRef)\n%%EOF\n"
+        ).utf8)
+        guard let document = PDFDocument(data: data) else {
+            throw Failure("Could not open the XMP metadata fixture")
+        }
+        return document
+    }
+
+    private static func metadataContainsReadableXML(_ data: Data) -> Bool {
+        guard let provider = CGDataProvider(data: data as CFData),
+              let document = CGPDFDocument(provider),
+              let catalog = document.catalog else { return false }
+        var stream: CGPDFStreamRef?
+        var format = CGPDFDataFormat.raw
+        guard CGPDFDictionaryGetStream(catalog, "Metadata", &stream),
+              let stream,
+              let decodedData = CGPDFStreamCopyData(stream, &format) else { return false }
+        let decoded = decodedData as Data
+        return String(data: decoded, encoding: .utf8)?.contains("<x:xmpmeta") == true
     }
 
     private static func reopen(_ document: PDFDocument) throws -> PDFDocument {

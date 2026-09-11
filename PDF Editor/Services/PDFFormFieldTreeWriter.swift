@@ -29,6 +29,19 @@ nonisolated struct PDFFormFieldTreeWriter {
         let catalog = try resolver.object(xref.root).body
         let pages = try FormPageTreeReader(resolver: resolver).pageReferences(catalog: catalog)
         var objects: [FormPDFReference: [UInt8]] = [:]
+        if let metadata = FormPDFDictionaryEditor.reference(named: "Metadata", in: catalog),
+           let stream = try resolver.streamObject(metadata),
+           FormPDFDictionaryEditor.name(named: "Type", in: stream.dictionary) == "Metadata",
+           FormPDFDictionaryEditor.name(named: "Subtype", in: stream.dictionary) == "XML",
+           FormPDFDictionaryEditor.rawValue(named: "Filter", in: stream.dictionary) == nil,
+           Self.hasFlateHeader(stream.data) {
+            // PDFKit can compress an existing XMP packet while omitting the
+            // corresponding filter entry. Strict consumers then try to parse
+            // the compressed bytes as UTF-8. Append a corrected version of the
+            // same stream object without touching its payload or page content.
+            let dictionary = try Self.set("Filter", "/FlateDecode", in: stream.dictionary)
+            objects[metadata] = Self.stream(dictionary: dictionary, data: stream.data)
+        }
         var next = xref.size
         func allocate() -> FormPDFReference {
             defer { next += 1 }
@@ -150,6 +163,14 @@ nonisolated struct PDFFormFieldTreeWriter {
                 // Preserve an intentionally empty default with an empty string.
                 widget = try Self.set("DV", Self.pdfString(field.defaultValue), in: widget)
                 widget = try Self.set("I", nil, in: widget)
+            } else if field.kind.isDigitalSignature {
+                widget = try Self.set("FT", "/Sig", in: widget)
+                widget = try Self.set("Ff", "0", in: widget)
+                // A field is not digitally signed until /V contains a
+                // signature dictionary. Never turn the visual placeholder into
+                // a purported signature or carry PDFKit placeholder values.
+                widget = try Self.set("V", nil, in: widget)
+                widget = try Self.set("DV", nil, in: widget)
             }
             objects[ref] = widget
             roots.append(ref)
@@ -224,6 +245,18 @@ nonisolated struct PDFFormFieldTreeWriter {
     }
 
     private static func array(_ refs: [FormPDFReference]) -> String { "[" + refs.map(\.pdfSyntax).joined(separator: " ") + "]" }
+    private static func hasFlateHeader(_ data: [UInt8]) -> Bool {
+        guard data.count >= 2 else { return false }
+        let compressionMethod = data[0] & 0x0F
+        let compressionInfo = data[0] >> 4
+        let header = (Int(data[0]) << 8) | Int(data[1])
+        let usesPresetDictionary = data[1] & 0x20 != 0
+        return compressionMethod == 8 && compressionInfo <= 7 &&
+            header.isMultiple(of: 31) && !usesPresetDictionary
+    }
+    private static func stream(dictionary: [UInt8], data: [UInt8]) -> [UInt8] {
+        dictionary + Array("\nstream\n".utf8) + data + Array("\nendstream".utf8)
+    }
     private static func pdfString(_ value: String) -> String {
         "<FEFF" + value.utf16.map { String(format: "%04X", $0) }.joined() + ">"
     }
@@ -250,6 +283,11 @@ nonisolated private struct FormPDFReference: Hashable {
 nonisolated private struct FormPDFIndirectObject {
     let reference: FormPDFReference
     let body: [UInt8]
+}
+
+nonisolated private struct FormPDFStreamObject {
+    let dictionary: [UInt8]
+    let data: [UInt8]
 }
 
 nonisolated private struct FormCrossReference {
@@ -378,6 +416,51 @@ nonisolated private struct FormObjectResolver {
             throw PDFFormFieldTreeError.invalidStructure
         }
         return FormPDFIndirectObject(reference: reference, body: body)
+    }
+
+    func streamObject(_ reference: FormPDFReference) throws -> FormPDFStreamObject? {
+        guard let entry = entries[reference.objectNumber],
+              entry.generation == reference.generation,
+              source.indices.contains(entry.offset) else {
+            throw PDFFormFieldTreeError.invalidStructure
+        }
+        var scanner = FormPDFByteScanner(bytes: source, index: entry.offset)
+        guard scanner.readToken() == String(reference.objectNumber),
+              scanner.readToken() == String(reference.generation),
+              scanner.readToken() == "obj",
+              let dictionary = scanner.readCompoundValue() else {
+            throw PDFFormFieldTreeError.invalidStructure
+        }
+        scanner.skipWhitespaceAndComments()
+        guard scanner.readToken() == "stream" else { return nil }
+        var start = scanner.index
+        guard start < source.count else { throw PDFFormFieldTreeError.invalidStructure }
+        if source[start] == 0x0D {
+            start += 1
+            if start < source.count, source[start] == 0x0A { start += 1 }
+        } else if source[start] == 0x0A {
+            start += 1
+        } else {
+            throw PDFFormFieldTreeError.invalidStructure
+        }
+        guard let rawLength = FormPDFDictionaryEditor.rawValue(named: "Length", in: dictionary) else {
+            throw PDFFormFieldTreeError.invalidStructure
+        }
+        var lengthScanner = FormPDFByteScanner(bytes: rawLength)
+        guard let length = lengthScanner.readToken().flatMap(Int.init),
+              lengthScanner.readToken() == nil,
+              length >= 0, start <= source.count - length else {
+            throw PDFFormFieldTreeError.invalidStructure
+        }
+        let end = start + length
+        var tail = FormPDFByteScanner(bytes: source, index: end)
+        guard tail.readToken() == "endstream" else {
+            throw PDFFormFieldTreeError.invalidStructure
+        }
+        return FormPDFStreamObject(
+            dictionary: dictionary,
+            data: Array(source[start..<end])
+        )
     }
 }
 

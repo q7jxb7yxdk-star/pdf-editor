@@ -257,7 +257,7 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     var hasDigitalSignatures: Bool {
         PDFiumAccess.lock.lock()
         defer { PDFiumAccess.lock.unlock() }
-        return PEPDFDocumentSignatureCount(handle) > 0
+        return PEPDFDocumentHasSignedSignature(handle)
     }
 
     func unlock(withPassword password: String) throws {

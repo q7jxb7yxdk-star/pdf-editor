@@ -131,11 +131,17 @@ nonisolated final class PDFAcroFormService {
     private func persistentState(
         of snapshot: PDFAcroFormFieldSnapshot
     ) -> PDFAcroFormPersistentState {
-        PDFAcroFormPersistentState(
+        // A Signature field's /V is a signature dictionary, not a string.
+        // PDFKit can expose an unsigned live Widget as "" and the same
+        // canonical Widget as nil after reopen, so widgetStringValue is not a
+        // meaningful round-trip value for this field type. Actual signatures
+        // remain protected separately through Contents and ByteRange checks.
+        let persistentValue = snapshot.kind == .signature ? nil : snapshot.value
+        return PDFAcroFormPersistentState(
             fieldName: snapshot.fieldName,
             kind: snapshot.kind,
             isReadOnly: snapshot.isReadOnly,
-            value: snapshot.value,
+            value: persistentValue,
             buttonState: snapshot.buttonState,
             buttonStateName: snapshot.buttonStateName,
             choices: snapshot.choices,

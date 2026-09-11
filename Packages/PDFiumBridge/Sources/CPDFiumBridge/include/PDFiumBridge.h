@@ -62,7 +62,11 @@ void PEPDFDocumentClose(PEPDFDocumentRef document);
 int32_t PEPDFDocumentPageCount(PEPDFDocumentRef document);
 bool PEPDFDocumentIsEncrypted(PEPDFDocumentRef document);
 uint32_t PEPDFDocumentPermissions(PEPDFDocumentRef document);
-int32_t PEPDFDocumentSignatureCount(PEPDFDocumentRef document);
+// Returns whether the document contains a structurally signed signature field.
+// A signed field must have non-empty signature contents and an even ByteRange
+// array with at least two offset/length pairs. This is not cryptographic
+// validation; structurally complete but invalid signatures remain protected.
+bool PEPDFDocumentHasSignedSignature(PEPDFDocumentRef document);
 
 bool PEPDFPageInfoAtIndex(
     PEPDFDocumentRef document,

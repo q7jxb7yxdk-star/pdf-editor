@@ -264,7 +264,7 @@ struct PDFFormDesignerView: View {
                     Button(deleteTitle(field), role: .destructive) { delete(field) }
                 } else {
                     Text("Form Fields").font(.headline)
-                    Text("Add a field, then click or tap the page. Radio Button creates a group with two options; choice fields start with three editable options.")
+                    Text("Add a field, then click or tap the page. Radio Button creates a group with two options; choice fields start with three editable options. Digital Signature Field creates an unsigned field for compatible PDF signing apps.")
                         .font(.callout)
                 }
                 Divider()
@@ -403,6 +403,7 @@ struct PDFFormDesignerView: View {
         case .radioButton: prefix = "Radio"
         case .dropdown: prefix = "Dropdown"
         case .listBox: prefix = "ListBox"
+        case .digitalSignature: prefix = "Signature"
         }
         let existing = Set(PDFAcroFormService().snapshots(in: session.sourceDocument).compactMap(\.fieldName))
             .union(fields.map(\.name))

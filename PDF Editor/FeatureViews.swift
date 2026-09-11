@@ -163,6 +163,12 @@ struct PDFToolSidebar: View {
                             action: .designForm(.listBox),
                             enabled: canDesignForm && !isLocked && pageCount > 0
                         )
+                        tool(
+                            "Digital Signature Field",
+                            icon: "signature",
+                            action: .designForm(.digitalSignature),
+                            enabled: canDesignForm && !isLocked && pageCount > 0
+                        )
                     }
 
                     section("E-sign") {

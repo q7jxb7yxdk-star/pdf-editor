@@ -6,7 +6,7 @@ import PDFKit
 @main
 struct FormDocumentPlacementRoundTrip {
     @MainActor
-    static func main() throws {
+    static func main() async throws {
         let document = PDFEditorDocument()
         let undoManager = UndoManager()
         undoManager.groupsByEvent = false
@@ -171,7 +171,130 @@ struct FormDocumentPlacementRoundTrip {
               abs(restoredListBox.bounds.maxY - listBox.bounds.maxY) < 0.01 else {
             throw Failure("List Box deletion Undo did not restore its font, height and field identity")
         }
-        print("Textbox, Dropdown and List Box font-size update, deletion and Undo passed.")
+        let digitalSignature = try grouped {
+            try document.addPlacedFormField(
+                kind: .digitalSignature,
+                pageIndex: 0,
+                bounds: CGRect(x: 240, y: 500, width: 180, height: 50),
+                radioGroupName: nil,
+                undoManager: undoManager
+            )
+        }
+        guard digitalSignature.name == "Signature1",
+              PDFFormDesignService().authoredAnnotation(
+                  for: digitalSignature.id,
+                  in: document.pdfDocument
+              )?.widgetFieldType == .signature else {
+            throw Failure("Digital Signature Field placement did not create a Signature Widget")
+        }
+        let resizedSignature = try grouped {
+            try document.resizeAuthoredFormField(
+                id: digitalSignature.id,
+                bounds: CGRect(x: 230, y: 490, width: 210, height: 60),
+                undoManager: undoManager
+            )
+        }
+        guard resizedSignature.bounds == CGRect(
+            x: 230, y: 490, width: 210, height: 60
+        ) else {
+            throw Failure("Digital Signature Field resize did not retain its bounds")
+        }
+        try grouped {
+            try document.deleteAuthoredFormField(
+                id: digitalSignature.id,
+                undoManager: undoManager
+            )
+        }
+        guard !PDFFormDesignService().fields(in: document.pdfDocument).contains(where: {
+            $0.id == digitalSignature.id
+        }) else {
+            throw Failure("Digital Signature Field deletion retained the field")
+        }
+        undoManager.undo()
+        guard PDFFormDesignService().fields(in: document.pdfDocument).first(where: {
+            $0.id == digitalSignature.id
+        })?.bounds == resizedSignature.bounds else {
+            throw Failure("Digital Signature Field deletion Undo did not restore the field")
+        }
+
+        let metadataDocument = try PDFEditorDocument(data: pdfWithXMPMetadata())
+        let metadataSignature = try metadataDocument.addPlacedFormField(
+            kind: .digitalSignature,
+            pageIndex: 0,
+            bounds: CGRect(x: 50, y: 680, width: 180, height: 50),
+            radioGroupName: nil,
+            undoManager: nil
+        )
+        let savedMetadataData = try await metadataDocument.prepareManualSave(
+            applying: []
+        ).data
+        guard metadataContainsReadableXML(savedMetadataData),
+              let savedMetadataDocument = PDFDocument(data: savedMetadataData) else {
+            throw Failure("Final save retained XMP compressed without a FlateDecode filter")
+        }
+        let savedMetadataFields = PDFFormDesignService().fields(in: savedMetadataDocument)
+        guard savedMetadataFields.count == 1,
+              savedMetadataFields.first?.id == metadataSignature.id,
+              savedMetadataFields.first?.kind == .digitalSignature else {
+            throw Failure("Final save did not retain the empty Signature Field")
+        }
+        try PDFFormDesignService().verifyFieldTree(
+            savedMetadataFields,
+            in: savedMetadataDocument
+        )
+        print(
+            "Textbox, Dropdown, List Box and Digital Signature Field placement, " +
+            "resize, deletion, Undo and final-save XMP repair passed."
+        )
+    }
+
+    private static func pdfWithXMPMetadata() -> Data {
+        let xmp = """
+        <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+            <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:format>application/pdf</dc:format>
+            </rdf:Description>
+          </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="w"?>
+        """
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R /Metadata 5 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+            "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+            "<< /Type /Metadata /Subtype /XML /Length \(xmp.utf8.count) >>\nstream\n\(xmp)\nendstream",
+        ]
+        var data = Data("%PDF-1.7\n".utf8)
+        var offsets: [Int] = [0]
+        for (index, object) in objects.enumerated() {
+            offsets.append(data.count)
+            data.append(contentsOf: "\(index + 1) 0 obj\n\(object)\nendobj\n".utf8)
+        }
+        let startXRef = data.count
+        data.append(contentsOf: "xref\n0 \(objects.count + 1)\n0000000000 65535 f \n".utf8)
+        for offset in offsets.dropFirst() {
+            data.append(contentsOf: String(format: "%010lld 00000 n \n", Int64(offset)).utf8)
+        }
+        data.append(contentsOf: (
+            "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\n" +
+            "startxref\n\(startXRef)\n%%EOF\n"
+        ).utf8)
+        return data
+    }
+
+    private static func metadataContainsReadableXML(_ data: Data) -> Bool {
+        guard let provider = CGDataProvider(data: data as CFData),
+              let document = CGPDFDocument(provider),
+              let catalog = document.catalog else { return false }
+        var stream: CGPDFStreamRef?
+        var format = CGPDFDataFormat.raw
+        guard CGPDFDictionaryGetStream(catalog, "Metadata", &stream),
+              let stream,
+              let decodedData = CGPDFStreamCopyData(stream, &format) else { return false }
+        return String(data: decodedData as Data, encoding: .utf8)?.contains("<x:xmpmeta") == true
     }
 
     private struct Failure: Error {

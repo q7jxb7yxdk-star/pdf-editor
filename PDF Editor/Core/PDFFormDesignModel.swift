@@ -8,7 +8,7 @@ import UIKit
 #endif
 
 nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable {
-    case text, checkBox, radioButton, dropdown, listBox
+    case text, checkBox, radioButton, dropdown, listBox, digitalSignature
 
     var id: Self { self }
     var title: String {
@@ -18,6 +18,7 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         case .radioButton: "Radio Button"
         case .dropdown: "Dropdown"
         case .listBox: "List Box"
+        case .digitalSignature: "Digital Signature Field"
         }
     }
     var symbol: String {
@@ -27,13 +28,14 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         case .radioButton: "smallcircle.filled.circle"
         case .dropdown: "chevron.down.square"
         case .listBox: "list.bullet.rectangle"
+        case .digitalSignature: "signature"
         }
     }
 
     var minimumDimension: CGFloat {
         switch self {
         case .checkBox, .radioButton: 11
-        case .text, .dropdown, .listBox: 12
+        case .text, .dropdown, .listBox, .digitalSignature: 12
         }
     }
 
@@ -43,6 +45,7 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
         case .checkBox, .radioButton: CGSize(width: 11, height: 11)
         case .dropdown: CGSize(width: 180, height: 28)
         case .listBox: CGSize(width: 180, height: 72)
+        case .digitalSignature: CGSize(width: 180, height: 50)
         }
     }
 
@@ -132,6 +135,10 @@ nonisolated enum PDFFormDesignKind: String, CaseIterable, Identifiable, Sendable
 
     var isButton: Bool {
         self == .checkBox || self == .radioButton
+    }
+
+    var isDigitalSignature: Bool {
+        self == .digitalSignature
     }
 }
 

@@ -50,6 +50,8 @@ nonisolated struct PDFFormDesignService {
                 } else if annotation.widgetFieldType == .button,
                           annotation.widgetControlType == .radioButtonControl {
                     kind = .radioButton
+                } else if annotation.widgetFieldType == .signature {
+                    kind = .digitalSignature
                 } else { return nil }
                 let export = kind.isButton ? annotation.buttonWidgetStateString : "Yes"
                 return PDFFormDesignField(
@@ -79,6 +81,7 @@ nonisolated struct PDFFormDesignService {
         case .radioButton: prefix = "Radio"
         case .dropdown: prefix = "Dropdown"
         case .listBox: prefix = "ListBox"
+        case .digitalSignature: prefix = "Signature"
         }
         let names = (0..<document.pageCount).flatMap { index in
             document.page(at: index)?.annotations.compactMap { $0.type == "Widget" ? $0.fieldName : nil } ?? []
@@ -163,7 +166,7 @@ nonisolated struct PDFFormDesignService {
                   page.bounds(for: .cropBox).insetBy(dx: -0.01, dy: -0.01).contains(field.bounds),
                   (6...72).contains(field.fontSize) else {
                 throw PDFFormDesignError.invalidField(
-                    "Keep text and choice fields at least 12 points wide and high, buttons at least 11 points, and every field inside its page with a 6–72 point font."
+                    "Keep text, choice and digital signature fields at least 12 points wide and high, buttons at least 11 points, and every field inside its page with a 6–72 point font."
                 )
             }
             if field.kind.isButton {
@@ -415,6 +418,8 @@ nonisolated struct PDFFormDesignService {
             annotation.font = UIFont.systemFont(ofSize: field.fontSize)
 #endif
             annotation.fontColor = .black
+        } else if field.kind.isDigitalSignature {
+            annotation.widgetFieldType = .signature
         } else {
             annotation.widgetFieldType = .button
             annotation.widgetControlType = field.kind == .checkBox
@@ -492,13 +497,15 @@ nonisolated struct PDFFormDesignService {
     }
 
     /// Repair PDFKit's serialized field registration before accepting a mutation.
-    /// Already-canonical PDFs (including encrypted ones) need no byte changes.
+    /// Already-canonical PDFs need no byte changes unless PDFKit compressed their
+    /// XMP packet without declaring the corresponding FlateDecode filter.
     func registeredData(_ data: Data, fields: [PDFFormDesignField], password: String? = nil) throws -> Data {
         if let document = PDFDocument(data: data) {
             if document.isLocked, let password { _ = document.unlock(withPassword: password) }
             if !document.isLocked,
                (try? verify(fields, in: document)) != nil,
-               (try? verifyFieldTree(fields, in: document)) != nil {
+               (try? verifyFieldTree(fields, in: document)) != nil,
+               (document.isEncrypted || !requiresMetadataFlateRepair(in: document)) {
                 return data
             }
         }
@@ -507,6 +514,33 @@ nonisolated struct PDFFormDesignService {
         try verify(fields, in: reopened)
         try verifyFieldTree(fields, in: reopened)
         return registered
+    }
+
+    private func requiresMetadataFlateRepair(in document: PDFDocument) -> Bool {
+        guard let catalog = document.documentRef?.catalog else { return false }
+        var metadata: CGPDFStreamRef?
+        guard CGPDFDictionaryGetStream(catalog, "Metadata", &metadata), let metadata,
+              let dictionary = CGPDFStreamGetDictionary(metadata) else { return false }
+
+        var type: UnsafePointer<CChar>?
+        var subtype: UnsafePointer<CChar>?
+        guard CGPDFDictionaryGetName(dictionary, "Type", &type),
+              type.map({ String(cString: $0) }) == "Metadata",
+              CGPDFDictionaryGetName(dictionary, "Subtype", &subtype),
+              subtype.map({ String(cString: $0) }) == "XML" else { return false }
+
+        var filter: CGPDFObjectRef?
+        var format = CGPDFDataFormat.raw
+        guard !CGPDFDictionaryGetObject(dictionary, "Filter", &filter),
+              let data = CGPDFStreamCopyData(metadata, &format) as Data? else { return false }
+        let bytes = [UInt8](data.prefix(2))
+        guard bytes.count == 2 else { return false }
+        let compressionMethod = bytes[0] & 0x0F
+        let compressionInfo = bytes[0] >> 4
+        let header = (Int(bytes[0]) << 8) | Int(bytes[1])
+        let usesPresetDictionary = bytes[1] & 0x20 != 0
+        return compressionMethod == 8 && compressionInfo <= 7 &&
+            header.isMultiple(of: 31) && !usesPresetDictionary
     }
 
     func verify(_ expected: [PDFFormDesignField], in document: PDFDocument) throws {
@@ -538,7 +572,7 @@ nonisolated struct PDFFormDesignService {
                       abs(found.fontSize - field.fontSize) < 0.05 else {
                     throw PDFFormDesignError.verificationFailed
                 }
-            } else {
+            } else if field.kind.isButton {
                 guard found.exportValue == field.exportValue,
                       found.isSelected == field.isSelected,
                       found.isDefaultSelected == field.isDefaultSelected else {
@@ -564,10 +598,12 @@ nonisolated struct PDFFormDesignService {
             if expected.isEmpty { return }
             throw PDFFormDesignError.verificationFailed
         }
-        var registered: [UUID: (name: String, terminal: UInt, type: String, flags: Int)] = [:]
+        var registered: [UUID: (
+            name: String, terminal: UInt, type: String, flags: Int, hasValue: Bool
+        )] = [:]
         var visited = Set<UInt>()
         func walk(_ dictionary: CGPDFDictionaryRef, name: String, terminal: UInt?,
-                  type: String, flags: Int, depth: Int) throws {
+                  type: String, flags: Int, hasValue: Bool, depth: Int) throws {
             let identity = UInt(bitPattern: dictionary.rawValue)
             guard depth < 64, visited.count < 100_000, visited.insert(identity).inserted else {
                 throw PDFFormDesignError.verificationFailed
@@ -578,9 +614,12 @@ nonisolated struct PDFFormDesignService {
             let fieldType = pdfName("FT", in: dictionary) ?? type
             var rawFlags: CGPDFInteger = 0
             let fieldFlags = CGPDFDictionaryGetInteger(dictionary, "Ff", &rawFlags) ? Int(rawFlags) : flags
+            let fieldHasValue = CGPDFDictionaryGetObject(dictionary, "V", nil) || hasValue
             if let rawID = pdfString("PDFEditorFormID", in: dictionary), let id = UUID(uuidString: rawID) {
                 guard registered[id] == nil else { throw PDFFormDesignError.verificationFailed }
-                registered[id] = (fullName, fieldIdentity, fieldType, fieldFlags)
+                registered[id] = (
+                    fullName, fieldIdentity, fieldType, fieldFlags, fieldHasValue
+                )
             }
             var children: CGPDFArrayRef?
             if CGPDFDictionaryGetArray(dictionary, "Kids", &children), let children {
@@ -590,7 +629,7 @@ nonisolated struct PDFFormDesignService {
                         throw PDFFormDesignError.verificationFailed
                     }
                     try walk(child, name: fullName, terminal: fieldIdentity, type: fieldType,
-                             flags: fieldFlags, depth: depth + 1)
+                             flags: fieldFlags, hasValue: fieldHasValue, depth: depth + 1)
                 }
             }
         }
@@ -599,13 +638,18 @@ nonisolated struct PDFFormDesignService {
             guard CGPDFArrayGetDictionary(roots, index, &field), let field else {
                 throw PDFFormDesignError.verificationFailed
             }
-            try walk(field, name: "", terminal: nil, type: "", flags: 0, depth: 0)
+            try walk(
+                field, name: "", terminal: nil, type: "", flags: 0,
+                hasValue: false, depth: 0
+            )
         }
         guard Set(registered.keys) == Set(expected.map(\.id)) else {
             throw PDFFormDesignError.verificationFailed
         }
         for field in expected {
-            let expectedType = field.kind == .text ? "Tx" : field.kind.isChoice ? "Ch" : "Btn"
+            let expectedType = field.kind == .text ? "Tx" :
+                field.kind.isChoice ? "Ch" :
+                field.kind.isDigitalSignature ? "Sig" : "Btn"
             guard let record = registered[field.id], record.name == field.name,
                   record.type == expectedType,
                   field.kind != .text ||
@@ -613,7 +657,8 @@ nonisolated struct PDFFormDesignService {
                   !field.kind.isButton || ((record.flags & (1 << 15)) != 0) == (field.kind == .radioButton),
                   !field.kind.isButton || record.flags & (1 << 16) == 0,
                   !field.kind.isChoice || ((record.flags & (1 << 17)) != 0) == (field.kind == .dropdown),
-                  !field.kind.isChoice || record.flags & (1 << 21) == 0 else {
+                  !field.kind.isChoice || record.flags & (1 << 21) == 0,
+                  !field.kind.isDigitalSignature || !record.hasValue else {
                 throw PDFFormDesignError.verificationFailed
             }
         }
