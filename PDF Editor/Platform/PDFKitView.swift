@@ -360,6 +360,7 @@ private struct PDFFormFieldActionBar: View {
     let field: PDFFormDesignField
     let onChangeFontSize: (CGFloat) -> Void
     let onChangeChoiceOptions: ([String]) -> Void
+    let onDigitallySign: () -> Void
     let onDelete: () -> Void
 
     @State private var showsFontSizePicker = false
@@ -451,6 +452,21 @@ private struct PDFFormFieldActionBar: View {
                     .padding(12)
                     .presentationCompactAdaptation(.popover)
                 }
+
+                Divider().frame(height: 18)
+            }
+
+            if field.kind.isDigitalSignature {
+                Button {
+                    onDigitallySign()
+                } label: {
+                    Label("Digitally Sign", systemImage: "checkmark.seal")
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Apply a certificate-based digital signature")
+                .accessibilityLabel("Digitally Sign")
 
                 Divider().frame(height: 18)
             }
@@ -928,6 +944,7 @@ struct PDFKitView: NSViewRepresentable {
     let onSetFormFieldChoiceOptions: (PDFFormDesignField, [String]) -> Void
     let onDeleteFormField: (PDFFormDesignField) -> Void
     let onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
+    let onDigitallySignFormField: (PDFFormDesignField) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
     let freeTextPlacementEnabled: Bool
@@ -1052,6 +1069,7 @@ struct PDFKitView: UIViewRepresentable {
     let onSetFormFieldChoiceOptions: (PDFFormDesignField, [String]) -> Void
     let onDeleteFormField: (PDFFormDesignField) -> Void
     let onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
+    let onDigitallySignFormField: (PDFFormDesignField) -> Void
     let commentPlacementEnabled: Bool
     let onPlaceComment: (Int, CGPoint) -> Void
     let freeTextPlacementEnabled: Bool
@@ -1118,6 +1136,7 @@ private extension PDFKitView {
             onSetFormFieldChoiceOptions: onSetFormFieldChoiceOptions,
             onDeleteFormField: onDeleteFormField,
             onCommitTextFormField: onCommitTextFormField,
+            onDigitallySignFormField: onDigitallySignFormField,
             commentPlacementEnabled: commentPlacementEnabled,
             onPlaceComment: onPlaceComment,
             freeTextPlacementEnabled: freeTextPlacementEnabled,
@@ -1258,6 +1277,7 @@ private extension PDFKitView {
         coordinator.onSetFormFieldChoiceOptions = onSetFormFieldChoiceOptions
         coordinator.onDeleteFormField = onDeleteFormField
         coordinator.onCommitTextFormField = onCommitTextFormField
+        coordinator.onDigitallySignFormField = onDigitallySignFormField
         coordinator.commentPlacementEnabled = commentPlacementEnabled
         coordinator.onPlaceComment = onPlaceComment
         coordinator.freeTextPlacementEnabled = freeTextPlacementEnabled
@@ -1406,6 +1426,7 @@ extension PDFKitView {
         var onSetFormFieldChoiceOptions: (PDFFormDesignField, [String]) -> Void
         var onDeleteFormField: (PDFFormDesignField) -> Void
         var onCommitTextFormField: (PDFFormDesignField, String, CGRect) -> Void
+        var onDigitallySignFormField: (PDFFormDesignField) -> Void
         var commentPlacementEnabled: Bool {
             didSet {
                 guard oldValue != commentPlacementEnabled else { return }
@@ -1782,6 +1803,7 @@ extension PDFKitView {
             onSetFormFieldChoiceOptions: @escaping (PDFFormDesignField, [String]) -> Void,
             onDeleteFormField: @escaping (PDFFormDesignField) -> Void,
             onCommitTextFormField: @escaping (PDFFormDesignField, String, CGRect) -> Void,
+            onDigitallySignFormField: @escaping (PDFFormDesignField) -> Void,
             commentPlacementEnabled: Bool,
             onPlaceComment: @escaping (Int, CGPoint) -> Void,
             freeTextPlacementEnabled: Bool,
@@ -1829,6 +1851,7 @@ extension PDFKitView {
             self.onSetFormFieldChoiceOptions = onSetFormFieldChoiceOptions
             self.onDeleteFormField = onDeleteFormField
             self.onCommitTextFormField = onCommitTextFormField
+            self.onDigitallySignFormField = onDigitallySignFormField
             self.commentPlacementEnabled = commentPlacementEnabled
             self.onPlaceComment = onPlaceComment
             self.freeTextPlacementEnabled = freeTextPlacementEnabled
@@ -3207,6 +3230,9 @@ extension PDFKitView {
                     guard let self else { return }
                     self.onSetFormFieldChoiceOptions(field, choices)
                     self.scheduleOverlayRefresh()
+                },
+                onDigitallySign: { [weak self] in
+                    self?.onDigitallySignFormField(field)
                 },
                 onDelete: { [weak self] in
                     self?.deleteAuthoredFormField(field, in: pdfView)

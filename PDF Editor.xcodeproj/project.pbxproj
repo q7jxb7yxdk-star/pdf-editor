@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		963BD1B3302C8E1D008B09CC /* PDFiumBridge in Frameworks */ = {isa = PBXBuildFile; productRef = 963BD1B5302C8E1D008B09CC /* PDFiumBridge */; };
+		A11CE00130A00001008B09CC /* X509 in Frameworks */ = {isa = PBXBuildFile; productRef = A11CE00330A00001008B09CC /* X509 */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +43,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				963BD1B3302C8E1D008B09CC /* PDFiumBridge in Frameworks */,
+				A11CE00130A00001008B09CC /* X509 in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,6 +87,7 @@
 			name = "PDF Editor";
 			packageProductDependencies = (
 				963BD1B5302C8E1D008B09CC /* PDFiumBridge */,
+				A11CE00330A00001008B09CC /* X509 */,
 			);
 			productName = "PDF Editor";
 			productReference = 963BD1A4302C8E1B008B09CC /* PDF Editor.app */;
@@ -116,6 +119,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				963BD1B4302C8E1D008B09CC /* XCLocalSwiftPackageReference "Packages/PDFiumBridge" */,
+				A11CE00230A00001008B09CC /* XCRemoteSwiftPackageReference "swift-certificates" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 963BD1A5302C8E1B008B09CC /* Products */;
@@ -388,11 +392,27 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		A11CE00230A00001008B09CC /* XCRemoteSwiftPackageReference "swift-certificates" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-certificates.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.20.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		963BD1B5302C8E1D008B09CC /* PDFiumBridge */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 963BD1B4302C8E1D008B09CC /* XCLocalSwiftPackageReference "Packages/PDFiumBridge" */;
 			productName = PDFiumBridge;
+		};
+		A11CE00330A00001008B09CC /* X509 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A11CE00230A00001008B09CC /* XCRemoteSwiftPackageReference "swift-certificates" */;
+			productName = X509;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -90,6 +90,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     private var authorizedPassword: String?
     private var presentationPassword: String?
     private var allowsInvalidatingDigitalSignatures = false
+    private var preservesInstalledDigitalSignatureBytes = false
 
     private let bookmarkService = PDFBookmarkService()
     private let incrementalBookmarkWriter = PDFIncrementalBookmarkWriter()
@@ -225,6 +226,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         if removesProtection {
             pendingPasswordProtection = nil
         }
+        preservesInstalledDigitalSignatureBytes = false
         editorState.documentDidChange(markingUnsaved: true)
     }
 
@@ -234,12 +236,18 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 removesPasswordProtectionOnSave else { return }
         pendingPasswordProtection = password
         removesPasswordProtectionOnSave = false
+        preservesInstalledDigitalSignatureBytes = false
         editorState.documentDidChange(markingUnsaved: true)
     }
 
     func dataForManualSave() throws -> Data {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
+        if preservesInstalledDigitalSignatureBytes,
+           pendingPasswordProtection == nil,
+           !removesPasswordProtectionOnSave {
+            return sourceData
+        }
         if let editingSession {
             let serialized = try editingSession.dataRepresentation(
                 options: PDFExportOptions(
@@ -283,6 +291,23 @@ final class PDFEditorDocument: ReferenceFileDocument {
             (!replacements.isEmpty || pendingPasswordProtection != nil ||
                 removesPasswordProtectionOnSave) {
             throw PDFEditingError.digitalSignatureConsentRequired
+        }
+
+        // A completed PDF signature authenticates exact byte ranges. When no
+        // edit is pending, return those bytes verbatim instead of asking
+        // PDFKit or PDFium to serialize the document again.
+        if preservesInstalledDigitalSignatureBytes,
+           replacements.isEmpty,
+           pendingPasswordProtection == nil,
+           !removesPasswordProtectionOnSave {
+            return PDFManualSavePreparation(
+                originalData: sourceData,
+                data: sourceData,
+                replacementResults: [],
+                openingPassword: nil,
+                requiresInstallation: false,
+                isSecurityOnlyPresentationUpdate: false
+            )
         }
 
         let startingRevision = editorState.revision
@@ -354,6 +379,39 @@ final class PDFEditorDocument: ReferenceFileDocument {
             try PDFFormDesignService().verify(expectedDesignedFields, in: savedDocument)
         }
         return preparation
+    }
+
+    /// Installs bytes produced by the digital-signature transaction without
+    /// another serialization pass. The caller must write them through Save As
+    /// before they become the document's persisted snapshot.
+    func installDigitallySignedData(
+        _ data: Data,
+        replacingRevision expectedRevision: Int,
+        undoManager: UndoManager?
+    ) throws {
+        guard editorState.revision == expectedRevision,
+              data.range(of: Data("/ByteRange".utf8)) != nil,
+              let signedDocument = PDFDocument(data: data),
+              !signedDocument.isLocked else {
+            throw PDFEditingError.invalidDocument
+        }
+
+        invalidateInteractionPreparation()
+        editingSession = nil
+        sourceData = data
+        authorizedPassword = nil
+        presentationPassword = nil
+        pendingPasswordProtection = nil
+        removesPasswordProtectionOnSave = false
+        allowsInvalidatingDigitalSignatures = false
+        preservesInstalledDigitalSignatureBytes = true
+        formPresentationDocument = nil
+        pdfDocument = signedDocument
+        undoManager?.removeAllActions()
+        publishDocumentChangeAfterViewUpdate(
+            markingUnsaved: true,
+            preservingDigitalSignatureBytes: true
+        )
     }
 
     func installPreparedManualSave(
@@ -1644,6 +1702,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             in: pdfDocument
         )
         updated.color = color
+        preservesInstalledDigitalSignatureBytes = false
         editorState.annotationColorDidChange(reference: reference, color: color)
 
         commentColorSyncGeneration &+= 1
@@ -1707,6 +1766,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             guard pendingCommentColorSyncs[reference] == generation else { return }
             pendingCommentColorSyncs[reference] = nil
             if actual != color {
+                preservesInstalledDigitalSignatureBytes = false
                 editorState.annotationColorDidChange(reference: reference, color: actual)
             }
         } catch {
@@ -1724,6 +1784,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 with: PDFAnnotationUpdate(color: current.color),
                 in: pdfDocument
             )
+            preservesInstalledDigitalSignatureBytes = false
             editorState.annotationColorDidChange(
                 reference: reference,
                 color: current.color
@@ -1809,6 +1870,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 throw PDFAnnotationServiceError.roundTripVerificationFailed
             }
             updated.color = actual
+            preservesInstalledDigitalSignatureBytes = false
             editorState.annotationColorDidChange(reference: reference, color: actual)
 
             if let undoManager {
@@ -2506,7 +2568,13 @@ final class PDFEditorDocument: ReferenceFileDocument {
         publishDocumentChangeAfterViewUpdate(markingUnsaved: markingUnsaved)
     }
 
-    private func publishDocumentChangeAfterViewUpdate(markingUnsaved: Bool) {
+    private func publishDocumentChangeAfterViewUpdate(
+        markingUnsaved: Bool,
+        preservingDigitalSignatureBytes: Bool = false
+    ) {
+        if markingUnsaved && !preservingDigitalSignatureBytes {
+            preservesInstalledDigitalSignatureBytes = false
+        }
         DispatchQueue.main.async { [weak self] in
             self?.editorState.documentDidChange(markingUnsaved: markingUnsaved)
         }

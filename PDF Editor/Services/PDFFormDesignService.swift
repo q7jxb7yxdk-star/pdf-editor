@@ -34,6 +34,7 @@ nonisolated struct PDFFormDesignService {
 
     func fields(in document: PDFDocument) -> [PDFFormDesignField] {
         let buttonDefaults = buttonDefaultChoices(in: document)
+        let signedManagedFields = signedManagedSignatureIDs(in: document)
         return (0..<document.pageCount).flatMap { pageIndex in
             document.page(at: pageIndex)?.annotations.compactMap { annotation in
                 guard annotation.type == "Widget",
@@ -51,6 +52,10 @@ nonisolated struct PDFFormDesignService {
                           annotation.widgetControlType == .radioButtonControl {
                     kind = .radioButton
                 } else if annotation.widgetFieldType == .signature {
+                    // Once a managed field has been signed, it leaves the form
+                    // designer's rebuilding scope. The signature dictionary and
+                    // its authenticated byte range must remain untouched.
+                    guard !signedManagedFields.contains(id) else { return nil }
                     kind = .digitalSignature
                 } else { return nil }
                 let export = kind.isButton ? annotation.buttonWidgetStateString : "Yes"
@@ -615,11 +620,17 @@ nonisolated struct PDFFormDesignService {
             var rawFlags: CGPDFInteger = 0
             let fieldFlags = CGPDFDictionaryGetInteger(dictionary, "Ff", &rawFlags) ? Int(rawFlags) : flags
             let fieldHasValue = CGPDFDictionaryGetObject(dictionary, "V", nil) || hasValue
+            var signedMarker: CGPDFBoolean = 0
+            let preservesSignedField = fieldType == "Sig" && fieldHasValue &&
+                CGPDFDictionaryGetBoolean(dictionary, "PDFEditorSigned", &signedMarker) &&
+                signedMarker != 0
             if let rawID = pdfString("PDFEditorFormID", in: dictionary), let id = UUID(uuidString: rawID) {
-                guard registered[id] == nil else { throw PDFFormDesignError.verificationFailed }
-                registered[id] = (
-                    fullName, fieldIdentity, fieldType, fieldFlags, fieldHasValue
-                )
+                if !preservesSignedField {
+                    guard registered[id] == nil else { throw PDFFormDesignError.verificationFailed }
+                    registered[id] = (
+                        fullName, fieldIdentity, fieldType, fieldFlags, fieldHasValue
+                    )
+                }
             }
             var children: CGPDFArrayRef?
             if CGPDFDictionaryGetArray(dictionary, "Kids", &children), let children {
@@ -693,6 +704,34 @@ nonisolated struct PDFFormDesignService {
                     var parent: CGPDFDictionaryRef?
                     current = CGPDFDictionaryGetDictionary(node, "Parent", &parent) ? parent : nil
                 }
+            }
+        }
+        return result
+    }
+
+    private func signedManagedSignatureIDs(in document: PDFDocument) -> Set<UUID> {
+        var result = Set<UUID>()
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex)?.pageRef,
+                  let dictionary = page.dictionary else { continue }
+            var annotations: CGPDFArrayRef?
+            guard CGPDFDictionaryGetArray(dictionary, "Annots", &annotations),
+                  let annotations else { continue }
+            for index in 0..<CGPDFArrayGetCount(annotations) {
+                var widget: CGPDFDictionaryRef?
+                guard CGPDFArrayGetDictionary(annotations, index, &widget),
+                      let widget,
+                      pdfName("FT", in: widget) == "Sig",
+                      CGPDFDictionaryGetObject(widget, "V", nil),
+                      let rawID = pdfString("PDFEditorFormID", in: widget),
+                      let id = UUID(uuidString: rawID) else { continue }
+                var signedMarker: CGPDFBoolean = 0
+                guard CGPDFDictionaryGetBoolean(
+                    widget,
+                    "PDFEditorSigned",
+                    &signedMarker
+                ), signedMarker != 0 else { continue }
+                result.insert(id)
             }
         }
         return result

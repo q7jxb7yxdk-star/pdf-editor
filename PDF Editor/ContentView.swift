@@ -408,6 +408,11 @@ private enum ESignPlacement {
     }
 }
 
+private struct PDFDigitalSigningRequest: Identifiable {
+    let field: PDFFormDesignField
+    var id: UUID { field.id }
+}
+
 @MainActor
 private final class PendingTextEditStore: ObservableObject {
     @Published private(set) var edits: [String: PendingTextEdit] = [:]
@@ -555,6 +560,8 @@ struct ContentView: View {
     @State private var showsSignatureLibrary = false
     @State private var showsSignatureLibraryAfterToolsDismissal = false
     @State private var selectedESignPlacement: ESignPlacement?
+    @State private var digitalSigningRequest: PDFDigitalSigningRequest?
+    @State private var savesSignedCopyAfterDismissal = false
     @State private var freeTextPlacementEnabled = false
     @State private var showsOCRResult = false
     @State private var showsSignatureWarning = false
@@ -965,6 +972,25 @@ struct ContentView: View {
                 onSelect: beginSignaturePlacement
             )
         }
+        .sheet(
+            item: $digitalSigningRequest,
+            onDismiss: finishDigitalSigningSheet
+        ) { request in
+            PDFDigitalSigningView(
+                fieldName: request.field.name,
+                onSign: { pkcs12, password, reason in
+                    try await digitallySign(
+                        request.field,
+                        pkcs12: pkcs12,
+                        password: password,
+                        reason: reason
+                    )
+                },
+                onCancel: {
+                    digitalSigningRequest = nil
+                }
+            )
+        }
         .sheet(isPresented: $showsAnnotationInspector) {
             AnnotationInspectorView(
                 annotations: pageAnnotations,
@@ -1161,6 +1187,7 @@ struct ContentView: View {
                     onSetFormFieldChoiceOptions: setFormFieldChoiceOptions,
                     onDeleteFormField: deleteFormField,
                     onCommitTextFormField: commitTextFormField,
+                    onDigitallySignFormField: beginDigitalSigning,
                     commentPlacementEnabled: commentPlacementEnabled,
                     onPlaceComment: selectCommentPlacement,
                     freeTextPlacementEnabled: freeTextPlacementEnabled,
@@ -3498,6 +3525,61 @@ struct ContentView: View {
             )
             selectedFormField = nil
         } catch { present(error) }
+    }
+
+    private func beginDigitalSigning(_ field: PDFFormDesignField) {
+        guard field.kind.isDigitalSignature, !isSaving else { return }
+        cancelFormFieldPlacement()
+        selectedESignPlacement = nil
+        savesSignedCopyAfterDismissal = false
+        digitalSigningRequest = PDFDigitalSigningRequest(field: field)
+    }
+
+    private func digitallySign(
+        _ field: PDFFormDesignField,
+        pkcs12: Data,
+        password: String,
+        reason: String?
+    ) async throws {
+        try document.synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
+        await Task.yield()
+        let pendingSave = try await preparePendingManualSave()
+        let signingRevision = editorState.revision
+        let identity = try PDFSigningIdentityService.load(
+            pkcs12: pkcs12,
+            password: password
+        )
+        let result = try await PDFDigitalSignatureWriter.sign(
+            data: pendingSave.preparation.data,
+            fieldID: field.id,
+            fieldName: field.name,
+            identity: identity,
+            reason: reason
+        )
+        try document.installDigitallySignedData(
+            result.data,
+            replacingRevision: signingRevision,
+            undoManager: undoManager
+        )
+        for edit in pendingSave.edits {
+            pendingTextEditStore.removeCommittedEdit(objectID: edit.object.id)
+        }
+        pendingTextEditStore.removeUndoActions(using: undoManager)
+        pageObjectCache.removeAll()
+        pageObjects = []
+        selectedObject = nil
+        selectedAnnotation = nil
+        selectedFormField = nil
+        savesSignedCopyAfterDismissal = true
+    }
+
+    private func finishDigitalSigningSheet() {
+        digitalSigningRequest = nil
+        guard savesSignedCopyAfterDismissal else { return }
+        savesSignedCopyAfterDismissal = false
+        DispatchQueue.main.async {
+            saveDocumentAs()
+        }
     }
 
     private func setAnnotationBounds(_ annotation: PDFAnnotationSnapshot, bounds: CGRect) {

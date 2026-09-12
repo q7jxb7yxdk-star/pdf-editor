@@ -71,6 +71,13 @@ nonisolated struct PDFFormFieldTreeWriter {
                 throw PDFFormFieldTreeError.invalidStructure
             }
             var dictionary = try body(ref)
+            let preservesSignedField =
+                FormPDFDictionaryEditor.name(named: "FT", in: dictionary) == "Sig" &&
+                FormPDFDictionaryEditor.value(named: "PDFEditorSigned", in: dictionary) == "true" &&
+                FormPDFDictionaryEditor.rawValue(named: "V", in: dictionary) != nil
+            if preservesSignedField {
+                return true
+            }
             if Self.identifier(in: dictionary) != nil ||
                 FormPDFDictionaryEditor.value(named: "PDFEditorFormGroup", in: dictionary) == "true" {
                 return false
@@ -98,7 +105,15 @@ nonisolated struct PDFFormFieldTreeWriter {
                 let dictionary = try body(ref)
                 guard FormPDFDictionaryEditor.name(named: "Subtype", in: dictionary) == "Widget" else { continue }
                 if let id = Self.identifier(in: dictionary) {
-                    guard expected[id]?.pageIndex == pageIndex, widgets.updateValue(ref, forKey: id) == nil else {
+                    let preservesSignedField =
+                        FormPDFDictionaryEditor.name(named: "FT", in: dictionary) == "Sig" &&
+                        FormPDFDictionaryEditor.value(named: "PDFEditorSigned", in: dictionary) == "true" &&
+                        FormPDFDictionaryEditor.rawValue(named: "V", in: dictionary) != nil
+                    if expected[id] == nil, preservesSignedField {
+                        continue
+                    }
+                    guard expected[id]?.pageIndex == pageIndex,
+                          widgets.updateValue(ref, forKey: id) == nil else {
                         throw PDFFormFieldTreeError.invalidStructure
                     }
                 } else if !visited.contains(ref) {
