@@ -863,6 +863,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     func addOCRTextLayersInBackground(
         _ recognizedPages: [OCRRecognizedPage],
         replacingRevision expectedRevision: Int,
+        presentationPageIndex: Int?,
         undoManager: UndoManager?,
         progress: @escaping (Int, Int) -> Void
     ) async throws {
@@ -922,6 +923,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
         try installPreparedOCRTextLayerMutation(
             preparation,
+            presentationPageIndex: presentationPageIndex,
             undoManager: undoManager
         )
     }
@@ -972,6 +974,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
 
     private func installPreparedOCRTextLayerMutation(
         _ preparation: PreparedOCRTextLayerMutation,
+        presentationPageIndex: Int?,
         undoManager: UndoManager?
     ) throws {
         guard let preparedDocument = PDFDocument(data: preparation.data) else {
@@ -987,7 +990,32 @@ final class PDFEditorDocument: ReferenceFileDocument {
         invalidateInteractionPreparation()
         editingSession = preparation.session
         sourceData = preparation.data
+#if os(macOS)
+        let displayTransition: PDFFormDisplayTransition? =
+            presentationPageIndex.flatMap { pageIndex in
+                guard let currentPage = pdfDocument.page(at: pageIndex),
+                      let preparedPage = preparedDocument.page(at: pageIndex) else {
+                    return nil
+                }
+                return PDFFormDisplayTransition(
+                    pageIndex: pageIndex,
+                    beforeBounds: currentPage.bounds(for: .cropBox),
+                    afterBounds: preparedPage.bounds(for: .cropBox),
+                    replacesDocument: true
+                )
+            }
+        postFormDisplayTransition(
+            PDFFormDisplayTransitionEvent.willChange,
+            transition: displayTransition
+        )
+        // Keep the rendered PDFView visible while its replacement loads the
+        // complete OCR document. Replacing pages one by one exposes PDFKit's
+        // empty intermediate tiles on macOS.
+        pdfDocument = preparedDocument
+        formPresentationDocument = nil
+#else
         synchronizePresentationPages(with: preparedDocument)
+#endif
         publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
 
         if let undoManager {

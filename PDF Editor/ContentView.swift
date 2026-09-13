@@ -3645,6 +3645,8 @@ struct ContentView: View {
                 try await document.addOCRTextLayersInBackground(
                     result.recognizedPages,
                     replacingRevision: context.documentRevision,
+                    presentationPageIndex: selectedPageIndex
+                        ?? result.recognizedPages.first?.pageIndex,
                     undoManager: undoManager
                 ) { completed, total in
                     ocrProgressCompleted = completed

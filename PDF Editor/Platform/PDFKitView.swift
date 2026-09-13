@@ -1202,6 +1202,7 @@ private extension PDFKitView {
         let pageIndex = destination?.page.flatMap { activePDFView.document?.index(for: $0) }
         let scale = activePDFView.scaleFactor
         let autoScales = activePDFView.autoScales
+        coordinator.prepareFormDisplayTransitionForDocumentReplacement(document)
         coordinator.prepareForDocumentReplacement()
 
         let replacement = makePDFView()
@@ -1223,6 +1224,7 @@ private extension PDFKitView {
             coordinator.stopObserving()
             coordinator.observe(incoming)
             coordinator.completeDocumentReplacement()
+            coordinator.completeFormDisplayTransitionAfterDocumentReplacement()
         }
     }
 #endif
