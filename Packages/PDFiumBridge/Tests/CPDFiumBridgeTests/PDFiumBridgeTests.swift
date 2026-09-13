@@ -401,6 +401,7 @@ final class PDFiumBridgeTests: XCTestCase {
         let originalObjectCount = PEPDFPageObjectCount(document, 0)
 
         let fontData = try Data(contentsOf: notoFontURL())
+        XCTAssertEqual(Array(fontData.prefix(4)), Array("OTTO".utf8))
         let font = fontData.withUnsafeBytes {
             PEPDFFontCreateEmbedded(
                 document,
@@ -434,6 +435,7 @@ final class PDFiumBridgeTests: XCTestCase {
         XCTAssertGreaterThan(addedObject.top, addedObject.bottom)
 
         let saved = try copyData(document)
+        XCTAssertLessThan(saved.count, fontData.count / 2)
         XCTAssertEqual(try nonWhitePixelCount(saved), sourcePixelCount)
 
         let reopened = try open(saved)

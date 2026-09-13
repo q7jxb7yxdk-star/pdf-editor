@@ -12,6 +12,7 @@ enum PDFToolAction: Equatable {
     case editComments
     case highlight
     case drawFreehand
+    case recognizePages([Int])
     case deletePage
     case movePageEarlier
     case movePageLater
@@ -28,6 +29,22 @@ enum PDFToolAction: Equatable {
     case removePassword
 }
 
+enum OCRPageScope: String, CaseIterable, Identifiable {
+    case currentPage
+    case allPages
+    case pageRange
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .currentPage: "Current page"
+        case .allPages: "All pages"
+        case .pageRange: "Page range"
+        }
+    }
+}
+
 extension PDFToolAction {
     var isESignAction: Bool {
         switch self {
@@ -38,11 +55,13 @@ extension PDFToolAction {
 }
 
 struct PDFToolSidebar: View {
-    private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v2"
-    private static let legacyExpandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
+    private static let expandedSectionsDefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v3"
+    private static let legacyExpandedSectionsV2DefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v2"
+    private static let legacyExpandedSectionsV1DefaultsKey = "com.sunny.pdf-editor.tool-sidebar.expanded-sections.v1"
     private static var sectionTitles: Set<String> {
         var titles: Set<String> = [
             "Edit text",
+            "OCR",
             "Organize a PDF",
             "Export PDF to",
             "E-sign",
@@ -56,9 +75,10 @@ struct PDFToolSidebar: View {
     }
 
     let pageCount: Int
-    let hasSelectedPage: Bool
+    let selectedPageIndex: Int?
     let isEncrypted: Bool
     let isLocked: Bool
+    let isRunningOCR: Bool
     let removesPasswordProtectionOnSave: Bool
     let canDesignForm: Bool
     let recentDocumentURLs: [URL]
@@ -67,13 +87,23 @@ struct PDFToolSidebar: View {
     let onRefreshRecentDocuments: () -> Void
     let onAction: (PDFToolAction) -> Void
 
+    @Binding var ocrPageScope: OCRPageScope
+    @Binding var ocrLanguageMode: OCRLanguageMode
+    @Binding var ocrRangeStartPage: Int
+    @Binding var ocrRangeEndPage: Int
+
     @State private var expandedSections: Set<String>
 
     init(
         pageCount: Int,
-        hasSelectedPage: Bool,
+        selectedPageIndex: Int?,
         isEncrypted: Bool,
         isLocked: Bool,
+        isRunningOCR: Bool,
+        ocrPageScope: Binding<OCRPageScope>,
+        ocrLanguageMode: Binding<OCRLanguageMode>,
+        ocrRangeStartPage: Binding<Int>,
+        ocrRangeEndPage: Binding<Int>,
         removesPasswordProtectionOnSave: Bool,
         canDesignForm: Bool = true,
         recentDocumentURLs: [URL] = [],
@@ -83,9 +113,14 @@ struct PDFToolSidebar: View {
         onAction: @escaping (PDFToolAction) -> Void
     ) {
         self.pageCount = pageCount
-        self.hasSelectedPage = hasSelectedPage
+        self.selectedPageIndex = selectedPageIndex
         self.isEncrypted = isEncrypted
         self.isLocked = isLocked
+        self.isRunningOCR = isRunningOCR
+        _ocrPageScope = ocrPageScope
+        _ocrLanguageMode = ocrLanguageMode
+        _ocrRangeStartPage = ocrRangeStartPage
+        _ocrRangeEndPage = ocrRangeEndPage
         self.removesPasswordProtectionOnSave = removesPasswordProtectionOnSave
         self.canDesignForm = canDesignForm
         self.recentDocumentURLs = recentDocumentURLs
@@ -122,6 +157,10 @@ struct PDFToolSidebar: View {
                         )
                         tool("Highlight", icon: "highlighter", action: .highlight)
                         tool("Draw freehand", icon: "pencil.and.outline", action: .drawFreehand)
+                    }
+
+                    section("OCR") {
+                        ocrControls
                     }
 
                     section("Organize a PDF") {
@@ -266,15 +305,108 @@ struct PDFToolSidebar: View {
         if let storedTitles = UserDefaults.standard.array(forKey: expandedSectionsDefaultsKey) as? [String] {
             return Set(storedTitles).intersection(sectionTitles)
         }
-        if let legacyTitles = UserDefaults.standard.array(forKey: legacyExpandedSectionsDefaultsKey) as? [String] {
-            // Expose the new category without reopening previously collapsed sections.
-            return Set(legacyTitles).intersection(sectionTitles).union(["Acroform"])
+        if let legacyTitles = UserDefaults.standard.array(forKey: legacyExpandedSectionsV2DefaultsKey) as? [String] {
+            // Expose OCR once without reopening categories the user collapsed.
+            return Set(legacyTitles).intersection(sectionTitles).union(["OCR"])
+        }
+        if let legacyTitles = UserDefaults.standard.array(forKey: legacyExpandedSectionsV1DefaultsKey) as? [String] {
+            // Preserve both category additions when migrating directly from v1.
+            return Set(legacyTitles).intersection(sectionTitles).union(["Acroform", "OCR"])
         }
         return sectionTitles
     }
 
     private func saveExpandedSections(_ sections: Set<String>) {
         UserDefaults.standard.set(sections.sorted(), forKey: Self.expandedSectionsDefaultsKey)
+    }
+
+    private var hasSelectedPage: Bool {
+        selectedPageIndex != nil
+    }
+
+    private var selectedOCRPageIndices: [Int] {
+        switch ocrPageScope {
+        case .currentPage:
+            return selectedPageIndex.map { [$0] } ?? []
+        case .allPages:
+            return Array(0..<pageCount)
+        case .pageRange:
+            guard pageCount > 0 else { return [] }
+            let lowerPage = min(max(ocrRangeStartPage, 1), pageCount)
+            let upperPage = min(max(ocrRangeEndPage, 1), pageCount)
+            guard lowerPage <= upperPage else { return [] }
+            return Array((lowerPage - 1)...(upperPage - 1))
+        }
+    }
+
+    private var ocrControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("RECOGNIZE TEXT")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Picker("Pages", selection: $ocrPageScope) {
+                ForEach(OCRPageScope.allCases) { scope in
+                    Text(scope.title).tag(scope)
+                }
+            }
+            .pickerStyle(.menu)
+
+            if ocrPageScope == .pageRange {
+                VStack(spacing: 8) {
+                    Stepper(
+                        "From: \(ocrRangeStartPage)",
+                        value: $ocrRangeStartPage,
+                        in: 1...max(pageCount, 1)
+                    )
+                    Stepper(
+                        "To: \(ocrRangeEndPage)",
+                        value: $ocrRangeEndPage,
+                        in: 1...max(pageCount, 1)
+                    )
+                }
+                .font(.callout)
+
+                if ocrRangeStartPage > ocrRangeEndPage {
+                    Text("The start page must not exceed the end page.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Picker("Language", selection: $ocrLanguageMode) {
+                ForEach(OCRLanguageMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+
+            ocrSetting("Output", value: "Searchable Image (Exact)")
+
+            Button {
+                onAction(.recognizePages(selectedOCRPageIndices))
+            } label: {
+                Label("Recognize Text", systemImage: "viewfinder")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
+            .disabled(selectedOCRPageIndices.isEmpty || isRunningOCR)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+    }
+
+    private func ocrSetting(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func tool(
@@ -1391,47 +1523,6 @@ struct ProtectedPDFMergeView: View {
             errorMessage = error.localizedDescription
             password = ""
         }
-    }
-}
-
-struct OCRBatchResultView: View {
-    let result: OCRBatchResult
-    let onAddTextLayers: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                LabeledContent("Recognized pages", value: "\(result.recognizedPageCount)")
-                LabeledContent("Text blocks", value: "\(result.recognizedItemCount)")
-                LabeledContent("Skipped text pages", value: "\(result.skippedTextPageIndices.count)")
-                LabeledContent("No recognition result", value: "\(result.emptyPageIndices.count)")
-
-                if !result.recognizedPages.isEmpty {
-                    Section("Searchable text layers to add") {
-                        ForEach(result.recognizedPages) { page in
-                            Text("Page \(page.pageIndex + 1) · \(page.observations.count) text blocks")
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Document OCR Results")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                if !result.recognizedPages.isEmpty {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Add Searchable Text Layers") {
-                            onAddTextLayers()
-                            dismiss()
-                        }
-                    }
-                }
-            }
-        }
-        .frame(minWidth: 440, minHeight: 360)
     }
 }
 

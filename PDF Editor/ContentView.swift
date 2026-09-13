@@ -481,6 +481,11 @@ private final class PendingTextEditStore: ObservableObject {
     }
 }
 
+private enum OCRProgressPhase {
+    case recognizing
+    case addingTextLayers
+}
+
 struct ContentView: View {
     let document: PDFEditorDocument
 
@@ -518,15 +523,17 @@ struct ContentView: View {
     @State private var pageObjectLoadTask: Task<Void, Never>?
     @State private var selectedObject: PDFPageObjectSnapshot?
     private let objectEditingEnabled = true
-    @State private var ocrResult: OCRPageResult?
-    @State private var ocrRunContext: OCRRunContext?
-    @State private var ocrBatchResult: OCRBatchResult?
-    @State private var ocrBatchRunContext: OCRRunContext?
     @State private var ocrBatchTask: Task<Void, Never>?
+    @State private var ocrProgressPhase: OCRProgressPhase = .recognizing
     @State private var ocrProgressCompleted = 0
     @State private var ocrProgressTotal = 0
     @State private var isRunningOCR = false
     @State private var showsOCRProgress = false
+    @State private var pendingOCRPageIndicesAfterToolsDismissal: [Int]?
+    @State private var ocrPageScope: OCRPageScope = .allPages
+    @State private var ocrLanguageMode: OCRLanguageMode = .automatic
+    @State private var ocrRangeStartPage = 1
+    @State private var ocrRangeEndPage: Int
     @State private var splitExportDocument: PDFExportDocument?
     @State private var showsSinglePageExporter = false
     @State private var showsImageExportOptions = false
@@ -563,7 +570,6 @@ struct ContentView: View {
     @State private var digitalSigningRequest: PDFDigitalSigningRequest?
     @State private var savesSignedCopyAfterDismissal = false
     @State private var freeTextPlacementEnabled = false
-    @State private var showsOCRResult = false
     @State private var showsSignatureWarning = false
     @State private var showsProtectPDF = false
     @State private var showsPasswordRemovalConfirmation = false
@@ -614,6 +620,7 @@ struct ContentView: View {
         self.nativeDocumentReference = nativeDocumentReference
         _editorState = ObservedObject(wrappedValue: document.editorState)
         _saveURL = State(initialValue: fileURL)
+        _ocrRangeEndPage = State(initialValue: max(document.pageCount, 1))
     }
 #else
     init(
@@ -626,6 +633,7 @@ struct ContentView: View {
         closeDocumentAction = onClose
         _editorState = ObservedObject(wrappedValue: document.editorState)
         _saveURL = State(initialValue: fileURL)
+        _ocrRangeEndPage = State(initialValue: max(document.pageCount, 1))
         _showsToolPanel = State(
             initialValue: UIDevice.current.userInterfaceIdiom != .phone
         )
@@ -791,6 +799,10 @@ struct ContentView: View {
                         showsSignatureLibraryAfterToolsDismissal = false
                         showsSignatureLibrary = true
                     }
+                    if let pageIndices = pendingOCRPageIndicesAfterToolsDismissal {
+                        pendingOCRPageIndicesAfterToolsDismissal = nil
+                        performOCRAction(pageIndices: pageIndices)
+                    }
                 }) {
                     NavigationStack {
                         toolSidebar
@@ -853,6 +865,9 @@ struct ContentView: View {
             if running { cancelFormFieldPlacement() }
         }
         .onChange(of: document.pageCount, initial: true) { _, pageCount in
+            let validPageRange = 1...max(pageCount, 1)
+            ocrRangeStartPage = min(max(ocrRangeStartPage, validPageRange.lowerBound), validPageRange.upperBound)
+            ocrRangeEndPage = min(max(ocrRangeEndPage, validPageRange.lowerBound), validPageRange.upperBound)
             guard pageCount > 0 else {
                 selectedPageIndex = nil
                 return
@@ -1025,7 +1040,6 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(isPresented: $showsOCRResult) { ocrResultView }
         .sheet(isPresented: $showsImageExportOptions) {
             PDFImageExportOptionsView(
                 hasCurrentPage: selectedPageIndex != nil,
@@ -1065,14 +1079,13 @@ struct ContentView: View {
         }
         .modifier(
             PhaseFiveWorkflowModifier(
-                ocrBatchResult: $ocrBatchResult,
                 showsOCRProgress: $showsOCRProgress,
+                ocrProgressPhase: ocrProgressPhase,
                 ocrProgressCompleted: ocrProgressCompleted,
                 ocrProgressTotal: ocrProgressTotal,
                 pendingMergeData: $pendingMergeData,
                 pendingMergeFilename: $pendingMergeFilename,
                 onCancelOCR: { ocrBatchTask?.cancel() },
-                onAddOCRTextLayers: addOCRTextLayers,
                 onMergeProtectedPDF: mergePendingPDF
             )
         )
@@ -1331,9 +1344,14 @@ struct ContentView: View {
     private var toolSidebar: some View {
         PDFToolSidebar(
             pageCount: document.pageCount,
-            hasSelectedPage: selectedPageIndex != nil,
+            selectedPageIndex: selectedPageIndex,
             isEncrypted: document.isEncrypted,
             isLocked: document.isLocked,
+            isRunningOCR: isRunningOCR,
+            ocrPageScope: $ocrPageScope,
+            ocrLanguageMode: $ocrLanguageMode,
+            ocrRangeStartPage: $ocrRangeStartPage,
+            ocrRangeEndPage: $ocrRangeEndPage,
             removesPasswordProtectionOnSave:
                 document.removesPasswordProtectionOnSave,
             canDesignForm: !isSaving && !isRunningOCR && !isOpeningFormDesign && formPlacementPreparationID == nil,
@@ -1348,9 +1366,14 @@ struct ContentView: View {
     private var toolSidebar: some View {
         PDFToolSidebar(
             pageCount: document.pageCount,
-            hasSelectedPage: selectedPageIndex != nil,
+            selectedPageIndex: selectedPageIndex,
             isEncrypted: document.isEncrypted,
             isLocked: document.isLocked,
+            isRunningOCR: isRunningOCR,
+            ocrPageScope: $ocrPageScope,
+            ocrLanguageMode: $ocrLanguageMode,
+            ocrRangeStartPage: $ocrRangeStartPage,
+            ocrRangeEndPage: $ocrRangeEndPage,
             removesPasswordProtectionOnSave:
                 document.removesPasswordProtectionOnSave,
             canDesignForm: !isSaving && !isRunningOCR && !isOpeningFormDesign && formPlacementPreparationID == nil,
@@ -1482,19 +1505,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Tools")
-
-                Menu {
-                    Button("Recognize current page", action: runOCR)
-                        .disabled(selectedPage == nil)
-                    Button("Recognize all scanned pages", action: runDocumentOCR)
-                        .disabled(document.pageCount == 0)
-                } label: {
-                    Image(systemName: "viewfinder")
-                        .frame(width: 44, height: 44)
-                }
-                .menuStyle(.borderlessButton)
-                .disabled(isRunningOCR)
-                .accessibilityLabel("OCR")
             }
             .padding(.horizontal, 8)
         }
@@ -1579,21 +1589,6 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .help("Tools")
             .accessibilityLabel("Tools")
-        }
-        .sharedBackgroundVisibility(.hidden)
-        ToolbarItem(placement: .navigation) {
-            Menu {
-                Button("Recognize current page", action: runOCR)
-                    .disabled(selectedPage == nil)
-                Button("Recognize all scanned pages", action: runDocumentOCR)
-                    .disabled(document.pageCount == 0)
-            } label: {
-                Image(systemName: "viewfinder")
-            }
-            .menuStyle(.borderlessButton)
-            .disabled(isRunningOCR)
-            .help("OCR")
-            .accessibilityLabel("OCR")
         }
         .sharedBackgroundVisibility(.hidden)
     }
@@ -2374,6 +2369,13 @@ struct ContentView: View {
 #endif
 
     private func handleToolAction(_ action: PDFToolAction) {
+        switch action {
+        case let .recognizePages(pageIndices):
+            requestOCRAction(pageIndices: pageIndices)
+            return
+        default:
+            break
+        }
         leaveFullScreenReading()
         cancelFormFieldPlacement()
         if action != .drawFreehand {
@@ -2447,6 +2449,8 @@ struct ContentView: View {
             if !usesInlinePanels {
                 showsToolPanel = false
             }
+        case .recognizePages:
+            break
         case .exportImage:
             beginImageExport()
         case .protectPDF:
@@ -2454,6 +2458,23 @@ struct ContentView: View {
         case .removePassword:
             beginPasswordRemoval()
         }
+    }
+
+    private func requestOCRAction(pageIndices: [Int]) {
+        let normalizedPageIndices = Array(
+            Set(pageIndices.filter { document.pdfDocument.page(at: $0) != nil })
+        ).sorted()
+        guard !normalizedPageIndices.isEmpty else { return }
+        if !usesInlinePanels && showsToolPanel {
+            pendingOCRPageIndicesAfterToolsDismissal = normalizedPageIndices
+            showsToolPanel = false
+        } else {
+            performOCRAction(pageIndices: normalizedPageIndices)
+        }
+    }
+
+    private func performOCRAction(pageIndices: [Int]) {
+        runDocumentOCR(pageIndices: pageIndices)
     }
 
     private func beginPasswordProtection() {
@@ -2591,53 +2612,6 @@ struct ContentView: View {
 
     private var errorAlertBinding: Binding<Bool> {
         Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-    }
-
-    @ViewBuilder
-    private var ocrResultView: some View {
-        NavigationStack {
-            Group {
-                switch ocrResult {
-                case let .existingText(text):
-                    ContentUnavailableView(
-                        "OCR Not Needed",
-                        systemImage: "text.cursor",
-                        description: Text("This page already contains selectable text:\n\(text.prefix(300))")
-                    )
-                case let .recognized(observations):
-                    List(observations.indices, id: \.self) { index in
-                        let item = observations[index]
-                        VStack(alignment: .leading) {
-                            Text(item.text)
-                            Text("Confidence \(item.confidence.formatted(.percent.precision(.fractionLength(0))))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                case nil:
-                    ProgressView()
-                }
-            }
-            .navigationTitle("OCR Results")
-            .toolbar {
-                if let observations = recognizedOCRObservations, !observations.isEmpty {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button("Add Searchable Text Layer") {
-                            addOCRTextLayer(observations)
-                        }
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { showsOCRResult = false }
-                }
-            }
-        }
-        .frame(minWidth: 420, minHeight: 360)
-    }
-
-    private var recognizedOCRObservations: [OCRTextObservation]? {
-        guard case let .recognized(observations) = ocrResult else { return nil }
-        return observations
     }
 
     @discardableResult
@@ -3630,42 +3604,19 @@ struct ContentView: View {
         } catch { present(error) }
     }
 
-    private func runOCR() {
+    private func runDocumentOCR(pageIndices: [Int]) {
         leaveFullScreenReading()
-        guard let pageIndex = selectedPageIndex,
-              let page = document.pdfDocument.page(at: pageIndex) else { return }
-        let context = OCRRunContext(
-            pageIndex: pageIndex,
-            documentRevision: editorState.revision
-        )
-        ocrRunContext = context
-        isRunningOCR = true
-        Task {
-            defer { isRunningOCR = false }
-            do {
-                let result = try await ocrService.recognizeText(on: page)
-                guard context.isCurrent(documentRevision: editorState.revision) else {
-                    throw VisionOCRError.documentChanged
-                }
-                ocrResult = result
-                showsOCRResult = true
-            } catch { present(error) }
-        }
-    }
-
-    private func runDocumentOCR() {
-        leaveFullScreenReading()
-        guard document.pageCount > 0 else { return }
+        guard !pageIndices.isEmpty else { return }
         ocrBatchTask?.cancel()
+        ocrProgressPhase = .recognizing
         ocrProgressCompleted = 0
-        ocrProgressTotal = document.pageCount
+        ocrProgressTotal = pageIndices.count
         isRunningOCR = true
         showsOCRProgress = true
         let context = OCRRunContext(
-            pageIndices: Array(0..<document.pageCount),
+            pageIndices: pageIndices,
             documentRevision: editorState.revision
         )
-        ocrBatchRunContext = context
 
         ocrBatchTask = Task {
             defer {
@@ -3676,7 +3627,8 @@ struct ContentView: View {
             do {
                 let result = try await ocrService.recognizePages(
                     in: document.pdfDocument,
-                    pageIndices: context.pageIndices
+                    pageIndices: context.pageIndices,
+                    languageMode: ocrLanguageMode
                 ) { completed, total in
                     ocrProgressCompleted = completed
                     ocrProgressTotal = total
@@ -3685,48 +3637,24 @@ struct ContentView: View {
                 guard context.isCurrent(documentRevision: editorState.revision) else {
                     throw VisionOCRError.documentChanged
                 }
-                showsOCRProgress = false
-                await Task.yield()
-                ocrBatchResult = result
+                guard !result.recognizedPages.isEmpty else { return }
+
+                ocrProgressPhase = .addingTextLayers
+                ocrProgressCompleted = 0
+                ocrProgressTotal = result.recognizedPageCount
+                try await document.addOCRTextLayersInBackground(
+                    result.recognizedPages,
+                    replacingRevision: context.documentRevision,
+                    undoManager: undoManager
+                ) { completed, total in
+                    ocrProgressCompleted = completed
+                    ocrProgressTotal = total
+                }
             } catch is CancellationError {
-                // Cancellation leaves the PDF untouched because text layers are added only after review.
+                // Cancellation discards recognition or the prepared background document.
             } catch {
                 present(error)
             }
-        }
-    }
-
-    private func addOCRTextLayer(_ observations: [OCRTextObservation]) {
-        do {
-            guard let context = ocrRunContext,
-                  let pageIndex = context.singlePageIndex else { return }
-            guard context.isCurrent(documentRevision: editorState.revision) else {
-                throw VisionOCRError.documentChanged
-            }
-            try document.addOCRTextLayer(
-                observations,
-                pageIndex: pageIndex,
-                undoManager: undoManager
-            )
-            showsOCRResult = false
-        } catch {
-            present(error)
-        }
-    }
-
-    private func addOCRTextLayers(_ result: OCRBatchResult) {
-        do {
-            guard let context = ocrBatchRunContext else { return }
-            guard context.isCurrent(documentRevision: editorState.revision) else {
-                throw VisionOCRError.documentChanged
-            }
-            try document.addOCRTextLayers(
-                result.recognizedPages,
-                undoManager: undoManager
-            )
-            ocrBatchResult = nil
-        } catch {
-            present(error)
         }
     }
 
@@ -3741,14 +3669,13 @@ struct ContentView: View {
 }
 
 private struct PhaseFiveWorkflowModifier: ViewModifier {
-    @Binding var ocrBatchResult: OCRBatchResult?
     @Binding var showsOCRProgress: Bool
+    let ocrProgressPhase: OCRProgressPhase
     let ocrProgressCompleted: Int
     let ocrProgressTotal: Int
     @Binding var pendingMergeData: Data?
     @Binding var pendingMergeFilename: String
     let onCancelOCR: () -> Void
-    let onAddOCRTextLayers: (OCRBatchResult) -> Void
     let onMergeProtectedPDF: (String) throws -> Void
 
     func body(content: Content) -> some View {
@@ -3760,14 +3687,14 @@ private struct PhaseFiveWorkflowModifier: ViewModifier {
                             value: Double(ocrProgressCompleted),
                             total: Double(max(ocrProgressTotal, 1))
                         )
-                        Text("Checked \(ocrProgressCompleted) of \(ocrProgressTotal) pages")
+                        Text(ocrProgressDescription)
                             .foregroundStyle(.secondary)
-                        Text("Pages that already contain selectable text are skipped automatically.")
+                        Text(ocrProgressFootnote)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .padding(28)
-                    .navigationTitle("Recognizing Scanned Pages")
+                    .navigationTitle(ocrProgressTitle)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("Cancel", action: onCancelOCR)
@@ -3776,18 +3703,6 @@ private struct PhaseFiveWorkflowModifier: ViewModifier {
                 }
                 .frame(minWidth: 400, minHeight: 220)
                 .interactiveDismissDisabled()
-            }
-            .sheet(
-                isPresented: Binding(
-                    get: { ocrBatchResult != nil },
-                    set: { if !$0 { ocrBatchResult = nil } }
-                )
-            ) {
-                if let ocrBatchResult {
-                    OCRBatchResultView(result: ocrBatchResult) {
-                        onAddOCRTextLayers(ocrBatchResult)
-                    }
-                }
             }
             .sheet(
                 isPresented: Binding(
@@ -3804,5 +3719,32 @@ private struct PhaseFiveWorkflowModifier: ViewModifier {
                     try onMergeProtectedPDF(password)
                 }
             }
+    }
+
+    private var ocrProgressTitle: String {
+        switch ocrProgressPhase {
+        case .recognizing:
+            "Recognizing Scanned Pages"
+        case .addingTextLayers:
+            "Adding Searchable Text Layers"
+        }
+    }
+
+    private var ocrProgressDescription: String {
+        switch ocrProgressPhase {
+        case .recognizing:
+            "Checked \(ocrProgressCompleted) of \(ocrProgressTotal) pages"
+        case .addingTextLayers:
+            "Added \(ocrProgressCompleted) of \(ocrProgressTotal) pages"
+        }
+    }
+
+    private var ocrProgressFootnote: String {
+        switch ocrProgressPhase {
+        case .recognizing:
+            "Pages that already contain selectable text are skipped automatically."
+        case .addingTextLayers:
+            "The recognized text is being embedded as an invisible searchable layer."
+        }
     }
 }

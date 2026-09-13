@@ -4207,13 +4207,24 @@ extension PDFKitView {
 #endif
             let pagePoint = pdfView.convert(viewPoint, to: page)
             let wordSelection = copyableWordSelection(at: pagePoint, on: page)
-            guard let object = editableObject(
+            let object = editableObject(
                 at: viewPoint,
                 on: page,
                 pageIndex: pageIndex,
                 textSelection: wordSelection,
                 queriesTextSelectionWhenMissing: false
-            ) else {
+            )
+            if let object,
+               object.kind != .text,
+               wordSelection != nil,
+               selectCopyableText(
+                   at: pagePoint,
+                   on: page,
+                   pageIndex: pageIndex
+               ) {
+                return
+            }
+            guard let object else {
                 guard let wordSelection,
                       let text = wordSelection.string,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

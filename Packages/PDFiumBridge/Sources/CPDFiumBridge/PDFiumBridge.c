@@ -314,6 +314,14 @@ static int PERecursiveObjectCount(FPDF_PAGEOBJECT object) {
     return count;
 }
 
+static bool PEObjectIsIncludedInDisplayList(FPDF_PAGEOBJECT object) {
+    // Keep searchable OCR text in the PDF while excluding it from app-side
+    // direct-edit hit testing and passive page-object prefetching.
+    return object != NULL &&
+        (FPDFPageObj_GetType(object) != FPDF_PAGEOBJ_TEXT ||
+         FPDFTextObj_GetTextRenderMode(object) != FPDF_TEXTRENDERMODE_INVISIBLE);
+}
+
 static bool PERecursiveObjectMetrics(
     FPDF_PAGEOBJECT object,
     size_t depth,
@@ -321,12 +329,17 @@ static bool PERecursiveObjectMetrics(
     size_t* pathIndexCount
 ) {
     if (object == NULL || objectCount == NULL || pathIndexCount == NULL ||
-        depth >= 64 || *objectCount == SIZE_MAX ||
-        *pathIndexCount > SIZE_MAX - (depth + 1)) {
+        depth >= 64) {
         return false;
     }
-    *objectCount += 1;
-    *pathIndexCount += depth + 1;
+    if (PEObjectIsIncludedInDisplayList(object)) {
+        if (*objectCount == SIZE_MAX ||
+            *pathIndexCount > SIZE_MAX - (depth + 1)) {
+            return false;
+        }
+        *objectCount += 1;
+        *pathIndexCount += depth + 1;
+    }
     if (FPDFPageObj_GetType(object) != FPDF_PAGEOBJ_FORM || depth >= 63) {
         return true;
     }
@@ -550,22 +563,27 @@ static bool PECollectDisplayObjects(
     size_t* objectPosition,
     size_t* pathPosition
 ) {
-    if (object == NULL || depth >= 64 || *objectPosition >= objectCapacity ||
-        *pathPosition > pathCapacity ||
-        depth + 1 > pathCapacity - *pathPosition) {
+    if (object == NULL || depth >= 64) {
         return false;
     }
     path[depth] = objectIndex;
-    size_t outputIndex = *objectPosition;
-    pathOffsets[outputIndex] = (int32_t)*pathPosition;
-    memcpy(
-        pathIndices + *pathPosition,
-        path,
-        (depth + 1) * sizeof(int32_t)
-    );
-    *pathPosition += depth + 1;
-    PEFillObjectInfo(object, parentMatrix, &infos[outputIndex]);
-    *objectPosition += 1;
+    if (PEObjectIsIncludedInDisplayList(object)) {
+        if (*objectPosition >= objectCapacity ||
+            *pathPosition > pathCapacity ||
+            depth + 1 > pathCapacity - *pathPosition) {
+            return false;
+        }
+        size_t outputIndex = *objectPosition;
+        pathOffsets[outputIndex] = (int32_t)*pathPosition;
+        memcpy(
+            pathIndices + *pathPosition,
+            path,
+            (depth + 1) * sizeof(int32_t)
+        );
+        *pathPosition += depth + 1;
+        PEFillObjectInfo(object, parentMatrix, &infos[outputIndex]);
+        *objectPosition += 1;
+    }
 
     if (FPDFPageObj_GetType(object) != FPDF_PAGEOBJ_FORM || depth >= 63) {
         return true;
@@ -2579,16 +2597,11 @@ PEPDFFontRef PEPDFFontCreateEmbedded(
     if (font == NULL) {
         return NULL;
     }
-    int fontType = fontLength >= 4 &&
-        fontBytes[0] == 'O' && fontBytes[1] == 'T' &&
-        fontBytes[2] == 'T' && fontBytes[3] == 'O'
-        ? FPDF_FONT_TYPE1
-        : FPDF_FONT_TRUETYPE;
     font->handle = FPDFText_LoadFont(
         document->handle,
         fontBytes,
         (uint32_t)fontLength,
-        fontType,
+        FPDF_FONT_TRUETYPE,
         true
     );
     if (font->handle == NULL) {

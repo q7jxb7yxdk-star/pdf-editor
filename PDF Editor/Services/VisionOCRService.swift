@@ -3,6 +3,20 @@ import Foundation
 import PDFKit
 import Vision
 
+enum OCRLanguageMode: String, CaseIterable, Identifiable, Sendable {
+    case automatic
+    case traditionalChineseEnglish
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .traditionalChineseEnglish: "Traditional Chinese + English"
+        }
+    }
+}
+
 struct OCRTextObservation: Equatable, Sendable {
     let text: String
     let confidence: Float
@@ -83,11 +97,14 @@ enum VisionOCRError: LocalizedError {
 final class VisionOCRService {
     private let maximumImageDimension: CGFloat
 
-    init(maximumImageDimension: CGFloat = 3_000) {
+    init(maximumImageDimension: CGFloat = 3_508) {
         self.maximumImageDimension = maximumImageDimension
     }
 
-    func recognizeText(on page: PDFPage) async throws -> OCRPageResult {
+    func recognizeText(
+        on page: PDFPage,
+        languageMode: OCRLanguageMode
+    ) async throws -> OCRPageResult {
         if let text = selectableText(on: page) {
             return .existingText(text)
         }
@@ -103,7 +120,8 @@ final class VisionOCRService {
             return try Self.performRecognition(
                 image: image,
                 pageBox: pageBox,
-                rotation: rotation
+                rotation: rotation,
+                languageMode: languageMode
             )
         }.value
     }
@@ -111,6 +129,7 @@ final class VisionOCRService {
     func recognizePages(
         in document: PDFDocument,
         pageIndices: [Int],
+        languageMode: OCRLanguageMode,
         progress: (Int, Int) -> Void
     ) async throws -> OCRBatchResult {
         var recognizedPages: [OCRRecognizedPage] = []
@@ -123,7 +142,7 @@ final class VisionOCRService {
                 throw VisionOCRError.invalidPageIndex(pageIndex)
             }
 
-            switch try await recognizeText(on: page) {
+            switch try await recognizeText(on: page, languageMode: languageMode) {
             case .existingText:
                 skippedTextPageIndices.append(pageIndex)
             case let .recognized(observations):
@@ -194,7 +213,8 @@ final class VisionOCRService {
     nonisolated private static func performRecognition(
         image: CGImage,
         pageBox: CGRect,
-        rotation: Int
+        rotation: Int,
+        languageMode: OCRLanguageMode
     ) throws -> OCRPageResult {
         var observations: [OCRTextObservation] = []
         var recognitionError: Error?
@@ -204,9 +224,11 @@ final class VisionOCRService {
                 guard let candidate = $0.topCandidates(1).first else {
                     return nil
                 }
+                let normalizedText = candidate.string
+                    .precomposedStringWithCompatibilityMapping
 
                 return OCRTextObservation(
-                    text: candidate.string,
+                    text: normalizedText,
                     confidence: candidate.confidence,
                     normalizedBounds: $0.boundingBox,
                     pageBounds: mapToPage(
@@ -219,7 +241,13 @@ final class VisionOCRService {
         }
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
-        request.automaticallyDetectsLanguage = true
+        switch languageMode {
+        case .automatic:
+            request.automaticallyDetectsLanguage = true
+        case .traditionalChineseEnglish:
+            request.recognitionLanguages = ["zh-Hant", "en-US"]
+            request.automaticallyDetectsLanguage = false
+        }
 
         try VNImageRequestHandler(cgImage: image).perform([request])
 

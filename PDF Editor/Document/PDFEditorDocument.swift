@@ -12,6 +12,17 @@ nonisolated private struct PreparedPDFAnnotationSession: @unchecked Sendable {
     let session: any PDFAnnotationEditingSession
 }
 
+nonisolated private struct PreparedOCRTextLayerMutation: @unchecked Sendable {
+    let originalData: Data
+    let data: Data
+    let session: any PDFEditingSession
+}
+
+nonisolated private struct OCRTextLayerProgress: Sendable {
+    let completed: Int
+    let total: Int
+}
+
 final class PDFEditorDocument: ReferenceFileDocument {
     typealias Snapshot = Data
 
@@ -786,17 +797,19 @@ final class PDFEditorDocument: ReferenceFileDocument {
                 )
             } else {
                 try objectSession.addEmbeddedTextObjects(
-                    [PDFInvisibleTextItem(
-                        text: text,
-                        bounds: CGRect(
-                            origin: origin,
-                            size: CGSize(width: max(fontSize, 1), height: fontSize / 0.82)
-                        )
+                    [PDFInvisibleTextPage(
+                        pageIndex: pageIndex,
+                        items: [PDFInvisibleTextItem(
+                            text: text,
+                            bounds: CGRect(
+                                origin: origin,
+                                size: CGSize(width: max(fontSize, 1), height: fontSize / 0.82)
+                            )
+                        )]
                     )],
-                    pageIndex: pageIndex,
                     fontData: try unicodeFontData(),
                     invisible: false
-                )
+                ) { _, _ in }
             }
         }
     }
@@ -847,22 +860,20 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
     }
 
-    func addOCRTextLayer(
-        _ observations: [OCRTextObservation],
-        pageIndex: Int,
-        undoManager: UndoManager?
-    ) throws {
-        try addOCRTextLayers(
-            [OCRRecognizedPage(pageIndex: pageIndex, observations: observations)],
-            undoManager: undoManager
-        )
-    }
-
-    func addOCRTextLayers(
+    func addOCRTextLayersInBackground(
         _ recognizedPages: [OCRRecognizedPage],
-        undoManager: UndoManager?
-    ) throws {
+        replacingRevision expectedRevision: Int,
+        undoManager: UndoManager?,
+        progress: @escaping (Int, Int) -> Void
+    ) async throws {
         guard !recognizedPages.isEmpty else { return }
+        guard editorState.revision == expectedRevision else {
+            throw VisionOCRError.documentChanged
+        }
+        if hasDigitalSignatures && !allowsInvalidatingDigitalSignatures {
+            throw PDFEditingError.digitalSignatureConsentRequired
+        }
+
         var seenPageIndices = Set<Int>()
         for recognizedPage in recognizedPages {
             guard seenPageIndices.insert(recognizedPage.pageIndex).inserted,
@@ -874,23 +885,120 @@ final class PDFEditorDocument: ReferenceFileDocument {
             }
         }
 
-        try mutate(undoManager: undoManager, actionName: "新增 OCR 可搜尋文字層") {
-            guard let objectSession = editingSession as? any PDFObjectEditingSession else {
-                throw PDFObjectEditingError.objectMutationFailed
-            }
-            let fontData = try unicodeFontData()
-            for recognizedPage in recognizedPages {
-                let items = recognizedPage.observations.map {
-                    PDFInvisibleTextItem(text: $0.text, bounds: $0.pageBounds)
-                }
-                guard !items.isEmpty else { continue }
-                try objectSession.addEmbeddedTextObjects(
-                    items,
-                    pageIndex: recognizedPage.pageIndex,
-                    fontData: fontData,
-                    invisible: true
+        let sourceSession = editingSession.map { PreparedPDFEditingSession(session: $0) }
+        let fallbackData = sourceSession == nil ? try presentationDataForPersistence() : sourceData
+        let password = authorizedPassword
+        let fontData = try unicodeFontData()
+        let (progressUpdates, progressContinuation) = AsyncStream.makeStream(
+            of: OCRTextLayerProgress.self
+        )
+        let preparationTask = Task.detached(priority: .userInitiated) {
+            defer { progressContinuation.finish() }
+            return try Self.prepareOCRTextLayerMutation(
+                recognizedPages,
+                sourceSession: sourceSession,
+                fallbackData: fallbackData,
+                password: password,
+                fontData: fontData
+            ) { completed, total in
+                progressContinuation.yield(
+                    OCRTextLayerProgress(completed: completed, total: total)
                 )
             }
+        }
+        let preparation = try await withTaskCancellationHandler(operation: {
+            for await update in progressUpdates {
+                progress(update.completed, update.total)
+            }
+            return try await preparationTask.value
+        }, onCancel: {
+            preparationTask.cancel()
+            progressContinuation.finish()
+        })
+
+        try Task.checkCancellation()
+        guard editorState.revision == expectedRevision else {
+            throw VisionOCRError.documentChanged
+        }
+        try installPreparedOCRTextLayerMutation(
+            preparation,
+            undoManager: undoManager
+        )
+    }
+
+    nonisolated private static func prepareOCRTextLayerMutation(
+        _ recognizedPages: [OCRRecognizedPage],
+        sourceSession: PreparedPDFEditingSession?,
+        fallbackData: Data,
+        password: String?,
+        fontData: Data,
+        progress: @Sendable (Int, Int) -> Void
+    ) throws -> PreparedOCRTextLayerMutation {
+        try pdfiumAccessLock.withLock {
+            try Task.checkCancellation()
+            let originalData = try sourceSession?.session.dataRepresentation(
+                options: PDFExportOptions()
+            ) ?? fallbackData
+            let session = try PDFiumEditingEngine().makeSession(
+                data: originalData,
+                password: password
+            )
+            guard let objectSession = session as? any PDFObjectEditingSession else {
+                throw PDFObjectEditingError.objectMutationFailed
+            }
+            let pages = recognizedPages.map { recognizedPage in
+                PDFInvisibleTextPage(
+                    pageIndex: recognizedPage.pageIndex,
+                    items: recognizedPage.observations.map {
+                        PDFInvisibleTextItem(text: $0.text, bounds: $0.pageBounds)
+                    }
+                )
+            }
+            try objectSession.addEmbeddedTextObjects(
+                pages,
+                fontData: fontData,
+                invisible: true
+            ) { completed, total in
+                progress(completed, total)
+            }
+            let data = try session.dataRepresentation(options: PDFExportOptions())
+            return PreparedOCRTextLayerMutation(
+                originalData: originalData,
+                data: data,
+                session: session
+            )
+        }
+    }
+
+    private func installPreparedOCRTextLayerMutation(
+        _ preparation: PreparedOCRTextLayerMutation,
+        undoManager: UndoManager?
+    ) throws {
+        guard let preparedDocument = PDFDocument(data: preparation.data) else {
+            throw PDFEditingError.invalidDocument
+        }
+        if preparedDocument.isLocked {
+            guard let authorizedPassword,
+                  preparedDocument.unlock(withPassword: authorizedPassword) else {
+                throw PDFEditingError.invalidPassword
+            }
+        }
+
+        invalidateInteractionPreparation()
+        editingSession = preparation.session
+        sourceData = preparation.data
+        synchronizePresentationPages(with: preparedDocument)
+        publishDocumentChangeAfterViewUpdate(markingUnsaved: true)
+
+        if let undoManager {
+            undoManager.registerUndo(withTarget: self) { document in
+                document.restore(
+                    data: preparation.originalData,
+                    actionName: "新增 OCR 可搜尋文字層",
+                    undoManager: undoManager
+                )
+            }
+            undoManager.setActionName("新增 OCR 可搜尋文字層")
         }
     }
 

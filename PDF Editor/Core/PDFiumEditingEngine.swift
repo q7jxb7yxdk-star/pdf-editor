@@ -72,6 +72,11 @@ nonisolated struct PDFInvisibleTextItem: Equatable, Sendable {
     let bounds: CGRect
 }
 
+nonisolated struct PDFInvisibleTextPage: Equatable, Sendable {
+    let pageIndex: Int
+    let items: [PDFInvisibleTextItem]
+}
+
 private extension CGAffineTransform {
     nonisolated var peDeterminant: CGFloat { a * d - b * c }
 
@@ -181,10 +186,10 @@ nonisolated protocol PDFObjectEditingSession: AnyObject {
         with payload: PDFBitmapPayload
     ) throws
     func addEmbeddedTextObjects(
-        _ items: [PDFInvisibleTextItem],
-        pageIndex: Int,
+        _ pages: [PDFInvisibleTextPage],
         fontData: Data,
-        invisible: Bool
+        invisible: Bool,
+        progress: @Sendable (Int, Int) -> Void
     ) throws
 }
 
@@ -965,15 +970,17 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
     }
 
     func addEmbeddedTextObjects(
-        _ items: [PDFInvisibleTextItem],
-        pageIndex: Int,
+        _ pages: [PDFInvisibleTextPage],
         fontData: Data,
-        invisible: Bool
+        invisible: Bool,
+        progress: @Sendable (Int, Int) -> Void
     ) throws {
         PDFiumAccess.lock.lock()
         defer { PDFiumAccess.lock.unlock() }
-        try validatePageIndex(pageIndex)
-        guard !items.isEmpty else { return }
+        guard !pages.isEmpty else { return }
+        for page in pages {
+            try validatePageIndex(page.pageIndex)
+        }
 
         let font = fontData.withUnsafeBytes { bytes in
             PEPDFFontCreateEmbedded(
@@ -987,25 +994,29 @@ nonisolated final class PDFiumEditingSession: PDFEditingSession, PDFObjectEditin
         }
         defer { PEPDFFontClose(font) }
 
-        for item in items {
-            let utf16 = Array(item.text.utf16)
-            let fontSize = max(4, item.bounds.height * 0.82)
-            let success = utf16.withUnsafeBufferPointer { textBuffer in
-                PEPDFPageAddEmbeddedText(
-                    handle,
-                    font,
-                    Int32(pageIndex),
-                    textBuffer.baseAddress,
-                    textBuffer.count,
-                    Float(fontSize),
-                    Float(item.bounds.minX),
-                    Float(item.bounds.minY),
-                    invisible
-                )
+        for (offset, page) in pages.enumerated() {
+            try Task.checkCancellation()
+            for item in page.items {
+                let utf16 = Array(item.text.utf16)
+                let fontSize = max(4, item.bounds.height * 0.82)
+                let success = utf16.withUnsafeBufferPointer { textBuffer in
+                    PEPDFPageAddEmbeddedText(
+                        handle,
+                        font,
+                        Int32(page.pageIndex),
+                        textBuffer.baseAddress,
+                        textBuffer.count,
+                        Float(fontSize),
+                        Float(item.bounds.minX),
+                        Float(item.bounds.minY),
+                        invisible
+                    )
+                }
+                guard success else {
+                    throw PDFObjectEditingError.objectMutationFailed
+                }
             }
-            guard success else {
-                throw PDFObjectEditingError.objectMutationFailed
-            }
+            progress(offset + 1, pages.count)
         }
     }
 
