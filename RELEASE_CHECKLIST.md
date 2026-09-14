@@ -9,6 +9,8 @@
       slice and refresh its ad-hoc signature and recorded binary hash.
 - [x] Rebuild the iOS device PDFium slice with full DWARF information and add
       its UUID-matched dSYM to the XCFramework debug-symbols path.
+- [x] Rebuild the universal macOS PDFium slice with line-table DWARF information
+      and add its two-architecture UUID-matched dSYM to the XCFramework.
 - [x] Generate and add the complete PDFium and transitive dependency notice
       set for revision `9e5d491ff73630b6a423689698290650050e7b3f`.
 - [x] Add the Noto Sans CJK SIL OFL and pinned Swift package notices to the
@@ -37,8 +39,8 @@
 - [ ] Run `git diff --check` and confirm only intended files changed.
 - [ ] Generate the Archive privacy report and confirm the final app and embedded
       frameworks contain the intended manifests without undeclared API use.
-- [ ] Inspect the final Archive and confirm `PDFium.framework.dSYM` is present
-      and its arm64 UUID matches the archived `PDFium.framework` binary.
+- [ ] Inspect each final Archive and confirm `PDFium.framework.dSYM` is present:
+      iOS must match arm64; macOS must match both arm64 and x86_64 UUIDs.
 - [ ] Inspect the final Archive and confirm `THIRD_PARTY_NOTICES.txt` is bundled
       and the Acknowledgements view displays its complete contents.
 

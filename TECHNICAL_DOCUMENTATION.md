@@ -578,9 +578,20 @@ arm64 UUID
 `4C4C4481-5555-3144-A151-E9290FD96C27`. The XCFramework was regenerated with
 the device dSYM, and its device entry records `DebugSymbolsPath = dSYMs`.
 Install-name, required exported-symbol, strict ad-hoc signature, architecture,
-and SHA-256 checks passed; the other three framework binaries remained
-byte-for-byte unchanged. Final propagation into a user-created app Archive and
-App Store validation remain manual checks.
+and SHA-256 checks passed. The Simulator and Mac Catalyst framework binaries
+remained byte-for-byte unchanged.
+
+The macOS arm64 and x86_64 slices were subsequently rebuilt from the same
+source with Xcode 26.6 (17F113), macOS SDK 26.5 (25F70), and
+`symbol_level = 1`, then combined into a universal framework. The framework and
+its line-table `PDFium.framework.dSYM` both report x86_64 UUID
+`4C4C4448-5555-3144-A106-5FE0556C0AA9` and arm64 UUID
+`4C4C44C9-5555-3144-A1ED-78039FA19E29`. Its XCFramework entry records
+`DebugSymbolsPath = dSYMs`. The 32 MB DWARF file remains below GitHub's regular
+100 MB per-file limit. DWARF integrity, install-name, required exported-symbol,
+strict ad-hoc signature, architecture, platform, and SHA-256 checks passed.
+Final propagation of both rebuilt dSYMs into user-created app Archives and App
+Store symbol uploads remain manual checks.
 
 The app opens encrypted PDFs, can create password-protected PDFs through
 PDFKit, and can remove an encryption dictionary after authorized unlock and
@@ -862,7 +873,8 @@ The builds establish compilation and bundle construction for those destinations.
 - Image-export options/progress/file-destination interaction, multi-file behavior with third-party file providers, and visual comparison of PNG/JPEG output against representative PDFs on macOS and iOS.
 - OCR quality on representative scanned documents and all languages/scripts.
 - Independent clean-environment PDFium reproducibility beyond the verified
-  2026-08-29 Xcode 26.5 build and 2026-09-14 Xcode 26.6 iOS-device rebuild.
+  2026-08-29 Xcode 26.5 build and 2026-09-14 Xcode 26.6 iOS-device/macOS
+  rebuilds.
 - Final Archive notice/font-license exposure, App Store Connect encryption
   declarations, and third-party vulnerability status.
 
