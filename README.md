@@ -133,7 +133,8 @@ PDF Editor/                       SwiftUI application source and resources
 Packages/PDFiumBridge/            Local C bridge, binary PDFium dependency, and XCTest suite
 Validation/                       Standalone local validation and fixture-generation programs
 RELEASE_CHECKLIST.md              Outstanding automated, manual, and distribution checks
-THIRD_PARTY_NOTICES.md            Third-party notice index
+EXPORT_COMPLIANCE.md              Cryptography inventory and App Store Connect answer record
+THIRD_PARTY_NOTICES.md            Third-party notice generation record
 ```
 
 See `TECHNICAL_DOCUMENTATION.md` for component and data-flow details.
@@ -170,7 +171,19 @@ No repository configuration was found for UI tests, CI, linting, formatting, typ
 - Accepted document passwords remain in memory for the open editing session so encrypted data can be reopened during mutation and undo/redo. The source does not deliberately persist them, but it does not provide secure-memory or zeroization guarantees.
 - Extracted pages are newly assembled outputs and are opened without a password by the validation path; they are distinct from the explicit “remove password on save” option.
 - App Sandbox and Hardened Runtime are enabled in build settings, but a built, signed, and distributed application was not inspected in this documentation task. No explicit entitlements file is present.
-- The complete transitive PDFium notice set, final license exposure in the app bundle, export-compliance classification, signing, notarization, device installation, and store behavior remain externally unverified release work.
+- Final Archive resource exposure, App Store Connect encryption-declaration
+  review, signing, notarization, device installation, and store behavior remain
+  externally unverified release work.
+
+## Privacy
+
+PDF Editor performs document editing and OCR locally and does not include an
+application-operated backend, analytics, advertising, tracking, or telemetry.
+Its App Store privacy policy is available in [PRIVACY_POLICY.md](PRIVACY_POLICY.md)
+and through the app's Tools workspace; macOS also exposes the link in Settings.
+The app and bundled PDFium slices include privacy manifests for the currently
+identified required-reason APIs. A final Archive privacy report and App Store
+Connect disclosures remain release validation rather than source-level proof.
 
 ## License
 
@@ -178,9 +191,13 @@ No project-wide `LICENSE` file or project-wide license declaration was found. Do
 
 Third-party licensing is documented separately:
 
-- `THIRD_PARTY_NOTICES.md` indexes the bundled dependencies.
+- `THIRD_PARTY_NOTICES.md` records the pinned inputs and reproducible generation
+  evidence for the complete bundled notice set.
+- `PDF Editor/THIRD_PARTY_NOTICES.txt` contains the full PDFium/transitive,
+  Swift package, and font notices exposed by the app's Acknowledgements view.
 - `PDF Editor/NotoSansTC-LICENSE.txt` contains the SIL Open Font License 1.1 text for the bundled font.
-- `Packages/PDFiumBridge/Vendor/NOTICE.md` records PDFium provenance and identifies the outstanding requirement to generate complete notices for the pinned build and its transitive components.
+- `Packages/PDFiumBridge/Vendor/NOTICE.md` records PDFium provenance and the
+  checked-in framework hashes.
 
 ## Verification status
 

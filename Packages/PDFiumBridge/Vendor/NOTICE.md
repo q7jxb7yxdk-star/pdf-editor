@@ -17,14 +17,22 @@
 
 Framework binary SHA-256 values after universal-slice assembly and signing:
 
-- iOS device: `7e6d38124cf163e1884a87291adc798f0f93c1822aee56946b9eaafc5fedd560`
-- iOS Simulator: `1c3c63211d21ed741a228c36996ce674869c24fab3b38f50c41dc146f5a1cae4`
-- Mac Catalyst: `710dc90bd45b4e1d6fa34cf314c15a5c718eb7ffcc92830b6ee60ed506ba8ef9`
-- macOS: `9fcc7d7bf9fa5e537cd3c94e5f43a75727d93167c11eed27f5f5ffaf9b7e8494`
+- iOS device: `1d1a997a782baec98882e5f4b4241e631bf1898434c36eafaafc4207d0729692`
+- iOS Simulator: `fa7e53466910f2dddc7bc4f5502f594480c34c3fd74487220fedb308d081bb51`
+- Mac Catalyst: `22762a7be35cb33c45ad7c7de94bc80ee9e836e3409ea7373dafb01966e43f24`
+- macOS: `17e37bd51574533fa788dc00fc3dfdbda1d70881d5a72784bedda063f0836589`
 
-PDFium's top-level source license is BSD-style. It also incorporates third-party
-components with their own license notices. Before distributing the application,
-generate and include the notices for the exact PDFium revision and its compiled
-dependencies. This fork is pinned for development and regression testing;
-updating it requires checksum, exported-symbol, platform, build, and corpus
-verification.
+Each framework slice uses the three-component bundle build version
+`144.0.7811` and includes a `PrivacyInfo.xcprivacy` file declaring no tracking
+or data collection. The manifest records the bundled library's file-metadata
+API category for app-container and user-selected files. The hashes above cover
+the binaries after the framework resources were updated and each bundle was
+ad-hoc signed again on 2026-09-14.
+
+PDFium's top-level BSD-style license and the complete generated notices for the
+seven compiled dependencies in the shipping `//:pdfium` graph are included in
+`PDF Editor/THIRD_PARTY_NOTICES.txt`. The generation inputs, tool revision,
+cross-slice comparison, adaptations, and output hash are recorded in the root
+`THIRD_PARTY_NOTICES.md`. This fork is pinned for development and regression
+testing; updating it requires regenerated notices plus checksum,
+exported-symbol, platform, build, and corpus verification.

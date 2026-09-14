@@ -3,13 +3,23 @@
 ## Required before distribution
 
 - [x] Add the user-supplied macOS and iOS App Icon assets.
-- [ ] Generate and bundle the complete PDFium and transitive dependency notice
+- [x] Add the public privacy-policy document, in-app links, and app/framework
+      privacy manifests for the currently identified required-reason APIs.
+- [x] Use a one-to-three-component `CFBundleVersion` in every PDFium framework
+      slice and refresh its ad-hoc signature and recorded binary hash.
+- [x] Generate and add the complete PDFium and transitive dependency notice
       set for revision `9e5d491ff73630b6a423689698290650050e7b3f`.
-- [ ] Confirm the final bundle exposes the Noto Sans CJK SIL OFL license.
-- [ ] Review encryption export-compliance answers for the intended store and
-      distribution channel.
-- [ ] Choose the final bundle identifier, version, build number, signing team,
-      sandbox entitlements, and document-handler rank.
+- [x] Add the Noto Sans CJK SIL OFL and pinned Swift package notices to the
+      bundled Acknowledgements resource and provide an in-app viewer.
+- [x] Inventory bundled cryptography, conservatively declare non-exempt
+      encryption in both platform plists, and record App Store Connect answers.
+- [x] Review and preserve the current bundle identifier, version/build, signing
+      team, App Sandbox/Hardened Runtime, and alternate PDF-handler rank.
+- [ ] Complete App Store Connect encryption declarations for the final
+      storefronts; add Apple's exact `ITSEncryptionExportComplianceCode` only
+      if Apple issues one.
+- [ ] Confirm the registered iOS and macOS App Store records match bundle ID
+      `com.sunny.pdf-editor`, version `1.1.1`, and the intended signing team.
 
 ## Automated acceptance
 
@@ -22,6 +32,10 @@
 - [ ] Build the macOS Apple Silicon, generic iOS Simulator, and generic iOS
       device destinations without signing.
 - [ ] Run `git diff --check` and confirm only intended files changed.
+- [ ] Generate the Archive privacy report and confirm the final app and embedded
+      frameworks contain the intended manifests without undeclared API use.
+- [ ] Inspect the final Archive and confirm `THIRD_PARTY_NOTICES.txt` is bundled
+      and the Acknowledgements view displays its complete contents.
 
 ## Manual acceptance
 
@@ -42,6 +56,6 @@
       without a password.
 - [ ] Inspect iPhone, iPad, and macOS layouts with accessibility text sizes.
 
-Archive, signing, notarization, physical-device installation, TestFlight, and
-store submission require separate approval and are intentionally outside the
-automated development workflow.
+Archive, signing, notarization, physical-device installation, and store
+submission require separate approval. TestFlight is intentionally excluded
+from this release workflow.

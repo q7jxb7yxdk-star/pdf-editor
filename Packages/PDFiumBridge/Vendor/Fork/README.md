@@ -32,6 +32,13 @@ apply `pdfium-clang-rt-pinned.patch` from the `build` checkout, then apply the
 three PDFium-source patches. Generate and build `pdfium` with `gn gen` and
 `autoninja -C <output> pdfium` for these configurations:
 
+At the pinned bblanchon revision, `ios/pdfium.patch` contains older
+`core/fxge/BUILD.gn` Apple source filenames and does not apply cleanly to this
+PDFium revision. Apply its two semantic changes instead: change the existing
+`if (is_mac)` source condition to `if (is_mac || is_ios)`, and remove the
+`ios_automatically_manage_certs` override of `_bundle_id_suffix` from
+`testing/test.gni`. The other listed patches apply in their documented order.
+
 | Output | `target_os` | `target_environment` | `target_cpu` |
 | --- | --- | --- | --- |
 | macOS | `mac` | — | `arm64`, `x64` |

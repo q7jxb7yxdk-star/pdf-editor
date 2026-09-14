@@ -143,7 +143,9 @@ There is protocol-based engine separation, but no application-level dependency-i
 | `Packages/PDFiumBridge/Tests/CPDFiumBridgeTests/` | Package-level native bridge regression suite. |
 | `Validation/` | Standalone fixture generators and validation programs; not an Xcode test target. |
 | `RELEASE_CHECKLIST.md` | Pending automated, manual, licensing, signing, and distribution checks. |
-| `THIRD_PARTY_NOTICES.md` | Dependency notice index. |
+| `EXPORT_COMPLIANCE.md` | Technical cryptography inventory, conservative plist declaration, and App Store Connect answer guidance. |
+| `THIRD_PARTY_NOTICES.md` | Pinned notice inputs, generation method, adaptations, and hashes. |
+| `PDF Editor/THIRD_PARTY_NOTICES.txt` | Complete app-bundled third-party notices displayed by the Acknowledgements view. |
 
 ## 4. Data flows
 
@@ -439,9 +441,10 @@ Annotation modification dates use `Date()` and PDF document metadata can carry c
 | Vision | Apple SDK | Optional feature | Local OCR | Source-integrated; recognition quality and language behavior require real documents/devices. |
 | CoreText/CoreGraphics | Apple SDK | Required for fallback/OCR layers | Font analysis and vector PDF overlay generation | Testable with included corpus, but not all scripts/fonts/layouts are covered. |
 | ImageIO | Apple SDK | Optional image feature | Decode and normalize imported images | Source-integrated; full format compatibility depends on platform codecs. |
-| PDFium | `chromium/7811`, revision `9e5d491ff73630b6a423689698290650050e7b3f`; framework version `144.0.7811` | Required | Primary PDF editing and serialization | Checked-in hashes can be compared with notices; upstream provenance, reproducibility, vulnerabilities, signing, and runtime behavior need separate verification. |
+| PDFium | `chromium/7811`, revision `9e5d491ff73630b6a423689698290650050e7b3f`; framework version `144.0.7811` | Required | Primary PDF editing and serialization | Checked-in hashes and generated license graph are recorded; independent reproducibility, vulnerabilities, final signing, and runtime behavior need separate verification. |
 | Local PDFium patches | `pdfium-clang-rt-pinned.patch`, `pdfium-form-xobject-cow.patch`, `pdfium-phase3-object-editing.patch`, `pdfium-page-content-preservation.patch` | Required by current bridge behavior | Pinned toolchain compatibility, nested Form isolation, object editing, non-pattern color conversion, Shading regeneration, and Pattern paint regeneration | Patch files, exact build inputs, rebuilt framework slices, and package regressions were verified on 2026-08-29. |
-| Noto Sans CJK TC Regular | Bundled OTF; SIL OFL 1.1 | Required for Unicode fallback/OCR insertion | Embedded searchable Unicode text | License file exists; final bundle license exposure remains release work. |
+| Noto Sans CJK TC Regular | Bundled OTF; SIL OFL 1.1 | Required for Unicode fallback/OCR insertion | Embedded searchable Unicode text | Full OFL text is included in the app Acknowledgements resource; final Archive exposure remains release verification. |
+| Swift ASN.1 / Swift Certificates / Swift Crypto | 1.7.2 / 1.20.0 / 4.5.2, revisions in `Package.resolved` | Required by X509 signing support | ASN.1 and certificate parsing plus cryptographic support | Root notices and full license texts from each pinned checkout are included in the app Acknowledgements resource. |
 
 PDFium is an official open-source PDF engine, but this repository uses a checked-in build with local patches rather than a remotely resolved official binary artifact. There are no unofficial web endpoints or third-party service APIs.
 
@@ -453,8 +456,11 @@ PDFium is an official open-source PDF engine, but this repository uses a checked
 - Product type: application.
 - Debug and Release configurations.
 - App version: 1.1.1.
-- Build number: 20260913.
+- Build number: 20260914.
 - Bundle identifier: `com.sunny.pdf-editor`.
+- Both platform plists set `ITSAppUsesNonExemptEncryption` to `true`; no
+  `ITSEncryptionExportComplianceCode` is present because no Apple-approved code
+  was provided for this task.
 - Supported app platforms: `iphoneos`, `iphonesimulator`, and `macosx`.
 - Targeted iOS device families: iPhone and iPad.
 - iOS and macOS deployment targets: 26.0.
@@ -547,13 +553,33 @@ This is presence detection only. The app does not validate signer identity, cert
 
 ### Network and identity
 
-No first-party URLSession, WebView, authentication, account, analytics, telemetry, APNs, App Attest, cloud storage, Keychain, or network-provider implementation was found. No privacy manifest was found. Do not interpret this as verified runtime network isolation or privacy-manifest compliance.
+No first-party URLSession, WebView, authentication, account, analytics, telemetry, APNs, App Attest, cloud storage, Keychain, or network-provider implementation was found. `PDF Editor/PrivacyInfo.xcprivacy` declares no tracking or collected data and records app-only `UserDefaults` access with reason `CA92.1`. Each bundled PDFium framework slice has its own manifest declaring no tracking or collected data and records file-timestamp API access for app-container (`C617.1`) and user-selected (`3B52.1`) file scopes. The public `PRIVACY_POLICY.md` is linked from the Tools workspace on every platform and from macOS Settings. These are source and vendored-bundle declarations; generate and inspect the final Archive privacy report before treating them as distribution compliance.
 
 ### Native dependency and distribution
 
-The four checked-in PDFium Mach-O hashes can be compared with `Packages/PDFiumBridge/Vendor/NOTICE.md`. Matching hashes prove consistency with that repository record only; they do not independently prove upstream provenance, reproducibility, vulnerability status, complete notices, or that the final app embeds the intended signed slices.
+The four checked-in PDFium Mach-O hashes can be compared with `Packages/PDFiumBridge/Vendor/NOTICE.md`. On 2026-09-14 every slice's `CFBundleVersion` was normalized from four components to the distribution-compatible `144.0.7811`, its privacy manifest was added, the framework was ad-hoc signed again, and the post-signing binary hash was refreshed in that notice. Matching hashes prove consistency with that repository record only; they do not independently prove upstream provenance, reproducibility, vulnerability status, or that the final app embeds the intended signed slices.
 
-The app opens encrypted PDFs, can create password-protected PDFs through PDFKit, and can remove an encryption dictionary after authorized unlock and explicit confirmation. Export-control classification and store declarations are externally unverified and must be assessed for the intended binary and distribution channel. No `ITSAppUsesNonExemptEncryption` declaration exists in the reviewed configuration.
+On 2026-09-14 Chromium's pinned `tools/licenses/licenses.py` was run against
+the patched `//:pdfium` GN graph for all seven shipped architecture/platform
+configurations. All strict scans passed and produced an identical eight-entry
+set: PDFium, Abseil, fast_float, HarfBuzz, ICU, libjpeg-turbo, llvm-libc, and
+zlib. The full output was combined with the exact pinned Swift package notices
+and licenses plus the Noto OFL in `PDF Editor/THIRD_PARTY_NOTICES.txt`. The
+app's Tools/About section opens this resource in a selectable read-only view.
+`THIRD_PARTY_NOTICES.md` records the tool and input revisions, the two
+format-only metadata/heading adaptations, and deterministic hashes. Final
+Archive inclusion and runtime presentation remain manually unverified.
+
+The app opens encrypted PDFs, can create password-protected PDFs through
+PDFKit, and can remove an encryption dictionary after authorized unlock and
+explicit confirmation. Signing and fingerprint operations use CryptoKit and
+Security.framework, while the bundled PDFium binary independently contains
+standard RC4, AES-128/AES-256, and SHA implementations for PDF security. Both
+platform plists therefore conservatively declare
+`ITSAppUsesNonExemptEncryption = true`. `EXPORT_COMPLIANCE.md` records the
+technical inventory and suggested App Store Connect answers. Final storefront
+selection, Apple's case-by-case determination, requested documents, and any
+issued compliance code remain external release work.
 
 ## 12. Testing and validation
 
@@ -822,7 +848,8 @@ The builds establish compilation and bundle construction for those destinations.
 - Image-export options/progress/file-destination interaction, multi-file behavior with third-party file providers, and visual comparison of PNG/JPEG output against representative PDFs on macOS and iOS.
 - OCR quality on representative scanned documents and all languages/scripts.
 - Independent clean-environment PDFium reproducibility beyond the verified 2026-08-29 Xcode 26.5 rebuild.
-- Complete transitive notices, font-license exposure in the final bundle, export-compliance classification, and vulnerability status.
+- Final Archive notice/font-license exposure, App Store Connect encryption
+  declarations, and third-party vulnerability status.
 
 ## 13. Known limitations and technical debt
 
@@ -843,8 +870,16 @@ The builds establish compilation and bundle construction for those destinations.
 - Signature invalidation consent lasts for the open document rather than one operation.
 - Passwords remain in ordinary process memory for the active encrypted-document session.
 - Password protection uses the same user and owner password, offers no independent permissions configuration, and keeps the pending/authorized password in ordinary process memory. Extracted-page output has a separate security policy.
-- The checked-in development team, bundle identifier, version/build number, and document-handler rank are release-sensitive configuration. `RELEASE_CHECKLIST.md` still marks final selection as pending.
-- The bundled PDFium notice set is incomplete for distribution according to repository documentation.
+- The checked-in development team, bundle identifier, version/build number, and
+  document-handler rank are release-sensitive configuration and still must be
+  confirmed against the registered App Store records.
+- Complete third-party notices are present as a target-synchronized source
+  resource, but their final Archive inclusion and in-app runtime presentation
+  have not yet been inspected.
+- The conservative encryption plist declaration is present, but App Store
+  Connect evaluation of the final storefront answers is not verified and no
+  approved compliance code was provided or added.
+- Privacy manifests and the public policy are present in source, but the final Archive privacy report, embedded resources, public URL after publication, and App Store Connect privacy answers remain unverified.
 - There is no project-wide license declaration.
 - The repository contains generated local package build artifacts under `Packages/PDFiumBridge/.build`; they are not source-of-truth dependency metadata and should not be used to claim a clean reproducible checkout.
 
@@ -889,6 +924,9 @@ The following are recommended extension directions based on existing seams; none
 - **Recommended: validation automation.** Add an app test target or repository script/CI workflow for package tests, standalone validations, unsigned builds, fixture rendering, and Markdown checks without requiring credentials or production services.
 - **Recommended: broader layout fallback.** Extend the shaping service behind its existing boundary for multiline layout, bidirectional text, vertical writing, and more complete font fallback while continuing semantic-text verification.
 - **Recommended: localization.** Move hard-coded UI strings into a string catalog without changing the editing/domain boundaries.
-- **Planned release work:** complete third-party notices, expose required licenses in the final bundle, inspect signed entitlements, decide final signing/distribution settings, assess encryption export compliance, and perform device/manual corpus acceptance.
+- **Planned release work:** verify notices and required licenses in the final
+  Archive, inspect the Archive privacy report and signed entitlements, decide
+  final signing/distribution settings, complete App Store Connect encryption
+  declarations, and perform device/manual corpus acceptance.
 
 Any future backend or cloud feature should remain outside the core editing models, avoid placing credentials in the repository, make document transmission explicit to the user, and preserve the current local fail-closed mutation boundary.

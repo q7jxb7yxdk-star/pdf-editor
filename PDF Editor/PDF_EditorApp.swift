@@ -7,6 +7,12 @@
 
 import SwiftUI
 
+enum PDFEditorLegalLinks {
+    static let privacyPolicy = URL(
+        string: "https://github.com/q7jxb7yxdk-star/pdf-editor/blob/main/PRIVACY_POLICY.md"
+    )!
+}
+
 #if os(macOS)
 import AppKit
 #endif
@@ -22,7 +28,7 @@ struct PDF_EditorApp: App {
     var body: some Scene {
 #if os(macOS)
         Settings {
-            EmptyView()
+            PDFEditorSettingsView()
         }
         .commands {
             VersionlessPDFDocumentCommands()
@@ -36,6 +42,20 @@ struct PDF_EditorApp: App {
 }
 
 #if os(macOS)
+private struct PDFEditorSettingsView: View {
+    var body: some View {
+        Form {
+            Section("Privacy") {
+                Link(destination: PDFEditorLegalLinks.privacyPolicy) {
+                    Label("Privacy Policy", systemImage: "hand.raised")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420, height: 160)
+    }
+}
+
 extension Notification.Name {
     static let pdfEditorWindowDidFinishInitialConfiguration = Notification.Name(
         "PDFEditorWindowDidFinishInitialConfiguration"

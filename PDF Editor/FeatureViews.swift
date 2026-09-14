@@ -66,7 +66,8 @@ struct PDFToolSidebar: View {
             "Export PDF to",
             "E-sign",
             "Acroform",
-            "Secure PDF"
+            "Secure PDF",
+            "About"
         ]
 #if os(macOS)
         titles.insert("Recent files")
@@ -93,6 +94,7 @@ struct PDFToolSidebar: View {
     @Binding var ocrRangeEndPage: Int
 
     @State private var expandedSections: Set<String>
+    @State private var showsAcknowledgements = false
 
     init(
         pageCount: Int,
@@ -257,6 +259,20 @@ struct PDFToolSidebar: View {
                         )
                     }
 #endif
+
+                    section("About") {
+                        Link(destination: PDFEditorLegalLinks.privacyPolicy) {
+                            ToolRowLabel(title: "Privacy Policy", icon: "hand.raised")
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            showsAcknowledgements = true
+                        } label: {
+                            ToolRowLabel(title: "Acknowledgements", icon: "doc.text")
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .padding(.bottom, 18)
             }
@@ -272,6 +288,9 @@ struct PDFToolSidebar: View {
 #endif
         }
         .background(.background)
+        .sheet(isPresented: $showsAcknowledgements) {
+            PDFEditorAcknowledgementsView()
+        }
     }
 
     private func section<Content: View>(
