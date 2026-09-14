@@ -766,7 +766,13 @@ struct ContentView: View {
                 .onAppear { usesInlinePanels = true }
                 .onDisappear { usesInlinePanels = false }
             } else {
-                HStack(spacing: 0) {
+                let usesPortraitToolLayout = usesPortraitToolsSidebar(for: proxy.size)
+                let compactEditor = HStack(spacing: 0) {
+                    if usesPortraitToolLayout && showsToolPanel && !isFullScreen {
+                        toolSidebar
+                            .frame(width: proxy.size.width * 0.25)
+                        Divider()
+                    }
                     documentView
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsPagePanel {
@@ -789,31 +795,23 @@ struct ContentView: View {
                             .frame(width: 52)
                     }
                 }
-                .onAppear { usesInlinePanels = false }
-                .sheet(isPresented: $showsToolPanel, onDismiss: {
-                    if let kind = pendingFormDesignKindAfterTools {
-                        pendingFormDesignKindAfterTools = nil
-                        beginFormFieldPlacement(kind)
-                    }
-                    if showsSignatureLibraryAfterToolsDismissal {
-                        showsSignatureLibraryAfterToolsDismissal = false
-                        showsSignatureLibrary = true
-                    }
-                    if let pageIndices = pendingOCRPageIndicesAfterToolsDismissal {
-                        pendingOCRPageIndicesAfterToolsDismissal = nil
-                        performOCRAction(pageIndices: pageIndices)
-                    }
-                }) {
-                    NavigationStack {
-                        toolSidebar
-                            .navigationTitle("Tools")
-                            .toolbar {
-                                ToolbarItem(placement: .confirmationAction) {
-                                    Button("Done") { showsToolPanel = false }
-                                }
+
+                Group {
+                    if usesPortraitToolLayout {
+                        compactEditor
+                    } else {
+                        compactEditor
+                            .sheet(
+                                isPresented: $showsToolPanel,
+                                onDismiss: toolPanelDidDismiss
+                            ) {
+                                modalToolPanel
                             }
                     }
-                    .frame(minWidth: 300, minHeight: 560)
+                }
+                .onAppear { usesInlinePanels = usesPortraitToolLayout }
+                .onChange(of: usesPortraitToolLayout) { _, usesSidebar in
+                    usesInlinePanels = usesSidebar
                 }
                 .sheet(isPresented: $showsCommentList) {
                     commentList
@@ -1381,6 +1379,42 @@ struct ContentView: View {
         )
     }
 #endif
+
+    private var modalToolPanel: some View {
+        NavigationStack {
+            toolSidebar
+                .navigationTitle("Tools")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showsToolPanel = false }
+                    }
+                }
+        }
+        .frame(minWidth: 300, minHeight: 560)
+    }
+
+    private func usesPortraitToolsSidebar(for size: CGSize) -> Bool {
+#if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .pad && size.height > size.width
+#else
+        false
+#endif
+    }
+
+    private func toolPanelDidDismiss() {
+        if let kind = pendingFormDesignKindAfterTools {
+            pendingFormDesignKindAfterTools = nil
+            beginFormFieldPlacement(kind)
+        }
+        if showsSignatureLibraryAfterToolsDismissal {
+            showsSignatureLibraryAfterToolsDismissal = false
+            showsSignatureLibrary = true
+        }
+        if let pageIndices = pendingOCRPageIndicesAfterToolsDismissal {
+            pendingOCRPageIndicesAfterToolsDismissal = nil
+            performOCRAction(pageIndices: pageIndices)
+        }
+    }
 
     private var usesPhoneViewerControls: Bool {
 #if os(iOS)
