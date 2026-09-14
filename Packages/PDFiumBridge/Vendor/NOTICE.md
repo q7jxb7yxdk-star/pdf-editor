@@ -2,8 +2,11 @@
 
 - PDFium branch: `chromium/7811`
 - PDFium revision: `9e5d491ff73630b6a423689698290650050e7b3f`
-- Build date: 2026-08-29
-- Build tooling: Xcode 26.5 SDKs, `depot_tools` revision
+- Original full build date: 2026-08-29
+- Build tooling: Xcode 26.5 SDKs for the original four-slice build; Xcode 26.6
+  (17F113) with iOS SDK 26.5 (23F81a) for the 2026-09-14 iOS device rebuild
+  and matching dSYM,
+  `depot_tools` revision
   `f70835271105ca56d2cd5382a0118152bc2bdeea`, and
   `bblanchon/pdfium-binaries` revision
   `cf2b11286a7960c39eb75c736910c999696b91a7`
@@ -17,7 +20,7 @@
 
 Framework binary SHA-256 values after universal-slice assembly and signing:
 
-- iOS device: `1d1a997a782baec98882e5f4b4241e631bf1898434c36eafaafc4207d0729692`
+- iOS device: `e2365842ce61bec3d7eafd36d4711bfcb9912882194d3d1b6856ea20a6e17ad1`
 - iOS Simulator: `fa7e53466910f2dddc7bc4f5502f594480c34c3fd74487220fedb308d081bb51`
 - Mac Catalyst: `22762a7be35cb33c45ad7c7de94bc80ee9e836e3409ea7373dafb01966e43f24`
 - macOS: `17e37bd51574533fa788dc00fc3dfdbda1d70881d5a72784bedda063f0836589`
@@ -28,6 +31,14 @@ or data collection. The manifest records the bundled library's file-metadata
 API category for app-container and user-selected files. The hashes above cover
 the binaries after the framework resources were updated and each bundle was
 ad-hoc signed again on 2026-09-14.
+
+The iOS device slice was rebuilt from the same pinned, patched source on
+2026-09-14 with full DWARF information. Its XCFramework entry includes
+`DebugSymbolsPath = dSYMs`; the bundled `PDFium.framework.dSYM` has the same
+arm64 UUID as the framework binary. Its DWARF file SHA-256 is
+`ad1e9e3ad3373484b39966a30dfd546df79e6e6a3f59a60a6e6074244d95e9d2`.
+The Simulator, Mac Catalyst, and macOS binaries remain byte-for-byte identical
+to the original Xcode 26.5 build.
 
 PDFium's top-level BSD-style license and the complete generated notices for the
 seven compiled dependencies in the shipping `//:pdfium` graph are included in

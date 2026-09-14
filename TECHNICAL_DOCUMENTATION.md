@@ -458,9 +458,10 @@ PDFium is an official open-source PDF engine, but this repository uses a checked
 - App version: 1.1.1.
 - Build number: 20260914.
 - Bundle identifier: `com.sunny.pdf-editor`.
-- Both platform plists set `ITSAppUsesNonExemptEncryption` to `true`; no
-  `ITSEncryptionExportComplianceCode` is present because no Apple-approved code
-  was provided for this task.
+- Both platform plists set `ITSAppUsesNonExemptEncryption` to `false` after App
+  Store Connect reported that no documentation is required for distribution
+  excluding France. No `ITSEncryptionExportComplianceCode` is present or
+  required for that determination.
 - Supported app platforms: `iphoneos`, `iphonesimulator`, and `macosx`.
 - Targeted iOS device families: iPhone and iPad.
 - iOS and macOS deployment targets: 26.0.
@@ -570,16 +571,29 @@ app's Tools/About section opens this resource in a selectable read-only view.
 format-only metadata/heading adaptations, and deterministic hashes. Final
 Archive inclusion and runtime presentation remain manually unverified.
 
+On 2026-09-14 the iOS device PDFium slice was rebuilt from the same pinned,
+patched source with Xcode 26.6 (17F113), iOS SDK 26.5 (23F81a), and
+`symbol_level = 2`. The final framework and `PDFium.framework.dSYM` both report
+arm64 UUID
+`4C4C4481-5555-3144-A151-E9290FD96C27`. The XCFramework was regenerated with
+the device dSYM, and its device entry records `DebugSymbolsPath = dSYMs`.
+Install-name, required exported-symbol, strict ad-hoc signature, architecture,
+and SHA-256 checks passed; the other three framework binaries remained
+byte-for-byte unchanged. Final propagation into a user-created app Archive and
+App Store validation remain manual checks.
+
 The app opens encrypted PDFs, can create password-protected PDFs through
 PDFKit, and can remove an encryption dictionary after authorized unlock and
 explicit confirmation. Signing and fingerprint operations use CryptoKit and
 Security.framework, while the bundled PDFium binary independently contains
-standard RC4, AES-128/AES-256, and SHA implementations for PDF security. Both
-platform plists therefore conservatively declare
-`ITSAppUsesNonExemptEncryption = true`. `EXPORT_COMPLIANCE.md` records the
-technical inventory and suggested App Store Connect answers. Final storefront
-selection, Apple's case-by-case determination, requested documents, and any
-issued compliance code remain external release work.
+standard RC4, AES-128/AES-256, and SHA implementations for PDF security. App
+Store Connect was told that the app contains standard cryptography outside
+Apple's operating system and will not be distributed in France; it reported
+that no documents need to be uploaded. Both platform plists therefore declare
+`ITSAppUsesNonExemptEncryption = false`, meaning documentation-exempt encryption,
+and omit `ITSEncryptionExportComplianceCode`. `EXPORT_COMPLIANCE.md` records the
+technical inventory and answers. Saving that declaration and confirming France
+is excluded from final storefront availability remain external checks.
 
 ## 12. Testing and validation
 
@@ -847,7 +861,8 @@ The builds establish compilation and bundle construction for those destinations.
 - Broad manual UI workflows, AcroForm body-drag versus corner-resize interaction, accessibility text sizes, semantic Undo/Redo verification beyond the user-tested app-authored Textbox path, confirmation that other Undo/Redo operations have no visible blank frame or SwiftUI publish-during-update warning, save/close/reopen, real password-restricted permission combinations, and visual inspection of generated pages. A scoped macOS comment Apply workflow was manually exercised on 2026-08-25, and the Textbox Delete/Undo/Redo display path was manually exercised on 2026-09-01.
 - Image-export options/progress/file-destination interaction, multi-file behavior with third-party file providers, and visual comparison of PNG/JPEG output against representative PDFs on macOS and iOS.
 - OCR quality on representative scanned documents and all languages/scripts.
-- Independent clean-environment PDFium reproducibility beyond the verified 2026-08-29 Xcode 26.5 rebuild.
+- Independent clean-environment PDFium reproducibility beyond the verified
+  2026-08-29 Xcode 26.5 build and 2026-09-14 Xcode 26.6 iOS-device rebuild.
 - Final Archive notice/font-license exposure, App Store Connect encryption
   declarations, and third-party vulnerability status.
 
@@ -876,9 +891,10 @@ The builds establish compilation and bundle construction for those destinations.
 - Complete third-party notices are present as a target-synchronized source
   resource, but their final Archive inclusion and in-app runtime presentation
   have not yet been inspected.
-- The conservative encryption plist declaration is present, but App Store
-  Connect evaluation of the final storefront answers is not verified and no
-  approved compliance code was provided or added.
+- The documentation-exempt encryption plist declaration matches the displayed
+  App Store Connect no-document result for distribution excluding France. The
+  saved declaration and final storefront exclusion have not been independently
+  verified; no compliance code is applicable to the displayed result.
 - Privacy manifests and the public policy are present in source, but the final Archive privacy report, embedded resources, public URL after publication, and App Store Connect privacy answers remain unverified.
 - There is no project-wide license declaration.
 - The repository contains generated local package build artifacts under `Packages/PDFiumBridge/.build`; they are not source-of-truth dependency metadata and should not be used to claim a clean reproducible checkout.

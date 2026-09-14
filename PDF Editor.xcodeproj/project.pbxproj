@@ -283,7 +283,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "PDF Editor/Info.plist";
 				"INFOPLIST_FILE[sdk=macosx*]" = "PDF Editor/Info-macOS.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "PDF Editor";
+				INFOPLIST_KEY_CFBundleDisplayName = "PDF Editor by Sunny";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -330,7 +330,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "PDF Editor/Info.plist";
 				"INFOPLIST_FILE[sdk=macosx*]" = "PDF Editor/Info-macOS.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "PDF Editor";
+				INFOPLIST_KEY_CFBundleDisplayName = "PDF Editor by Sunny";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;

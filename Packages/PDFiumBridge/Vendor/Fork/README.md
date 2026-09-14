@@ -16,7 +16,9 @@ separately placed references to a shared Form remain isolated.
 - `bblanchon/pdfium-binaries` revision
   `cf2b11286a7960c39eb75c736910c999696b91a7`
 - `simdutf` revision `f7356eed293f8208c40b3c1b344a50bd70971983`
-- Xcode 26.5 SDKs
+- Xcode 26.5 SDKs for the original full build; Xcode 26.6 (17F113) with iOS
+  SDK 26.5 (23F81a) for the 2026-09-14 iOS device rebuild with
+  `symbol_level = 2` and matching dSYM
 - bblanchon patches: `shared_library.patch`, `public_headers.patch`,
   `ios/pdfium.patch`, and `mac/build.patch`
 - `pdfium-clang-rt-pinned.patch`, applied in the `build` checkout in place of
@@ -67,6 +69,10 @@ the Xcode 26.5 macCatalyst SDK TBD format is incompatible with the bundled lld.
 Create universal macOS, Simulator, and Catalyst binaries with `lipo`, preserve
 the existing XCFramework slice layout and headers, set each install name to
 `@rpath/PDFium.framework/PDFium`, and ad-hoc sign each framework bundle.
+Pass the final iOS device framework and its matching `PDFium.framework.dSYM`
+to `xcodebuild -create-xcframework` with `-debug-symbols`; this produces the
+slice-local `dSYMs` directory and `DebugSymbolsPath` metadata used when Xcode
+copies symbols into an app archive.
 
 ## Required verification
 

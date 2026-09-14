@@ -27,37 +27,39 @@ PDF Editor uses or contains cryptography in these paths:
 No proprietary or unpublished cryptographic algorithm was found in the
 reviewed source or pinned dependencies.
 
-## Conservative Info.plist declaration
+## App Store Connect determination and Info.plist declaration
 
 Both platform property lists set:
 
 ```xml
 <key>ITSAppUsesNonExemptEncryption</key>
-<true/>
+<false/>
 ```
 
-This intentionally does not claim that the app uses no encryption or only
-operating-system encryption. `ITSEncryptionExportComplianceCode` is omitted
-because no Apple-approved code was provided for this task.
+This does not claim that the app contains no cryptography. It records that the
+app's encryption is exempt from App Store Connect documentation for the chosen
+storefronts. `ITSEncryptionExportComplianceCode` is omitted because App Store
+Connect determined that no documents need to be uploaded and therefore did not
+issue a code.
 
 Apple states that apps using standard algorithms outside the operating system
-may require a French encryption declaration when distributed in France. Apple
-also evaluates export-compliance submissions case by case. Complete the App
-Store Connect questionnaire for both the iOS and macOS app records before
-selecting a build for review:
+may require a French encryption declaration when distributed in France. In the
+2026-09-14 App Store Connect questionnaire, the developer selected that the app
+will not be distributed in France after declaring standard cryptography outside
+Apple's operating system. App Store Connect displayed that no documents need to
+be uploaded. Preserve these answers and the matching storefront restriction:
 
 1. Confirm that the app uses encryption.
 2. Confirm that it does not contain proprietary or non-standard algorithms.
 3. Confirm that it contains standard cryptography outside Apple's operating
    system because PDFium implements PDF password security.
-4. Answer the France-availability question according to the final storefronts.
-5. Upload any document App Store Connect requests. If Apple approves the
-   declaration and issues a code, add that exact value as
-   `ITSEncryptionExportComplianceCode` to both platform property lists.
+4. Answer No to distribution in France.
+5. Exclude France in Pricing and Availability before submission.
 
-Do not change `ITSAppUsesNonExemptEncryption` to `false` solely to bypass the
-questionnaire. Reassess this inventory whenever PDFium, signing dependencies,
-encryption behavior, or storefront availability changes.
+Reassess this inventory and repeat App Store Connect's determination whenever
+PDFium, signing dependencies, encryption behavior, or storefront availability
+changes. Distribution in France requires a new determination before the
+storefront is enabled.
 
 ## Apple references
 

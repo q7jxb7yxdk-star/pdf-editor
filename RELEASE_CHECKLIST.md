@@ -7,17 +7,20 @@
       privacy manifests for the currently identified required-reason APIs.
 - [x] Use a one-to-three-component `CFBundleVersion` in every PDFium framework
       slice and refresh its ad-hoc signature and recorded binary hash.
+- [x] Rebuild the iOS device PDFium slice with full DWARF information and add
+      its UUID-matched dSYM to the XCFramework debug-symbols path.
 - [x] Generate and add the complete PDFium and transitive dependency notice
       set for revision `9e5d491ff73630b6a423689698290650050e7b3f`.
 - [x] Add the Noto Sans CJK SIL OFL and pinned Swift package notices to the
       bundled Acknowledgements resource and provide an in-app viewer.
-- [x] Inventory bundled cryptography, conservatively declare non-exempt
-      encryption in both platform plists, and record App Store Connect answers.
+- [x] Inventory bundled cryptography, declare documentation-exempt encryption
+      in both platform plists, and record App Store Connect's no-document result
+      for distribution that excludes France.
 - [x] Review and preserve the current bundle identifier, version/build, signing
       team, App Sandbox/Hardened Runtime, and alternate PDF-handler rank.
-- [ ] Complete App Store Connect encryption declarations for the final
-      storefronts; add Apple's exact `ITSEncryptionExportComplianceCode` only
-      if Apple issues one.
+- [ ] Save the App Store Connect encryption declaration and exclude France in
+      Pricing and Availability; no documentation or compliance code is required
+      for the recorded storefront selection.
 - [ ] Confirm the registered iOS and macOS App Store records match bundle ID
       `com.sunny.pdf-editor`, version `1.1.1`, and the intended signing team.
 
@@ -34,6 +37,8 @@
 - [ ] Run `git diff --check` and confirm only intended files changed.
 - [ ] Generate the Archive privacy report and confirm the final app and embedded
       frameworks contain the intended manifests without undeclared API use.
+- [ ] Inspect the final Archive and confirm `PDFium.framework.dSYM` is present
+      and its arm64 UUID matches the archived `PDFium.framework` binary.
 - [ ] Inspect the final Archive and confirm `THIRD_PARTY_NOTICES.txt` is bundled
       and the Acknowledgements view displays its complete contents.
 
