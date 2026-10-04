@@ -766,11 +766,15 @@ struct ContentView: View {
                 .onAppear { usesInlinePanels = true }
                 .onDisappear { usesInlinePanels = false }
             } else {
-                let usesPortraitToolLayout = usesPortraitToolsSidebar(for: proxy.size)
+                let usesInlineToolLayout = usesInlineToolsSidebar(for: proxy.size)
                 let compactEditor = HStack(spacing: 0) {
-                    if usesPortraitToolLayout && showsToolPanel && !isFullScreen {
+                    if usesInlineToolLayout && showsToolPanel && !isFullScreen {
                         toolSidebar
+#if os(macOS)
+                            .frame(width: 200)
+#else
                             .frame(width: proxy.size.width * 0.25)
+#endif
                         Divider()
                     }
                     documentView
@@ -797,7 +801,7 @@ struct ContentView: View {
                 }
 
                 Group {
-                    if usesPortraitToolLayout {
+                    if usesInlineToolLayout {
                         compactEditor
                     } else {
                         compactEditor
@@ -809,8 +813,8 @@ struct ContentView: View {
                             }
                     }
                 }
-                .onAppear { usesInlinePanels = usesPortraitToolLayout }
-                .onChange(of: usesPortraitToolLayout) { _, usesSidebar in
+                .onAppear { usesInlinePanels = usesInlineToolLayout }
+                .onChange(of: usesInlineToolLayout) { _, usesSidebar in
                     usesInlinePanels = usesSidebar
                 }
                 .sheet(isPresented: $showsCommentList) {
@@ -1393,11 +1397,13 @@ struct ContentView: View {
         .frame(minWidth: 300, minHeight: 560)
     }
 
-    private func usesPortraitToolsSidebar(for size: CGSize) -> Bool {
+    private func usesInlineToolsSidebar(for size: CGSize) -> Bool {
 #if os(iOS)
         UIDevice.current.userInterfaceIdiom == .pad && size.height > size.width
 #else
-        false
+        // Initial macOS layout can briefly report a compact width. Keep
+        // Tools inline so that transition cannot automatically present a sheet.
+        true
 #endif
     }
 

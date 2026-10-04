@@ -14,6 +14,201 @@ typealias PlatformColor = UIColor
 typealias PlatformFont = UIFont
 #endif
 
+#if os(macOS)
+// This state is constructed through Swift, independently of PDFKit's annotation
+// loader. It must not retain an annotation, page, or screen overlay.
+nonisolated private final class PDFCommentRenderingState: NSObject, @unchecked Sendable {
+    private let lock = NSLock()
+    private var screenOwners = Set<ObjectIdentifier>()
+    private var outputRenderingDepth = 0
+
+    var suppressesScreenDrawing: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !screenOwners.isEmpty && outputRenderingDepth == 0
+    }
+
+    func setScreenOwner(_ owner: ObjectIdentifier, active: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let wasSuppressed = !screenOwners.isEmpty && outputRenderingDepth == 0
+        if active { screenOwners.insert(owner) } else { screenOwners.remove(owner) }
+        let isSuppressed = !screenOwners.isEmpty && outputRenderingDepth == 0
+        return wasSuppressed != isSuppressed
+    }
+
+    func beginOutputRendering() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let wasSuppressed = !screenOwners.isEmpty && outputRenderingDepth == 0
+        outputRenderingDepth += 1
+        return wasSuppressed
+    }
+
+    func endOutputRendering() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        outputRenderingDepth -= 1
+        return !screenOwners.isEmpty && outputRenderingDepth == 0
+    }
+}
+
+nonisolated private final class PDFCommentRenderingStates: @unchecked Sendable {
+    static let shared = PDFCommentRenderingStates()
+    private let lock = NSLock()
+    private let states = NSMapTable<PDFAnnotation, PDFCommentRenderingState>(
+        keyOptions: [.weakMemory, .objectPointerPersonality],
+        valueOptions: .strongMemory
+    )
+
+    func state(for annotation: PDFAnnotation) -> PDFCommentRenderingState {
+        lock.lock()
+        defer { lock.unlock() }
+        if let state = states.object(forKey: annotation) { return state }
+        let state = PDFCommentRenderingState()
+        states.setObject(state, forKey: annotation)
+        return state
+    }
+}
+
+// Keep the standard Text subtype and Comment name for other PDF readers.
+// The marker lets our renderer recognize its own saved appearance streams,
+// while preserving custom appearances supplied by other applications.
+nonisolated private final class PDFVectorCommentAnnotation: PDFAnnotation {
+    static let renderingKey = PDFAnnotationKey(rawValue: "/PDFEditorVectorComment")
+    // No Swift stored instance properties: reopened annotations must not depend
+    // on PDFKit's loading path initializing subclass storage.
+    private var renderingState: PDFCommentRenderingState {
+        PDFCommentRenderingStates.shared.state(for: self)
+    }
+
+    private var suppressesScreenDrawing: Bool {
+        renderingState.suppressesScreenDrawing
+    }
+
+    func setScreenOwner(_ owner: ObjectIdentifier, active: Bool) {
+        if renderingState.setScreenOwner(owner, active: active) {
+            invalidateCachedAppearance()
+        }
+    }
+
+    func beginOutputRendering() {
+        if renderingState.beginOutputRendering() { invalidateCachedAppearance() }
+    }
+
+    func endOutputRendering() {
+        if renderingState.endOutputRendering() { invalidateCachedAppearance() }
+    }
+
+    private func invalidateCachedAppearance() {
+        // Invalidate PDFKit's cached annotation image without changing geometry
+        // or persisting display flags. No rendering lock is held during PDFKit calls.
+        let currentBounds = bounds
+        bounds = currentBounds
+    }
+
+    var usesVectorCommentRendering: Bool {
+        let authored = (value(forAnnotationKey: Self.renderingKey) as? NSNumber)?.boolValue == true
+        return type == "Text" && iconType == .comment && (authored || !hasAppearanceStream)
+    }
+
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard usesVectorCommentRendering else {
+            super.draw(with: box, in: context)
+            return
+        }
+        // PDFKit draws the annotation separately from the page, potentially on
+        // another thread. The annotation owns this transient state instead of
+        // relying on the page's thread or CGContext identity.
+        let isPrinting = Thread.isMainThread && MainActor.assumeIsolated {
+            NSPrintOperation.current != nil
+        }
+        guard !suppressesScreenDrawing || isPrinting else { return }
+        let boxOrigin = page?.bounds(for: box).origin ?? .zero
+        PDFCommentIconRenderer.draw(
+            color: color,
+            in: context,
+            bounds: bounds.offsetBy(dx: -boxOrigin.x, dy: -boxOrigin.y)
+        )
+    }
+
+}
+
+// Shared geometry for the saved PDF appearance and the AppKit screen overlay.
+nonisolated enum PDFCommentIconRenderer {
+    static func draw(color: NSColor, in context: CGContext, bounds: CGRect) {
+        let rect = bounds.standardized
+        guard rect.width > 0, rect.height > 0 else { return }
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.setAllowsAntialiasing(true)
+        context.setShouldAntialias(true)
+        context.translateBy(x: rect.minX, y: rect.minY)
+        context.scaleBy(x: rect.width / 24, y: rect.height / 24)
+        context.setLineWidth(1)
+        context.setLineJoin(.round)
+        context.setLineCap(.round)
+
+        context.setFillColor(color.cgColor)
+        context.setStrokeColor(CGColor(gray: 0.15, alpha: color.alphaComponent))
+        context.addPath(bubblePath())
+        context.drawPath(using: .fillStroke)
+        context.addPath(textLinesPath())
+        context.strokePath()
+    }
+
+    // Both PDF output and shape layers use the same 24-point geometry.
+    static func bubblePath() -> CGPath {
+        let bubble = CGMutablePath()
+        bubble.move(to: CGPoint(x: 5, y: 21.5))
+        bubble.addLine(to: CGPoint(x: 19, y: 21.5))
+        bubble.addQuadCurve(to: CGPoint(x: 21.5, y: 19), control: CGPoint(x: 21.5, y: 21.5))
+        bubble.addLine(to: CGPoint(x: 21.5, y: 9))
+        bubble.addQuadCurve(to: CGPoint(x: 19, y: 6.5), control: CGPoint(x: 21.5, y: 6.5))
+        bubble.addLine(to: CGPoint(x: 10, y: 6.5))
+        bubble.addLine(to: CGPoint(x: 5.5, y: 2.5))
+        bubble.addLine(to: CGPoint(x: 5.5, y: 6.5))
+        bubble.addLine(to: CGPoint(x: 5, y: 6.5))
+        bubble.addQuadCurve(to: CGPoint(x: 2.5, y: 9), control: CGPoint(x: 2.5, y: 6.5))
+        bubble.addLine(to: CGPoint(x: 2.5, y: 19))
+        bubble.addQuadCurve(to: CGPoint(x: 5, y: 21.5), control: CGPoint(x: 2.5, y: 21.5))
+        bubble.closeSubpath()
+        return bubble
+    }
+
+    static func textLinesPath() -> CGPath {
+        let lines = CGMutablePath()
+        for y: CGFloat in [11, 14, 17] {
+            lines.move(to: CGPoint(x: 6.5, y: y))
+            lines.addLine(to: CGPoint(x: y == 11 ? 14 : 17.5, y: y))
+        }
+        return lines
+    }
+}
+
+nonisolated private final class PDFCommentRenderingPage: PDFPage {
+    override func thumbnail(of size: CGSize, for box: PDFDisplayBox) -> NSImage {
+        // Covers thumbnail consumers of live pages, including OCR.
+        PDFAnnotationService.withFullCommentAppearance(on: self) {
+            super.thumbnail(of: size, for: box)
+        }
+    }
+}
+
+nonisolated private final class PDFCommentDocumentDelegate: NSObject,
+    PDFDocumentDelegate, @unchecked Sendable {
+    // PDFDocument holds its delegate weakly. Retain this stateless delegate for
+    // the lifetime of every presentation, including undo and reopened files.
+    static let shared = PDFCommentDocumentDelegate()
+
+    func `class`(forAnnotationType annotationType: String) -> AnyClass {
+        annotationType == "Text" ? PDFVectorCommentAnnotation.self : PDFAnnotation.self
+    }
+
+    func classForPage() -> AnyClass { PDFCommentRenderingPage.self }
+}
+#endif
+
 struct SignatureStroke: Equatable, Sendable {
     let points: [CGPoint]
 }
@@ -51,6 +246,53 @@ nonisolated enum PDFAnnotationServiceError: LocalizedError {
 }
 
 nonisolated final class PDFAnnotationService {
+#if os(macOS)
+    static func usesCommentScreenOverlay(_ annotation: PDFAnnotation) -> Bool {
+        (annotation as? PDFVectorCommentAnnotation)?.usesVectorCommentRendering == true
+    }
+
+    static func setCommentScreenOwner(
+        _ owner: ObjectIdentifier, active: Bool, on annotation: PDFAnnotation
+    ) {
+        (annotation as? PDFVectorCommentAnnotation)?.setScreenOwner(owner, active: active)
+    }
+#endif
+
+    static func withFullCommentAppearance<T>(
+        on page: PDFPage, _ render: () throws -> T
+    ) rethrows -> T {
+        try withFullCommentAppearance(on: [page], render)
+    }
+
+    static func withFullCommentAppearance<T>(
+        in document: PDFDocument, _ render: () throws -> T
+    ) rethrows -> T {
+        let pages = (0..<document.pageCount).compactMap { document.page(at: $0) }
+        return try withFullCommentAppearance(on: pages, render)
+    }
+
+    private static func withFullCommentAppearance<T>(
+        on pages: [PDFPage], _ render: () throws -> T
+    ) rethrows -> T {
+#if os(macOS)
+        let comments = pages.flatMap(\.annotations).compactMap {
+            $0 as? PDFVectorCommentAnnotation
+        }
+        comments.forEach { $0.beginOutputRendering() }
+        defer { comments.forEach { $0.endOutputRendering() } }
+#endif
+        return try render()
+    }
+
+    static func makePresentationDocument(data: Data) -> PDFDocument? {
+        guard let document = PDFDocument(data: data) else { return nil }
+#if os(macOS)
+        // Install before pages instantiate their annotations.
+        document.delegate = PDFCommentDocumentDelegate.shared
+#endif
+        return document
+    }
+
     func snapshots(on page: PDFPage, pageIndex: Int) -> [PDFAnnotationSnapshot] {
         page.annotations.enumerated().compactMap { index, annotation in
             // Keep replacement masks created by older app versions out of the
@@ -195,11 +437,20 @@ nonisolated final class PDFAnnotationService {
             width: iconSize,
             height: iconSize
         )
+#if os(macOS)
+        let annotation = PDFVectorCommentAnnotation(
+            bounds: bounds,
+            forType: .text,
+            withProperties: nil
+        )
+        annotation.setBoolean(true, forAnnotationKey: PDFVectorCommentAnnotation.renderingKey)
+#else
         let annotation = PDFAnnotation(
             bounds: bounds,
             forType: .text,
             withProperties: nil
         )
+#endif
         annotation.iconType = .comment
         annotation.contents = text
         setPrimaryColor(components(of: .systemYellow), on: annotation)

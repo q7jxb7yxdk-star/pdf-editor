@@ -754,6 +754,82 @@ private final class PDFPageOverlayContainer: NSView {
     }
 }
 
+// Keep paths in display coordinates and let Core Animation render the shapes
+// directly instead of filling a view's bitmap backing contents in draw().
+private final class PDFCommentScreenOverlay: NSView {
+    var commentColor: NSColor = .systemYellow
+    private let bubbleLayer = CAShapeLayer()
+    private let textLinesLayer = CAShapeLayer()
+    private var annotation: PDFAnnotation?
+
+    func bind(to annotation: PDFAnnotation) {
+        guard self.annotation !== annotation else { return }
+        unbindComment()
+        self.annotation = annotation
+        PDFAnnotationService.setCommentScreenOwner(
+            ObjectIdentifier(self), active: true, on: annotation
+        )
+    }
+
+    func unbindComment() {
+        guard let annotation else { return }
+        self.annotation = nil
+        PDFAnnotationService.setCommentScreenOwner(
+            ObjectIdentifier(self), active: false, on: annotation
+        )
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        layer.contents = nil
+        layer.shouldRasterize = false
+        let scale = window?.backingScaleFactor ?? 2
+        layer.contentsScale = scale
+        for shape in [bubbleLayer, textLinesLayer] {
+            if shape.superlayer !== layer { layer.addSublayer(shape) }
+            shape.frame = bounds
+            shape.contentsScale = scale
+            shape.shouldRasterize = false
+            shape.lineCap = .round
+            shape.lineJoin = .round
+            shape.lineWidth = min(bounds.width, bounds.height) / 24
+            shape.isHidden = NSPrintOperation.current != nil || bounds.isEmpty
+        }
+        var transform = CGAffineTransform(
+            scaleX: bounds.width / 24, y: bounds.height / 24
+        )
+        bubbleLayer.path = PDFCommentIconRenderer.bubblePath().copy(using: &transform)
+        textLinesLayer.path = PDFCommentIconRenderer.textLinesPath().copy(using: &transform)
+        let stroke = CGColor(gray: 0.15, alpha: commentColor.alphaComponent)
+        bubbleLayer.fillColor = commentColor.cgColor
+        bubbleLayer.strokeColor = stroke
+        textLinesLayer.fillColor = nil
+        textLinesLayer.strokeColor = stroke
+    }
+
+    // The PDF annotation supplies the printed appearance; this view is screen-only.
+    override func draw(_ dirtyRect: NSRect) {}
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        layer?.contentsScale = window?.backingScaleFactor ?? 2
+        needsDisplay = true
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        layer?.contentsScale = window?.backingScaleFactor ?? 2
+        needsDisplay = true
+    }
+}
+
 private final class PDFInlineTextView: NSTextView {
     private let editingUndoManager = UndoManager()
 
@@ -801,6 +877,7 @@ final class PDFKitHostView: NSView {
     var initialPageIndex: Int?
     private var replacementGeneration = 0
     private var initialWindowConfigurationObserver: NSObjectProtocol?
+    private var initialPagePositionScheduled = false
 
     init(pdfView: PDFView) {
         activePDFView = pdfView
@@ -817,7 +894,7 @@ final class PDFKitHostView: NSView {
         activePDFView.frame = bounds
         pendingPDFView?.frame = bounds
         if window?.isVisible == false {
-            positionInitialPageAtTopIfNeeded()
+            scheduleInitialPagePosition()
         }
     }
 
@@ -831,9 +908,21 @@ final class PDFKitHostView: NSView {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await Task.yield()
-                self?.positionInitialPageAtTopIfNeeded()
+                self?.scheduleInitialPagePosition()
             }
+        }
+    }
+
+    private func scheduleInitialPagePosition() {
+        guard initialPageIndex != nil, window != nil,
+              !initialPagePositionScheduled else { return }
+        initialPagePositionScheduled = true
+        // Let the current layout pass finish before forcing PDFKit's layout.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.initialPagePositionScheduled = false
+            guard self.window != nil else { return }
+            self.positionInitialPageAtTopIfNeeded()
         }
     }
 
@@ -1638,6 +1727,9 @@ extension PDFKitView {
         private var stagedTextViews: [String: PDFPassiveTextView] = [:]
         private var stagedTextMaskViews: [String: PDFTextMaskView] = [:]
         private var pageOverlayViews: [Int: PDFPageOverlayContainer] = [:]
+        private var commentScreenOverlays: [PDFAnnotationReference: PDFCommentScreenOverlay] = [:]
+        private weak var commentScrollClipView: NSClipView?
+        private var commentScrollObserver: NSObjectProtocol?
         private var formTextViews: [UUID: PDFFormTextView] = [:]
         private var formTextBackgroundViews: [UUID: PDFFormTextBackgroundView] = [:]
         private var formTextEditingField: PDFFormDesignField?
@@ -2129,6 +2221,7 @@ extension PDFKitView {
                 ) { [weak self] _ in
                     guard let self, let pdfView = self.pdfView else { return }
                     self.handleScrollWillBegin(in: pdfView)
+                    self.scheduleOverlayRefresh()
                 })
             }
 #endif
@@ -2170,6 +2263,12 @@ extension PDFKitView {
             signaturePreviewLayer.removeFromSuperlayer()
             lastSignaturePreviewViewPoint = nil
             cancelFreehandStraightLine()
+            removeCommentScreenOverlays()
+            if let commentScrollObserver {
+                NotificationCenter.default.removeObserver(commentScrollObserver)
+                self.commentScrollObserver = nil
+            }
+            commentScrollClipView = nil
 #endif
             removeAnnotationActionBar()
 #if os(iOS)
@@ -2207,6 +2306,7 @@ extension PDFKitView {
             acroFormCheckGeneration &+= 1
 #if os(macOS)
             hideSignaturePreview()
+            removeCommentScreenOverlays()
             cancelFreehandStraightLine()
             removeTransientStagedTextFallback()
             stagedTextByObjectID.removeAll()
@@ -2939,6 +3039,87 @@ extension PDFKitView {
             onAcroFormChange()
         }
 
+#if os(macOS)
+        private func updateCommentScreenOverlays(previewBounds: CGRect?) {
+            guard let pdfView, let document = pdfView.document else {
+                removeCommentScreenOverlays()
+                return
+            }
+            // The initial observe() runs before the document is installed, so
+            // discover its scroll view here and reconnect after replacement.
+            let clipView = pdfView.documentView?.enclosingScrollView?.contentView
+            if commentScrollClipView !== clipView {
+                if let commentScrollObserver {
+                    NotificationCenter.default.removeObserver(commentScrollObserver)
+                    self.commentScrollObserver = nil
+                }
+                commentScrollClipView = clipView
+                if let clipView {
+                    clipView.postsBoundsChangedNotifications = true
+                    commentScrollObserver = NotificationCenter.default.addObserver(
+                        forName: NSView.boundsDidChangeNotification,
+                        object: clipView,
+                        queue: .main
+                    ) { [weak self] _ in
+                        self?.scheduleOverlayRefresh()
+                    }
+                }
+            }
+            var visibleReferences = Set<PDFAnnotationReference>()
+            for page in pdfView.visiblePages {
+                let pageIndex = document.index(for: page)
+                guard pageIndex != NSNotFound else { continue }
+                for (annotationIndex, annotation) in page.annotations.enumerated() {
+                    guard annotation.shouldDisplay,
+                          PDFAnnotationService.usesCommentScreenOverlay(annotation) else { continue }
+                    let reference = PDFAnnotationReference(
+                        pageIndex: pageIndex, annotationIndex: annotationIndex
+                    )
+                    let annotationBounds = selectedAnnotation.wrappedValue?.reference == reference
+                        ? (previewBounds ?? annotation.bounds) : annotation.bounds
+                    let frame = pdfView.convert(annotationBounds, from: page).standardized
+                    guard frame.width.isFinite, frame.height.isFinite,
+                          frame.width > 0, frame.height > 0,
+                          frame.intersects(pdfView.bounds) else { continue }
+                    visibleReferences.insert(reference)
+                    let overlay: PDFCommentScreenOverlay
+                    if let existing = commentScreenOverlays[reference] {
+                        overlay = existing
+                    } else {
+                        overlay = PDFCommentScreenOverlay(frame: frame)
+                        overlay.wantsLayer = true
+                        overlay.layerContentsRedrawPolicy = .onSetNeedsDisplay
+                        pdfView.addSubview(overlay)
+                        commentScreenOverlays[reference] = overlay
+                    }
+                    // Updating geometry sets new shape paths in display coordinates.
+                    overlay.bind(to: annotation)
+                    overlay.frame = frame
+                    overlay.commentColor = annotation.color
+                    overlay.layer?.contentsScale = pdfView.window?.backingScaleFactor ?? 2
+                    overlay.needsDisplay = true
+                }
+            }
+            let staleReferences = commentScreenOverlays.keys.filter {
+                !visibleReferences.contains($0)
+            }
+            for reference in staleReferences {
+                if let overlay = commentScreenOverlays.removeValue(forKey: reference) {
+                    overlay.unbindComment()
+                    overlay.removeFromSuperview()
+                }
+            }
+        }
+
+        private func removeCommentScreenOverlays() {
+            commentScreenOverlays.values.forEach {
+                $0.unbindComment()
+                $0.removeFromSuperview()
+            }
+            commentScreenOverlays.removeAll()
+        }
+#endif
+
         func refreshOverlay(previewBounds: CGRect? = nil) {
             guard let pdfView else {
                 setOverlayHidden(true)
@@ -2949,6 +3130,7 @@ extension PDFKitView {
             updateStagedTextOverlays()
 #endif
 #if os(macOS)
+            updateCommentScreenOverlays(previewBounds: previewBounds)
             updateStagedTextOverlays()
             synchronizeAuthoredTextboxes()
 #endif

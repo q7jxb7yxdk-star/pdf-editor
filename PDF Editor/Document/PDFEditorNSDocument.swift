@@ -57,15 +57,30 @@ final class PDFEditorNSDocument: NSDocument {
             WindowConfigurationView(postsInitialConfigurationWhenReady: fileURL != nil)
         }
         let hostingController = NSHostingController(rootView: rootView)
-        let window = PDFEditorDocumentWindow(contentViewController: hostingController)
-        window.styleMask.formUnion([
-            .titled,
-            .closable,
-            .miniaturizable,
-            .resizable,
-            .fullSizeContentView
-        ])
-        window.tabbingMode = .preferred
+        // The resizable document window controls its size; SwiftUI content
+        // must not impose its measured minimum, ideal, or maximum dimensions.
+        hostingController.sizingOptions = []
+        let window = PDFEditorDocumentWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
+            styleMask: [
+                .titled,
+                .closable,
+                .miniaturizable,
+                .resizable,
+                .fullSizeContentView
+            ],
+            backing: .buffered,
+            defer: false
+        )
+        window.tabbingMode = .automatic
+        if fileURL != nil, let screen = NSScreen.main {
+            window.setFrame(screen.visibleFrame, display: false, animate: false)
+        } else {
+            window.setContentSize(NSSize(width: 1100, height: 760))
+        }
+        // Give SwiftUI the configured window size before it installs its
+        // toolbar and evaluates the compact layout's Tools sheet.
+        window.contentViewController = hostingController
         if fileURL != nil, let screen = NSScreen.main {
             window.setFrame(screen.visibleFrame, display: false, animate: false)
         } else {
@@ -80,9 +95,6 @@ final class PDFEditorNSDocument: NSDocument {
             existingWindow.addTabbedWindow(window, ordered: .above)
             PDFEditorWindowTabBar.hideNewTabButton(in: existingWindow)
         } else {
-            if window.tabGroup?.isTabBarVisible == false {
-                window.toggleTabBar(nil)
-            }
             PDFEditorWindowTabBar.hideNewTabButton(in: window)
         }
     }
@@ -142,12 +154,8 @@ final class PDFEditorNSDocument: NSDocument {
                     to: url,
                     ofType: typeName,
                     for: saveOperation
-                ) { [weak self] error in
+                ) { [self] error in
                     Task { @MainActor in
-                        guard let self else {
-                            completionHandler(error)
-                            return
-                        }
                         self.preparedWriteData = nil
                         if let error {
                             self.saveActivityDidChange?(false)
@@ -211,11 +219,9 @@ final class PDFEditorApplicationDelegate: NSObject, NSApplicationDelegate {
     private var didScheduleInitialOpenPanel = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Document windows are grouped explicitly with addTabbedWindow.
+        NSWindow.allowsAutomaticWindowTabbing = false
         documentController = PDFEditorDocumentController()
-    }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSWindow.allowsAutomaticWindowTabbing = true
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

@@ -178,11 +178,11 @@ final class PDFEditorDocument: ReferenceFileDocument {
         persistedData = data
         authorizedPassword = nil
         presentationPassword = nil
-        pdfDocument = PDFDocument(data: data) ?? PDFDocument()
+        pdfDocument = PDFAnnotationService.makePresentationDocument(data: data) ?? PDFDocument()
     }
 
     init(data: Data) throws {
-        guard let document = PDFDocument(data: data) else {
+        guard let document = PDFAnnotationService.makePresentationDocument(data: data) else {
             throw CocoaError(.fileReadCorruptFile)
         }
 
@@ -195,7 +195,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
 
     required init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents,
-              let document = PDFDocument(data: data) else {
+              let document = PDFAnnotationService.makePresentationDocument(data: data) else {
             throw CocoaError(.fileReadCorruptFile)
         }
 
@@ -378,7 +378,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFEditingError.pageMutationFailed
         }
         if !expectedDesignedFields.isEmpty {
-            guard let savedDocument = PDFDocument(data: preparation.data) else {
+            guard let savedDocument = PDFAnnotationService.makePresentationDocument(data: preparation.data) else {
                 throw PDFFormDesignError.verificationFailed
             }
             if savedDocument.isLocked {
@@ -402,7 +402,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     ) throws {
         guard editorState.revision == expectedRevision,
               data.range(of: Data("/ByteRange".utf8)) != nil,
-              let signedDocument = PDFDocument(data: data),
+              let signedDocument = PDFAnnotationService.makePresentationDocument(data: data),
               !signedDocument.isLocked else {
             throw PDFEditingError.invalidDocument
         }
@@ -437,7 +437,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             data: preparation.data,
             password: preparation.openingPassword
         )
-        guard let preparedDocument = PDFDocument(data: preparation.data) else {
+        guard let preparedDocument = PDFAnnotationService.makePresentationDocument(data: preparation.data) else {
             throw PDFEditingError.invalidDocument
         }
         if preparedDocument.isLocked {
@@ -977,7 +977,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         presentationPageIndex: Int?,
         undoManager: UndoManager?
     ) throws {
-        guard let preparedDocument = PDFDocument(data: preparation.data) else {
+        guard let preparedDocument = PDFAnnotationService.makePresentationDocument(data: preparation.data) else {
             throw PDFEditingError.invalidDocument
         }
         if preparedDocument.isLocked {
@@ -1073,8 +1073,8 @@ final class PDFEditorDocument: ReferenceFileDocument {
             throw PDFEditingError.digitalSignatureConsentRequired
         }
         try synchronizeAcroFormChangesIfNeeded(undoManager: undoManager)
-        guard let source = PDFDocument(data: sourceData),
-              let preview = PDFDocument(data: sourceData) else {
+        guard let source = PDFAnnotationService.makePresentationDocument(data: sourceData),
+              let preview = PDFAnnotationService.makePresentationDocument(data: sourceData) else {
             throw PDFFormDesignError.verificationFailed
         }
         try unlockForBookmarkEditing(source)
@@ -1412,7 +1412,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         }
         if requiresDigitalSignatureConsent { throw PDFEditingError.digitalSignatureConsentRequired }
         guard fields != session.fields else { return }
-        guard let working = PDFDocument(data: session.sourceData) else {
+        guard let working = PDFAnnotationService.makePresentationDocument(data: session.sourceData) else {
             throw PDFFormDesignError.verificationFailed
         }
         try unlockForBookmarkEditing(working)
@@ -1427,7 +1427,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             serialized, fields: fields, password: presentationPassword ?? authorizedPassword
         )
         func reopenAndVerifyDesign(_ data: Data) throws -> PDFDocument {
-            guard let reopened = PDFDocument(data: data) else {
+            guard let reopened = PDFAnnotationService.makePresentationDocument(data: data) else {
                 throw PDFFormDesignError.verificationFailed
             }
             try unlockForBookmarkEditing(reopened)
@@ -1525,7 +1525,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
         guard sourceData == alternateData,
-              let restoredDocument = PDFDocument(data: data),
+              let restoredDocument = PDFAnnotationService.makePresentationDocument(data: data),
               (try? unlockForBookmarkEditing(restoredDocument)) != nil else {
             return
         }
@@ -1619,7 +1619,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             // of forcing PDFium preparation or serializing the edited view.
             previousData = sourceData
         }
-        guard let previousDocument = PDFDocument(data: previousData) else {
+        guard let previousDocument = PDFAnnotationService.makePresentationDocument(data: previousData) else {
             throw PDFAcroFormError.serializationFailed
         }
         if previousDocument.isLocked {
@@ -1653,7 +1653,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             in: normalizedData,
             password: authorizedPassword
         )
-        guard let verifiedDocument = PDFDocument(data: normalizedData) else {
+        guard let verifiedDocument = PDFAnnotationService.makePresentationDocument(data: normalizedData) else {
             throw PDFAcroFormError.serializationFailed
         }
         if verifiedDocument.isLocked {
@@ -1714,7 +1714,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         let exportedData = try? session.dataRepresentation(
             options: PDFExportOptions()
         ),
-        let exportedDocument = PDFDocument(data: exportedData) else {
+        let exportedDocument = PDFAnnotationService.makePresentationDocument(data: exportedData) else {
             return nil
         }
         if exportedDocument.isLocked {
@@ -2095,7 +2095,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         guard let annotationSession = session as? any PDFAnnotationEditingSession else {
             throw PDFObjectEditingError.objectMutationFailed
         }
-        guard let serializedDocument = PDFDocument(data: data) else {
+        guard let serializedDocument = PDFAnnotationService.makePresentationDocument(data: data) else {
             throw PDFEditingError.invalidDocument
         }
         if serializedDocument.isLocked {
@@ -2153,7 +2153,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             }
         }
         let verifiedData = try session.dataRepresentation(options: PDFExportOptions())
-        guard let reopened = PDFDocument(data: verifiedData) else {
+        guard let reopened = PDFAnnotationService.makePresentationDocument(data: verifiedData) else {
             throw PDFEditingError.invalidDocument
         }
         if reopened.isLocked {
@@ -2169,7 +2169,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     private func normalizePresentationSecurity(_ data: Data) throws -> Data {
-        guard let presentationDocument = PDFDocument(data: data) else {
+        guard let presentationDocument = PDFAnnotationService.makePresentationDocument(data: data) else {
             throw PDFEditingError.invalidDocument
         }
         let presentationIsEncrypted = presentationDocument.isEncrypted
@@ -2280,7 +2280,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             // PDFKit when PDFium cannot open an otherwise readable PDF.
             previousData = sourceData
         }
-        guard let workingDocument = PDFDocument(data: previousData) else {
+        guard let workingDocument = PDFAnnotationService.makePresentationDocument(data: previousData) else {
             throw PDFBookmarkMutationError.sourcePDFKitOpenFailed
         }
         let expectedPageCount = workingDocument.pageCount
@@ -2393,7 +2393,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
             }
         }
         func verifyCandidate(_ data: Data, stage: PDFBookmarkDataStage) throws -> PDFDocument {
-            guard let candidate = PDFDocument(data: data) else {
+            guard let candidate = PDFAnnotationService.makePresentationDocument(data: data) else {
                 throw PDFBookmarkMutationError.updatedPDFKitOpenFailed(
                     diagnostics: diagnostics(for: data, stage: stage)
                 )
@@ -2525,7 +2525,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
         Self.pdfiumAccessLock.lock()
         defer { Self.pdfiumAccessLock.unlock() }
         let redoData = sourceData
-        guard let restoredDocument = PDFDocument(data: data),
+        guard let restoredDocument = PDFAnnotationService.makePresentationDocument(data: data),
               (try? unlockForBookmarkEditing(restoredDocument)) != nil else {
             return
         }
@@ -2654,7 +2654,10 @@ final class PDFEditorDocument: ReferenceFileDocument {
     }
 
     private func presentationDataForPersistence() throws -> Data {
-        guard let data = pdfDocument.dataRepresentation() else {
+        let renderedData = PDFAnnotationService.withFullCommentAppearance(in: pdfDocument) {
+            pdfDocument.dataRepresentation()
+        }
+        guard let data = renderedData else {
             throw PDFEditingError.exportFailed
         }
         guard formPresentationDocument === pdfDocument else { return data }
@@ -2686,7 +2689,7 @@ final class PDFEditorDocument: ReferenceFileDocument {
 
     private func refreshPDFKitDocument(markingUnsaved: Bool) throws {
         let data = try currentData()
-        guard let document = PDFDocument(data: data) else {
+        guard let document = PDFAnnotationService.makePresentationDocument(data: data) else {
             throw PDFEditingError.invalidDocument
         }
         if document.isLocked {

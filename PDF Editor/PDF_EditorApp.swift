@@ -68,7 +68,7 @@ struct WindowConfigurationView: NSViewRepresentable {
     func makeNSView(context: Context) -> WindowAttachmentView {
         let view = WindowAttachmentView()
         view.onWindowAttached = { [weak view] window in
-            window.tabbingMode = .preferred
+            window.tabbingMode = .automatic
             guard postsInitialConfigurationWhenReady else { return }
             view?.whenWindowBecomesKey { [weak window] _ in
                 Task { @MainActor in
@@ -173,7 +173,6 @@ final class WindowAttachmentView: NSView {
 enum PDFEditorWindowTabBar {
     static func hideNewTabButton(in window: NSWindow) {
         guard let titlebarRootView = window.contentView?.superview else { return }
-        titlebarRootView.layoutSubtreeIfNeeded()
         hideNewTabButton(in: titlebarRootView)
     }
 

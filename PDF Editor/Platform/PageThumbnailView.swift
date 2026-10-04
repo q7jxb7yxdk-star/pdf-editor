@@ -23,10 +23,9 @@ struct PageThumbnailView: View {
     }
 
     private var thumbnail: Image {
-        let image = page.thumbnail(
-            of: CGSize(width: 280, height: 360),
-            for: .cropBox
-        )
+        let image = PDFAnnotationService.withFullCommentAppearance(on: page) {
+            page.thumbnail(of: CGSize(width: 280, height: 360), for: .cropBox)
+        }
 
         #if os(macOS)
         return Image(nsImage: image)

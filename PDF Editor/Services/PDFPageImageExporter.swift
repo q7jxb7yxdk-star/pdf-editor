@@ -112,7 +112,9 @@ final class PDFPageImageExporter {
         )
         try Task.checkCancellation()
 
-        let image = page.thumbnail(of: pixelSize, for: .cropBox)
+        let image = PDFAnnotationService.withFullCommentAppearance(on: page) {
+            page.thumbnail(of: pixelSize, for: .cropBox)
+        }
         guard let cgImage = cgImage(from: image) else {
             throw PDFPageImageExportError.renderingFailed(pageIndex: pageIndex)
         }
