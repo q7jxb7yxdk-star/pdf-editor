@@ -463,7 +463,7 @@ PDFium is an official open-source PDF engine, but this repository uses a checked
 - Project and scheme: `PDF Editor`.
 - Product type: application.
 - Debug and Release configurations.
-- App version: 1.1.1.
+- App version: 1.1.2.
 - Build number: 20261005.
 - Bundle identifier: `com.sunny.pdf-editor`.
 - Both platform plists set `ITSAppUsesNonExemptEncryption` to `false` after App
